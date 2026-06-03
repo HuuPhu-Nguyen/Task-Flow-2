@@ -1,21 +1,76 @@
 # TaskFlow
 
-TaskFlow is a distributed task processing system built on raw Java TCP sockets and JSON messaging.  
-A central coordinator distributes work across connected peers, which execute tasks in parallel and return results asynchronously.
+TaskFlow is a Java 21 distributed task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
 
-The system demonstrates key distributed systems concepts such as scheduling, load balancing, fault tolerance, and asynchronous communication.
+The project is designed to demonstrate production-relevant distributed systems work: task orchestration, worker scheduling, retries, timeout handling, duplicate-result rejection, broker transport design, and plugin-based extensibility.
 
 ---
 
 ## Overview
 
-TaskFlow follows a **coordinator–worker model**:
+TaskFlow follows a **coordinator-worker model**:
 
 - A **Coordinator Server** manages jobs and connected peers
 - **Peer nodes** execute tasks concurrently
 - A **GUI client** submits jobs and receives results
 
 Jobs are submitted dynamically by clients and processed in a fully asynchronous, message-driven pipeline.
+
+---
+
+## Why This Project Is Interesting
+
+- Modular Maven reactor with explicit SPI, core, transport, plugin, coordinator, worker, and GUI boundaries.
+- `ServiceLoader` plugin architecture for adding new job types without changing scheduler core.
+- Mailbox-driven scheduler that decouples network I/O from task orchestration.
+- Assignment ownership checks that reject duplicate or stale task results.
+- Retry and timeout handling with terminal job failure semantics.
+- TCP runtime for simple demos and a RabbitMQ adapter path for broker-backed execution.
+- SQLite-backed job history for local observability.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    GUI[JavaFX GUI / Client] -->|JOB_SUBMIT| Coordinator
+    CLI[CLI Worker] -->|PONG / TASK_RESULT| Coordinator
+    Coordinator --> Mailbox[Scheduler Mailbox]
+    Mailbox --> Scheduler[TaskScheduler]
+    Scheduler --> Registry[Peer Registry]
+    Scheduler --> Store[(SQLite Job History)]
+    Scheduler -->|TASK_ASSIGN| Workers[Worker Nodes]
+    Workers --> Engine[PeerExecutionEngine]
+    Engine --> Plugins[Worker Plugins]
+    Plugins --> Conversion[Conversion Plugin]
+    Scheduler -->|JOB_RESULT| GUI
+
+    RabbitMQ[(RabbitMQ Broker)] -. experimental transport .- Coordinator
+    RabbitMQ -. task/result routes .- Workers
+```
+
+TCP is the default runtime. RabbitMQ support exists as a transport adapter and runtime path, but the current broker mode is still transitional because it uses a synthetic worker-pool peer ID. Per-worker broker metrics and broker-aware backpressure are documented as next steps.
+
+---
+
+## Framework Modules
+
+TaskFlow is now organized as a Maven reactor:
+
+- `taskflow-spi` - protocol messages, job abstractions, and plugin contracts
+- `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
+- `taskflow-plugin-conversion` - image/video job and worker implementations discovered through `ServiceLoader`
+- `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
+- `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
+- `taskflow-worker` - command-line worker runtime for TCP or RabbitMQ
+- `taskflow-gui` - JavaFX demo client/worker
+
+Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.WorkerPlugin`, then register providers under `META-INF/services`.
+
+The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
+
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and worker entry points, but still needs a live integration test and a broker-aware client path.
 
 ---
 
@@ -102,9 +157,9 @@ Each task tracks:
 ## Supported Jobs
 
 Currently implemented job types:
-IMAGE_CONVERSION
-VIDEO_TRANSCODING
 
+- `IMAGE_CONVERSION`
+- `VIDEO_TRANSCODING`
 
 **Image conversion features:**
 - Converts between PNG, JPG, BMP, GIF
@@ -124,16 +179,16 @@ Each file is processed independently, allowing full parallel execution across pe
 
 ## Message Protocol
 
-All communication is done using JSON messages over TCP.
+TCP communication is done using JSON messages over sockets. RabbitMQ communication uses the same protocol messages wrapped in broker envelopes.
 
 ### Message Types
 
-- `JOB_SUBMIT` — submit a new job
-- `TASK_ASSIGN` — assign a task to a peer
-- `TASK_RESULT` — return result from peer
-- `JOB_RESULT` — final aggregated result
-- `PING` — heartbeat from server
-- `PONG` — heartbeat response from peer
+- `JOB_SUBMIT` - submit a new job
+- `TASK_ASSIGN` - assign a task to a peer
+- `TASK_RESULT` - return result from peer
+- `JOB_RESULT` - final aggregated result
+- `PING` - heartbeat from server
+- `PONG` - heartbeat response from peer
 
 ---
 
@@ -182,23 +237,94 @@ The JavaFX GUI (`PeerApp`) acts as both:
 - Peer scoring and task limits
 
 ### Extensibility
-- New job types via factory pattern
-- New processors via `TaskProcessor` interface
+- New job types via `TaskPlugin` and Java `ServiceLoader`
+- New worker processors via `WorkerPlugin` and `TaskProcessor`
+
+---
+
+## Execution Guarantees
+
+TaskFlow currently provides:
+
+- At-least-once task execution semantics
+- Timeout + retry handling with terminal task failure after max retries
+- Duplicate/stale result rejection based on assignment ownership
+- Explicit job failure when any task reaches terminal failed state
+
+Detailed guarantee definitions are documented in:
+`docs/EXECUTION_GUARANTEES.md`
 
 ---
 
 ## Dependencies
 
-- Gson — JSON serialization
-- Apache PDFBox — PDF rendering
-- JavaFX — GUI
-- JavaCV / FFmpeg — video transcoding
+- Gson - JSON serialization
+- Apache PDFBox - PDF rendering
+- JavaFX - GUI
+- JavaCV / FFmpeg - video transcoding
+- RabbitMQ Java Client - broker transport adapter
+
+---
+
+## RabbitMQ Transport
+
+TCP is the default transport. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or worker against RabbitMQ.
+
+The RabbitMQ transport module uses the following routes:
+
+- `jobs.submit` -> `taskflow.jobs`
+- `tasks.assign` -> `taskflow.tasks`
+- `tasks.result` -> `taskflow.task-results`
+- `jobs.result` -> `taskflow.job-results`
+- `heartbeats` -> `taskflow.heartbeats`
+
+Configuration can be supplied through environment variables:
+
+- `TASKFLOW_RABBITMQ_HOST`
+- `TASKFLOW_RABBITMQ_PORT`
+- `TASKFLOW_RABBITMQ_USERNAME`
+- `TASKFLOW_RABBITMQ_PASSWORD`
+- `TASKFLOW_RABBITMQ_VHOST`
+- `TASKFLOW_RABBITMQ_EXCHANGE`
+- `TASKFLOW_RABBITMQ_QUEUE_PREFIX`
+- `TASKFLOW_RABBITMQ_DURABLE`
+- `TASKFLOW_RABBITMQ_PREFETCH`
+
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable queues enabled, and prefetch `3`.
+
+Run the RabbitMQ coordinator on Windows PowerShell:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+.\mvnw.cmd -pl taskflow-coordinator exec:java
+```
+
+Run a RabbitMQ worker on Windows PowerShell:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+.\mvnw.cmd -pl taskflow-worker exec:java
+```
+
+The current RabbitMQ runtime uses a synthetic worker-pool peer ID so the existing scheduler ownership checks still work. This is a transitional design; per-worker metrics and broker-aware backpressure should be added next.
+
+---
+
+## Known Limitations
+
+- RabbitMQ mode is functional but transitional; it does not yet model individual broker workers for per-worker metrics.
+- RabbitMQ integration tests against a live broker are not implemented yet.
+- The JavaFX GUI currently submits through TCP, not RabbitMQ.
+- Video transcoding currently records video frames only; audio preservation is a planned improvement.
+- Runtime logging still uses console output in several paths and should be migrated to SLF4J/Logback.
+- SQLite is the current local history store; PostgreSQL/Flyway support is planned for durable production-style state management.
 
 ---
 
 ## Future Improvements
 
-- Persistent job tracking (database)
+- PostgreSQL/Flyway state-store implementation
+- Add live RabbitMQ integration tests and a broker-aware client submitter
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard
@@ -233,7 +359,7 @@ For multiple computers, start the coordinator on one machine. On every GUI or pe
 Make sure you have the following installed:
 
 - **Java 21 or higher**
-- **Maven 3.9+**
+- **Maven 3.9+**, or use the included Maven wrapper
 
 Check installation:
 
@@ -256,8 +382,10 @@ cd TaskFlow
 ### 2. Build the Project
 
 ```bash
-mvn clean package
+./mvnw clean install
 ```
+
+On Windows PowerShell, use `.\mvnw.cmd clean install`.
 
 ---
 
@@ -266,10 +394,14 @@ mvn clean package
 In one terminal:
 
 ```bash
-mvn exec:java
+./mvnw -pl taskflow-coordinator exec:java
 ```
 
-The coordinator main class is configured in `pom.xml`, so no additional CLI property is needed.
+On Windows PowerShell:
+
+```powershell
+.\mvnw.cmd -pl taskflow-coordinator exec:java
+```
 
 ---
 
@@ -278,7 +410,13 @@ The coordinator main class is configured in `pom.xml`, so no additional CLI prop
 In another terminal:
 
 ```bash
-mvn javafx:run
+./mvnw -pl taskflow-gui javafx:run
+```
+
+On Windows PowerShell:
+
+```powershell
+.\mvnw.cmd -pl taskflow-gui javafx:run
 ```
 
 ---
@@ -300,7 +438,7 @@ Inside the GUI:
 The GUI also works as a peer, so this is optional. Use this when you want another machine or terminal to contribute worker capacity without opening the GUI:
 
 ```bash
-mvn exec:java -Dexec.mainClass=peer.PeerNode -Dexec.args="localhost 6789"
+./mvnw -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
 ```
 
 Replace `localhost` with the coordinator machine's IP address when running across computers.

@@ -1,0 +1,95 @@
+package server.job;
+
+import protocol.JobSubmitMessage;
+import protocol.TaskAssignMessage;
+
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public abstract class EmbarrassinglyParallelJob<T, R> {
+    protected final String jobId;
+    protected final String requesterNodeId;
+    protected final String taskType;
+
+    // Mapping TaskID to the internal tracking unit
+    protected final Map<String, TaskUnit<T>> tasks = new ConcurrentHashMap<>();
+
+    protected final AtomicInteger completedCount = new AtomicInteger(0);
+
+    public EmbarrassinglyParallelJob(String jobId, String requesterNodeId, String taskType) {
+        this.jobId = jobId;
+        this.requesterNodeId = requesterNodeId;
+        this.taskType = taskType;
+    }
+
+    public abstract void initializeTasks(JobSubmitMessage message);
+
+    public record TaskCompletion(boolean accepted, long durationMs) {}
+
+    /**
+     * Idempotent result path:
+     * only accepts a result from the currently assigned peer for this task.
+     */
+    public synchronized TaskCompletion recordResult(String taskId, String reportingPeerId, Object rawResultData) {
+        TaskUnit<T> task = tasks.get(taskId);
+
+        if (task == null) {
+            return new TaskCompletion(false, -1);
+        }
+
+        long durationMs = task.markCompletedBy(reportingPeerId);
+        if (durationMs < 0) {
+            return new TaskCompletion(false, -1);
+        }
+
+        R resultData = parseResult(rawResultData);
+        onTaskSuccess(task, resultData);
+        completedCount.incrementAndGet();
+        return new TaskCompletion(true, durationMs);
+    }
+
+    public boolean isJobComplete() {
+        return !tasks.isEmpty() && completedCount.get() == tasks.size();
+    }
+
+    public boolean hasTerminalFailure() {
+        return tasks.values().stream().anyMatch(t -> t.getStatus() == TaskUnit.TaskStatus.FAILED);
+    }
+
+    public int getFailedCount() {
+        return (int) tasks.values().stream()
+                .filter(t -> t.getStatus() == TaskUnit.TaskStatus.FAILED)
+                .count();
+    }
+
+    protected abstract void onTaskSuccess(TaskUnit<T> task, R resultData);
+
+    public abstract List<Object> aggregateAndSendResult();
+
+    protected abstract R parseResult(Object payloads);
+
+    public List<TaskUnit<T>> getPendingTasks() {
+        return tasks.values().stream()
+                .filter(t -> t.getStatus() == TaskUnit.TaskStatus.PENDING)
+                .toList();
+    }
+
+    public String getJobId() {
+        return jobId;
+    }
+
+    public String getTaskType(){
+        return taskType;
+    }
+
+    public Map<String, TaskUnit<T>> getTasks() {
+        return tasks;
+    }
+
+    public String getRequesterNodeId() {
+        return requesterNodeId;
+    }
+
+    public abstract TaskAssignMessage createTaskAssignMessage(TaskUnit<?> task);
+}

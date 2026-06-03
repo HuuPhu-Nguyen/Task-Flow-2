@@ -33,3 +33,10 @@ out/
 
 # Maven files
 target/
+
+# TaskFlow runtime artifacts
+taskflow.db
+taskflow.db-shm
+taskflow.db-wal
+java/in_PEER_*/
+java/out_PEER_*/
