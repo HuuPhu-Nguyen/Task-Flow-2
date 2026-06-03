@@ -59,7 +59,7 @@ public class PeerApp extends Application {
 
             // Initialize Engine with the same unique ID
             engine = new PeerExecutionEngine(sessionId);
-            System.out.println("GUI worker registered task processors: " + engine.getRegisteredTaskTypes());
+            System.out.println("GUI peer registered task processors: " + engine.getRegisteredTaskTypes());
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -406,7 +406,7 @@ public class PeerApp extends Application {
         MessageDispatcher dispatcher = new MessageDispatcher();
         dispatcher.register(MessageType.PING, new messaging.handlers.PingHandler());
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {
-            // Offload to worker pool
+            // Offload execution so the networking thread stays responsive.
             engine.submitTask((TaskAssignMessage) message, out);
         });
         dispatcher.register(MessageType.JOB_RESULT, (message, writer) -> {
