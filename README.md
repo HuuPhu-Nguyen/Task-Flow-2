@@ -1,26 +1,27 @@
 # TaskFlow
 
-TaskFlow is a Java 21 distributed task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
+TaskFlow is a Java 21 coordinated peer-to-peer task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
 
-The project is designed to demonstrate production-relevant distributed systems work: task orchestration, worker scheduling, retries, timeout handling, duplicate-result rejection, broker transport design, and plugin-based extensibility.
+The project is designed to demonstrate production-relevant distributed systems work: task orchestration, peer scheduling, retries, timeout handling, duplicate-result rejection, broker transport design, and plugin-based extensibility.
 
 ---
 
 ## Overview
 
-TaskFlow follows a **coordinator-worker model**:
+TaskFlow follows a **coordinated peer-to-peer model**:
 
-- A **Coordinator Server** manages jobs and connected peers
-- **Peer nodes** execute tasks concurrently
-- A **GUI client** submits jobs and receives results
+- A **Coordinator Server** manages job state, task assignment, retries, and result aggregation.
+- **Peer nodes** can submit jobs and execute tasks assigned by the coordinator.
+- The **JavaFX peer** acts as both a job submitter and a task executor.
+- Command-line peers can be started to add more compute capacity.
 
-Jobs are submitted dynamically by clients and processed in a fully asynchronous, message-driven pipeline.
+Jobs are submitted dynamically by peers and processed in a fully asynchronous, message-driven pipeline.
 
 ---
 
 ## Why This Project Is Interesting
 
-- Modular Maven reactor with explicit SPI, core, transport, plugin, coordinator, worker, and GUI boundaries.
+- Modular Maven reactor with explicit SPI, core, transport, plugin, coordinator, peer runtime, and GUI boundaries.
 - `ServiceLoader` plugin architecture for adding new job types without changing scheduler core.
 - Mailbox-driven scheduler that decouples network I/O from task orchestration.
 - Assignment ownership checks that reject duplicate or stale task results.
@@ -34,20 +35,29 @@ Jobs are submitted dynamically by clients and processed in a fully asynchronous,
 
 ```mermaid
 flowchart LR
-    GUI[JavaFX GUI / Client] -->|JOB_SUBMIT| Coordinator
-    CLI[CLI Worker] -->|PONG / TASK_RESULT| Coordinator
+    PeerA[GUI Peer\nsubmits jobs + executes tasks] -->|JOB_SUBMIT| Coordinator
+    PeerA -->|PONG / TASK_RESULT| Coordinator
+    PeerB[CLI Peer\nexecutes tasks] -->|PONG / TASK_RESULT| Coordinator
+    PeerC[Additional Peer\nexecutes tasks] -->|PONG / TASK_RESULT| Coordinator
     Coordinator --> Mailbox[Scheduler Mailbox]
     Mailbox --> Scheduler[TaskScheduler]
     Scheduler --> Registry[Peer Registry]
     Scheduler --> Store[(SQLite Job History)]
-    Scheduler -->|TASK_ASSIGN| Workers[Worker Nodes]
-    Workers --> Engine[PeerExecutionEngine]
-    Engine --> Plugins[Worker Plugins]
+    Scheduler -->|TASK_ASSIGN| PeerA
+    Scheduler -->|TASK_ASSIGN| PeerB
+    Scheduler -->|TASK_ASSIGN| PeerC
+    PeerA --> EngineA[PeerExecutionEngine]
+    PeerB --> EngineB[PeerExecutionEngine]
+    PeerC --> EngineC[PeerExecutionEngine]
+    EngineA --> Plugins[Task Processor Plugins]
+    EngineB --> Plugins
+    EngineC --> Plugins
     Plugins --> Conversion[Conversion Plugin]
-    Scheduler -->|JOB_RESULT| GUI
+    Scheduler -->|JOB_RESULT| PeerA
 
     RabbitMQ[(RabbitMQ Broker)] -. experimental transport .- Coordinator
-    RabbitMQ -. task/result routes .- Workers
+    RabbitMQ -. task/result routes .- PeerB
+    RabbitMQ -. task/result routes .- PeerC
 ```
 
 TCP is the default runtime. RabbitMQ support exists as a transport adapter and runtime path, but the current broker mode is still transitional because it uses a synthetic worker-pool peer ID. Per-worker broker metrics and broker-aware backpressure are documented as next steps.
@@ -60,17 +70,17 @@ TaskFlow is now organized as a Maven reactor:
 
 - `taskflow-spi` - protocol messages, job abstractions, and plugin contracts
 - `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
-- `taskflow-plugin-conversion` - image/video job and worker implementations discovered through `ServiceLoader`
+- `taskflow-plugin-conversion` - image/video job and peer-side processor implementations discovered through `ServiceLoader`
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
-- `taskflow-worker` - command-line worker runtime for TCP or RabbitMQ
-- `taskflow-gui` - JavaFX demo client/worker
+- `taskflow-worker` - command-line peer runtime for TCP or RabbitMQ
+- `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
 
 Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.WorkerPlugin`, then register providers under `META-INF/services`.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and worker entry points, but still needs a live integration test and a broker-aware client path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and command-line peer entry points, but still needs a live integration test and a broker-aware peer submit path.
 
 ---
 
@@ -200,17 +210,17 @@ TCP communication is done using JSON messages over sockets. RabbitMQ communicati
 4. Tasks are distributed to peers (`TASK_ASSIGN`)
 5. Peers execute tasks and return results (`TASK_RESULT`)
 6. The scheduler aggregates results
-7. The coordinator sends a `JOB_RESULT` back to the client
+7. The coordinator sends a `JOB_RESULT` back to the submitting peer
 8. The GUI allows the user to save output files
 
 ---
 
-## GUI Client
+## GUI Peer
 
 The JavaFX GUI (`PeerApp`) acts as both:
 
-- a **job client** (submits work)
-- a **worker peer** (executes tasks)
+- a **job-submitting peer**
+- a **task-executing peer**
 
 **Features:**
 - Upload files
@@ -238,7 +248,7 @@ The JavaFX GUI (`PeerApp`) acts as both:
 
 ### Extensibility
 - New job types via `TaskPlugin` and Java `ServiceLoader`
-- New worker processors via `WorkerPlugin` and `TaskProcessor`
+- New peer-side processors via `WorkerPlugin` and `TaskProcessor`
 
 ---
 
@@ -268,7 +278,7 @@ Detailed guarantee definitions are documented in:
 
 ## RabbitMQ Transport
 
-TCP is the default transport. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or worker against RabbitMQ.
+TCP is the default transport. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or command-line peer against RabbitMQ.
 
 The RabbitMQ transport module uses the following routes:
 
@@ -299,7 +309,7 @@ $env:TASKFLOW_TRANSPORT = "rabbitmq"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-Run a RabbitMQ worker on Windows PowerShell:
+Run a RabbitMQ command-line peer on Windows PowerShell:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
@@ -312,7 +322,7 @@ The current RabbitMQ runtime uses a synthetic worker-pool peer ID so the existin
 
 ## Known Limitations
 
-- RabbitMQ mode is functional but transitional; it does not yet model individual broker workers for per-worker metrics.
+- RabbitMQ mode is functional but transitional; it does not yet model individual broker peers for per-peer metrics.
 - RabbitMQ integration tests against a live broker are not implemented yet.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
@@ -433,9 +443,9 @@ Inside the GUI:
 
 ---
 
-### Optional: Start a Command-Line Worker Peer
+### Optional: Start a Command-Line Peer
 
-The GUI also works as a peer, so this is optional. Use this when you want another machine or terminal to contribute worker capacity without opening the GUI:
+The GUI also executes assigned tasks, so this is optional. Use this when you want another machine or terminal to contribute compute capacity without opening the GUI:
 
 ```bash
 ./mvnw -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
