@@ -1,6 +1,6 @@
 # TaskFlow Framework Migration Plan
 
-Last updated: 2026-06-03 21:50 Asia/Bangkok
+Last updated: 2026-06-03 23:38 Asia/Bangkok
 
 ## Showcase Objective
 
@@ -8,7 +8,7 @@ TaskFlow should be developed and presented as a resume-grade distributed systems
 
 The target positioning is:
 
-> TaskFlow is a Java 21 distributed task execution platform with pluggable job processors, TCP and RabbitMQ transports, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
+> TaskFlow is a Java 21 coordinated peer-to-peer distributed task execution platform with pluggable job processors, TCP and RabbitMQ transports, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
 
 Professional standard for this project means:
 
@@ -25,39 +25,57 @@ The project should compete on evidence: clean repository, tests, demo, metrics, 
 
 ## Current State
 
-TaskFlow has moved from a single Maven demo project into a modular framework foundation for distributed task processing.
+TaskFlow has moved from a single Maven demo project into a modular framework foundation for coordinated peer-to-peer distributed task processing.
 
 Completed so far:
 
 - Converted the project into a Maven reactor with separate SPI, core, plugin, transport, coordinator, worker, and GUI modules.
-- Added plugin contracts for coordinator-side job creation and worker-side task processing.
+- Added plugin contracts for coordinator-side job creation and peer-side task processing.
 - Moved image and video conversion into a concrete conversion plugin module loaded through Java ServiceLoader.
 - Removed hardcoded image/video job branching from core job creation.
-- Added a worker processor discovery path through ServiceLoader.
+- Added a peer processor discovery path through ServiceLoader.
 - Added a TransportConnection abstraction so core peer tracking no longer depends directly on java.net.Socket.
 - Added a SchedulerOutput abstraction so the scheduler can dispatch through TCP or a broker transport.
 - Added a RabbitMQ transport module with topology declaration, JSON message envelopes, publish/subscribe, manual ack, requeue, reject, and prefetch configuration.
-- Added RabbitMQ coordinator and worker runtime entry points.
+- Added RabbitMQ coordinator and command-line peer runtime entry points.
 - Added TASKFLOW_TRANSPORT mode selection while keeping TCP as the default runtime.
 - Updated README runtime notes for the current transport state.
 
 Current runtime status:
 
-- TCP is still the default coordinator/worker transport.
+- TCP is still the default coordinated peer runtime.
+- The JavaFX GUI is a peer: it can submit jobs and execute assigned tasks in the same runtime.
+- The command-line peer currently executes assigned tasks; `PeerNode` has submit helpers, but the CLI does not yet expose a polished job-submission command.
 - RabbitMQ can be selected with TASKFLOW_TRANSPORT=rabbitmq.
-- RabbitMQ coordinator/worker runtime exists, but still needs a live broker integration test and a broker-aware client submitter.
+- RabbitMQ coordinator/peer runtime exists, but it is transitional and does not yet model first-class RabbitMQ peers.
+- RabbitMQ can support the coordinated peer-to-peer objective, but the current implementation still needs per-peer identity, peer-specific task/result routing, broker-aware peer submission, and a live broker integration test.
+- Local RabbitMQ was not running in the latest session: localhost:5672 was not reachable on 2026-06-03 at 23:38 Asia/Bangkok.
 - Runtime state store is still SQLite through DatabaseManager.
 - PostgreSQL/Flyway migration has not started.
-- GUI is still a JavaFX TCP demo client/worker. It is not yet a RabbitMQ client.
+- GUI is still a JavaFX TCP peer. It is not yet a RabbitMQ peer.
 
 Showcase readiness status:
 
 - The core architectural direction is strong: modular Maven reactor, SPI contracts, plugin discovery, scheduler output abstraction, and transport abstraction.
-- The repository is not ready to publish yet because the refactor is still represented as untracked modules plus deleted legacy files in Git.
-- Runtime DB artifacts were previously tracked and must be removed from Git tracking before publishing.
-- README currently contains visible encoding corruption and must be fixed before being shown to recruiters or reviewers.
-- The current tests pass, but coverage is concentrated on unit-level state/codec behavior; scheduler failure paths and end-to-end transport flows need stronger proof.
-- RabbitMQ mode is transitional and should be presented as experimental until worker identity, acknowledgement timing, and integration tests are fixed.
+- The modular refactor has been committed and pushed to the new Task-Flow-2 repository through commit `ae1f564`.
+- Local `main` tracks `task-flow-2/main` and is ahead by one local commit: `7218b42 Align GUI peer terminology`.
+- `origin` still points to the older TaskFlow repository. Use the `task-flow-2` remote for the new showcase repo unless intentionally updating the old repo.
+- Runtime DB artifacts were removed from Git tracking and should remain ignored.
+- README encoding and architecture wording have been corrected.
+- The current tests pass, but coverage is still concentrated on unit-level state/codec behavior; end-to-end transport flows need stronger proof.
+- RabbitMQ mode is transitional and should be presented as experimental until broker peer identity, acknowledgement timing, and integration tests are fixed.
+
+## Next-Day Handoff
+
+Start here before writing new feature code:
+
+- Run `git status --short --branch`.
+- Expect `main` to be clean but ahead of `task-flow-2/main` by one local commit unless it has been pushed.
+- Decide whether to push local commit `7218b42 Align GUI peer terminology` to `task-flow-2`.
+- Use the wording "coordinated peer-to-peer" for the main architecture. Do not describe the TCP/GUI runtime as producer/worker.
+- Be precise about RabbitMQ: RabbitMQ as a broker can support coordinated peer-to-peer, but the current implementation is still broker-backed task execution with a synthetic `RABBITMQ_WORKER_POOL` peer.
+- Do not present RabbitMQ as fully peer-to-peer until per-peer broker identity, peer-specific task assignment, peer result routing, and broker-aware job submission are implemented and tested.
+- If `.\mvnw.cmd clean test` fails while deleting `target`, check for a local Windows file lock before treating it as a source failure.
 
 ## Current Maven Modules
 
@@ -90,10 +108,10 @@ Root pom.xml is packaging=pom and includes:
   Coordinator-side plugin contract for creating jobs from JobSubmitMessage.
 
 - taskflow-spi/src/main/java/peer/engine/WorkerPlugin.java
-  Worker-side plugin contract for creating task processors.
+  Historical peer-side plugin contract for creating task processors.
 
 - taskflow-spi/src/main/java/peer/engine/TaskProcessor.java
-  Worker task execution contract.
+  Peer task execution contract.
 
 - taskflow-spi/src/main/java/server/job/EmbarrassinglyParallelJob.java
   Base abstraction for jobs that split into independent task units.
@@ -166,7 +184,7 @@ Root pom.xml is packaging=pom and includes:
   ServiceLoader provider registration for coordinator-side job plugins.
 
 - taskflow-plugin-conversion/src/main/resources/META-INF/services/peer.engine.WorkerPlugin
-  ServiceLoader provider registration for worker-side processor plugins.
+  ServiceLoader provider registration for peer-side processor plugins.
 
 ### RabbitMQ Transport
 
@@ -205,21 +223,21 @@ Root pom.xml is packaging=pom and includes:
 - taskflow-coordinator/src/main/java/server/transport/TcpPeerConnection.java
   TCP implementation of TransportConnection.
 
-### Worker Runtime
+### Command-Line Peer Runtime
 
 - taskflow-worker/src/main/java/peer/PeerNode.java
-  Main worker entry point. Defaults to TCP and delegates to RabbitMqPeerNode when TASKFLOW_TRANSPORT=rabbitmq.
+  Main command-line peer entry point. Defaults to TCP and delegates to RabbitMqPeerNode when TASKFLOW_TRANSPORT=rabbitmq.
 
 - taskflow-worker/src/main/java/peer/RabbitMqPeerNode.java
-  RabbitMQ worker runtime. Subscribes to TASK_ASSIGN, executes tasks, publishes TASK_RESULT, and relies on transport auto-ack after successful handler completion.
+  RabbitMQ peer execution runtime. Subscribes to TASK_ASSIGN, executes tasks, publishes TASK_RESULT, and relies on transport auto-ack after successful handler completion.
 
 - taskflow-worker/src/main/java/peer/engine/PeerExecutionEngine.java
-  Worker execution engine. Discovers WorkerPlugin implementations through ServiceLoader and exposes executeTask for broker runtime plus submitTask for TCP runtime.
+  Peer execution engine. Discovers WorkerPlugin implementations through ServiceLoader and exposes executeTask for broker runtime plus submitTask for TCP runtime.
 
 ### GUI Runtime
 
 - taskflow-gui/src/main/java/GUI/PeerApp.java
-  JavaFX demo client/worker. Still uses TCP.
+  JavaFX peer. Submits jobs and executes assigned tasks over TCP.
 
 - taskflow-gui/src/main/java/GUI/FileUtils.java
   GUI helper utilities.
@@ -249,27 +267,37 @@ RabbitMQ configuration defaults:
 Runtime selector:
 
 - TASKFLOW_TRANSPORT=tcp uses the existing TCP runtime.
-- TASKFLOW_TRANSPORT=rabbitmq uses RabbitMQ coordinator/worker runtime.
+- TASKFLOW_TRANSPORT=rabbitmq uses RabbitMQ coordinator/peer runtime.
 - If TASKFLOW_TRANSPORT is unset, TCP is used.
 
-Transitional broker-mode compromise:
+Current transitional broker-mode compromise:
 
 - RabbitMQ runtime registers one synthetic peer: RABBITMQ_WORKER_POOL.
 - The scheduler still owns task assignment and result ownership checks.
 - RabbitMqSchedulerOutput rewrites assigned TASK_ASSIGN node IDs to the selected synthetic peer.
 - RabbitMqTaskCoordinatorServer normalizes TASK_RESULT sender IDs to RABBITMQ_WORKER_POOL.
 - This keeps existing scheduler semantics intact for the first broker runtime.
-- Limitation: per-worker metrics are not accurate in broker mode yet.
+- Limitation: per-peer metrics are not accurate in broker mode yet.
 - Limitation: broker concurrency is effectively capped by MAX_TASKS_PER_PEER for the synthetic peer, currently 3.
+- Limitation: task assignments use a shared broker route, so RabbitMQ mode behaves more like a broker-backed execution pool than coordinated peer-to-peer.
+- Limitation: final JOB_RESULT routing back to the submitting RabbitMQ peer is not finished.
+
+Target coordinated peer-to-peer RabbitMQ design:
+
+- Each RabbitMQ peer starts with a stable unique peer ID.
+- Each RabbitMQ peer can publish JOB_SUBMIT and consume TASK_ASSIGN.
+- The coordinator tracks RabbitMQ peers individually through heartbeats or explicit registration messages.
+- Task assignment must route to the selected peer, not to a shared execution queue.
+- Each peer publishes TASK_RESULT with its own peer ID so scheduler ownership, metrics, and retries remain accurate.
+- JOB_RESULT must route back to the submitting peer through a peer-specific result queue or reply route.
+- Broker acknowledgement should happen only after the message is safely accepted by the scheduler/state path.
+- A live RabbitMQ integration profile should verify topology declaration, publish, consume, ack, requeue, reject, and end-to-end job completion.
 
 ## Why RabbitMQ First, Not Kafka
 
-RabbitMQ fits the current TaskFlow model because TaskFlow is a work-queue system:
+RabbitMQ still fits the coordinated TaskFlow model because it provides message routing, per-message acknowledgement, backpressure, retry, and dead-letter semantics without forcing the project into retained event-stream architecture.
 
-- a coordinator produces units of work
-- workers compete for tasks
-- task attempts need acknowledgement
-- failed or unacked deliveries should be retried or rejected
+In the target design, the broker is transport infrastructure, not the architecture. Peers still remain peers: each can submit work, receive assigned work, execute tasks, and receive final job results.
 
 Kafka is better for retained event streams, replay, and event pipelines. It can support task processing, but task leasing, per-task acknowledgement, retry, and dead-letter handling require more framework code.
 
@@ -331,13 +359,13 @@ Run TCP coordinator, default mode:
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-Run TCP command-line worker:
+Run TCP command-line peer:
 
 ```powershell
 .\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
 ```
 
-Run GUI TCP client/worker:
+Run GUI TCP peer:
 
 ```powershell
 .\mvnw.cmd -pl taskflow-gui javafx:run
@@ -350,7 +378,7 @@ $env:TASKFLOW_TRANSPORT = "rabbitmq"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-Run RabbitMQ worker after RabbitMQ is available at localhost:5672:
+Run RabbitMQ command-line peer after RabbitMQ is available at localhost:5672:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
@@ -371,19 +399,22 @@ Review-critical showcase gaps:
 - Runtime paths still use System.out, System.err, and printStackTrace instead of a logging framework.
 - Several comments explain obvious mechanics instead of documenting invariants, tradeoffs, or non-obvious behavior.
 - No one-command demo exists yet.
-- No architecture diagram or demo video exists yet.
+- README architecture diagram exists, but it must stay aligned with the coordinated peer-to-peer model.
+- No demo video exists yet.
 - No CI pipeline exists yet.
 - No benchmark or throughput comparison exists yet.
 - No fault-injection demo proves retry and recovery behavior yet.
-- No clean-clone validation has been recorded yet.
+- No clean-clone validation from the Task-Flow-2 remote has been recorded yet.
 
 RabbitMQ runtime gaps:
 
 - No live RabbitMQ integration test yet.
-- No RabbitMQ client submitter yet, so the GUI still submits jobs only through TCP.
-- Broker mode uses one synthetic peer instead of tracking each worker separately.
+- No RabbitMQ peer submitter yet, so the GUI still submits jobs only through TCP.
+- Broker mode uses one synthetic peer instead of tracking each broker peer separately.
 - Broker mode concurrency is currently limited by the synthetic peer and MAX_TASKS_PER_PEER.
 - Job submit messages are acked after enqueueing into the scheduler mailbox, not after durable persistence.
+- Task assignment uses a shared broker queue instead of peer-specific routing.
+- JOB_RESULT routing back to the submitting RabbitMQ peer is not finished.
 - No dead-letter exchange configuration yet.
 
 Framework gaps:
@@ -394,11 +425,12 @@ Framework gaps:
 - No restart recovery workflow exists yet.
 - GUI is not separated into a pure client module.
 
-Repo hygiene gaps:
+Repo hygiene notes:
 
-- The worktree contains many deletes under src/main/java because code was moved into modules.
-- PLAN.md and module directories are currently untracked until committed.
-- taskflow.db and taskflow.db-shm/taskflow.db-wal were tracked runtime artifacts before .gitignore cleanup.
+- Local `main` currently tracks `task-flow-2/main`.
+- Local `main` is ahead by one commit: `7218b42 Align GUI peer terminology`.
+- `origin` still points to the older TaskFlow repository.
+- `taskflow.db` may exist locally as an ignored runtime artifact; do not add it back to Git.
 - Do not run destructive cleanup commands without explicit user approval.
 
 Current .gitignore now ignores:
@@ -409,7 +441,7 @@ Current .gitignore now ignores:
 - java/in_PEER_*/
 - java/out_PEER_*/
 
-Suggested safe cleanup later, only if the user wants runtime DB files removed from Git tracking:
+Runtime DB files have already been removed from Git tracking in the modular refactor commit. If they ever reappear as tracked files, remove them from the index rather than deleting local runtime data:
 
 ```powershell
 git rm --cached taskflow.db taskflow.db-shm taskflow.db-wal
@@ -423,15 +455,11 @@ Recommended next goal: make the repository showcase-ready before adding more fea
 
 Objective: a reviewer can clone the repository, read the README, and immediately understand that this is a serious distributed systems project.
 
-- Commit or stage the modular refactor cleanly.
-- Remove tracked runtime artifacts from Git tracking.
+- Push or intentionally hold local commit `7218b42 Align GUI peer terminology`.
+- Validate a fresh clone from `https://github.com/HuuPhu-Nguyen/Task-Flow-2.git`.
 - Verify `.gitignore` excludes generated files, IDE files, runtime DBs, temporary peer folders, and build outputs.
-- Fix README encoding corruption.
-- Rewrite README opening around the stronger platform positioning.
-- Add a high-level architecture diagram to README.
-- Add a short module responsibility table.
-- Add a "Why this is technically interesting" section.
-- Add a "Known limitations" section that is accurate and professional.
+- Keep README architecture wording focused on coordinated peer-to-peer, not producer/worker.
+- Add demo media, benchmark numbers, and clean-clone proof.
 - Confirm `.\mvnw.cmd clean test` succeeds from a clean clone.
 
 Acceptance:
@@ -439,7 +467,7 @@ Acceptance:
 - `git status --short` contains only intentional source/doc changes before commit.
 - No runtime DB, target output, IDE workspace state, or temporary conversion folders are tracked.
 - README renders cleanly on GitHub.
-- A new reader can identify the coordinator, scheduler, worker, plugin, transport, and persistence boundaries within two minutes.
+- A new reader can identify the coordinator, scheduler, peer runtime, plugin, transport, and persistence boundaries within two minutes.
 
 ### Slice 2: Correctness And Safety Fixes
 
@@ -466,7 +494,7 @@ Objective: make runtime behavior easy to inspect during demos and credible in co
 
 - Replace direct System.out/System.err/printStackTrace usage in runtime paths with SLF4J and Logback.
 - Keep scheduler event logs structured.
-- Add clear metrics for queue depth, active jobs, dispatch latency, retries, success/failure counts, and worker utilization.
+- Add clear metrics for queue depth, active jobs, dispatch latency, retries, success/failure counts, and peer utilization.
 - Consider a simple HTTP metrics endpoint or a metrics CLI output mode.
 - Remove stale or mechanical comments and keep only comments that explain invariants or tradeoffs.
 
@@ -480,17 +508,17 @@ Acceptance:
 
 Objective: demonstrate the distributed-system value instead of only describing it.
 
-- Add Docker Compose for RabbitMQ, coordinator, and multiple workers.
+- Add Docker Compose for RabbitMQ, coordinator, and multiple peers.
 - Add a sample job input set small enough to run quickly.
 - Add a CLI demo path that can submit a job and receive a result without the GUI.
-- Add a fault-injection script that kills one worker during execution and shows retry/recovery.
+- Add a fault-injection script that kills one peer during execution and shows retry/recovery.
 - Add a short demo video or GIF for the README.
-- Add a benchmark section comparing 1 worker vs 3 workers vs 5 workers.
+- Add a benchmark section comparing 1 peer vs 3 peers vs 5 peers.
 
 Acceptance:
 
 - A reviewer can run the demo with one command or follow a short script.
-- The demo visibly distributes work across workers.
+- The demo visibly distributes work across peers.
 - The fault-injection demo proves timeout/retry behavior.
 - README includes concrete benchmark numbers.
 
@@ -501,15 +529,15 @@ Objective: make RabbitMQ mode honest, tested, and meaningfully distributed.
 - Add a live RabbitMQ integration profile.
 - Keep the integration profile disabled by default.
 - Test topology declaration, publish, consume, ack, requeue, and reject against a real broker.
-- Add a broker-aware client submitter.
-- Replace the single synthetic peer with broker-aware worker identity, worker slots, or explicit broker backpressure.
+- Add a broker-aware peer submitter.
+- Replace the single synthetic peer with broker-aware peer identity, peer capacity, or explicit broker backpressure.
 - Revisit acknowledgement timing so submitted jobs are not acked before durable scheduler/state-store acceptance.
 - Add dead-letter exchange and dead-letter queue support.
 
 Acceptance:
 
 - RabbitMQ mode has an end-to-end test or reproducible demo.
-- Multiple RabbitMQ workers increase actual parallel throughput.
+- Multiple RabbitMQ peers increase actual parallel throughput.
 - Broker delivery semantics are documented honestly and match the implementation.
 
 ### Slice 6: Durable State And Recovery
@@ -532,10 +560,10 @@ Acceptance:
 
 These are the deliverables that should make TaskFlow stand out among personal projects:
 
-- One-command distributed demo with coordinator, broker, and multiple workers.
+- One-command distributed demo with coordinator, broker, and multiple peers.
 - Architecture diagram in README.
-- Fault-injection demo showing worker failure, retry, and eventual job completion.
-- Benchmark table showing throughput improvement as worker count increases.
+- Fault-injection demo showing peer failure, retry, and eventual job completion.
+- Benchmark table showing throughput improvement as peer count increases.
 - Execution guarantees document with implemented guarantees, tradeoffs, and limitations.
 - Plugin example beyond conversion, such as word count or checksum, to prove the framework is not hardcoded to media conversion.
 - CI pipeline with build, test, and formatting checks.
@@ -571,11 +599,11 @@ Completed since latest review:
 - Modular Maven layout with clear framework boundaries.
 - Plugin loading through ServiceLoader.
 - Core job creation no longer hardcodes concrete job classes.
-- Worker execution no longer hardcodes concrete processors.
+- Peer execution no longer hardcodes concrete processors.
 - Core peer tracking no longer depends directly on socket APIs.
 - Scheduler dispatch is abstracted behind SchedulerOutput.
 - RabbitMQ broker transport module exists and has no-broker tests.
-- RabbitMQ coordinator and worker entry points exist.
+- RabbitMQ coordinator and command-line peer entry points exist.
 - TASKFLOW_TRANSPORT selects tcp or rabbitmq, with tcp as default.
 - Existing tests pass.
 - All modules package.
@@ -590,13 +618,13 @@ Completed:
 - Conversion result aggregation is deterministic by task index.
 - Tracked runtime DB artifacts were removed from the Git index.
 - Scheduler regression test covers unsupported job startup failure.
-- Refactor has been staged as a modular Maven migration rather than untracked replacement files.
+- Refactor has been committed as a clean modular Maven migration.
 - README now includes stronger project positioning, technical differentiators, an architecture diagram, and known limitations.
 - Repository now has `.gitattributes` for consistent text and binary handling.
 
 Pending:
 
-- Commit the staged refactor after final review.
+- Push or intentionally hold local commit `7218b42 Align GUI peer terminology`.
 - README demo media and benchmark polish.
 - One-command demo.
 - Demo video or GIF.
@@ -606,8 +634,8 @@ Pending:
 - More scheduler failure-path tests beyond unsupported job startup.
 - Logging framework adoption.
 - Live RabbitMQ integration test.
-- RabbitMQ client submitter.
-- Better broker-mode worker/backpressure model.
+- RabbitMQ peer submitter.
+- Better broker-mode peer identity, capacity, and backpressure model.
 - Dead-letter queue support.
 - PostgreSQL and Flyway state-store implementation.
 - Restart recovery from durable state.
@@ -638,7 +666,7 @@ Run TCP coordinator:
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-Run TCP worker:
+Run TCP command-line peer:
 
 ```powershell
 .\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
@@ -657,7 +685,7 @@ $env:TASKFLOW_TRANSPORT = "rabbitmq"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-Run RabbitMQ worker:
+Run RabbitMQ command-line peer:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
