@@ -1,5 +1,14 @@
 package server.scheduler;
 
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public record SchedulerConfig(
@@ -26,6 +35,8 @@ public record SchedulerConfig(
     public static final double DEFAULT_PEER_SCORE_LATENCY_BASELINE_MILLIS = 200.0;
     public static final double DEFAULT_PEER_SCORE_DURATION_BASELINE_MILLIS = 5_000.0;
     public static final double DEFAULT_PEER_SCORE_EWMA_ALPHA = 0.2;
+    public static final String CONFIG_PATH_ENV = "TASKFLOW_CONFIG";
+    public static final Path DEFAULT_CONFIG_PATH = Path.of("config", "taskflow.yml");
 
     public SchedulerConfig {
         requirePositive(taskTimeoutMillis, "taskTimeoutMillis");
@@ -63,36 +74,154 @@ public record SchedulerConfig(
         return fromEnvironment(System.getenv());
     }
 
+    public static SchedulerConfig fromRuntime() {
+        return fromRuntime(System.getenv());
+    }
+
+    public static SchedulerConfig fromRuntime(Map<String, String> env) {
+        Path configuredPath = configuredPath(env);
+        Map<String, Object> fileConfig = Map.of();
+        if (configuredPath != null) {
+            boolean explicitPath = hasValue(env, CONFIG_PATH_ENV);
+            if (Files.exists(configuredPath)) {
+                fileConfig = readConfigFile(configuredPath);
+            } else if (explicitPath) {
+                throw new IllegalArgumentException("Configured TaskFlow config file does not exist: " + configuredPath);
+            }
+        }
+        return fromSources(fileConfig, env);
+    }
+
+    public static SchedulerConfig fromFile(Path path) {
+        return fromSources(readConfigFile(path), Map.of());
+    }
+
     public static SchedulerConfig fromEnvironment(Map<String, String> env) {
+        return fromSources(Map.of(), env);
+    }
+
+    private static SchedulerConfig fromSources(Map<String, Object> fileConfig, Map<String, String> env) {
         SchedulerConfig defaults = defaults();
+        Map<String, Object> scheduler = childMap(fileConfig, "scheduler");
+        Map<String, Object> scoring = childMap(scheduler, "scoring");
         return new SchedulerConfig(
-                longValue(env, "TASKFLOW_TASK_TIMEOUT_MS", defaults.taskTimeoutMillis()),
-                intValue(env, "TASKFLOW_MAX_TASKS_PER_PEER", defaults.maxTasksPerPeer()),
-                intValue(env, "TASKFLOW_MAX_TASK_RETRIES", defaults.maxTaskRetries()),
-                longValue(env, "TASKFLOW_METRICS_LOG_INTERVAL_MS", defaults.metricsLogIntervalMillis()),
-                doubleValue(env, "TASKFLOW_SCORE_LOAD_WEIGHT", defaults.peerScoreLoadWeight()),
-                doubleValue(env, "TASKFLOW_SCORE_LATENCY_WEIGHT", defaults.peerScoreLatencyWeight()),
-                doubleValue(env, "TASKFLOW_SCORE_DURATION_WEIGHT", defaults.peerScoreDurationWeight()),
-                doubleValue(env, "TASKFLOW_SCORE_FAILURE_WEIGHT", defaults.peerScoreFailureWeight()),
-                doubleValue(env, "TASKFLOW_SCORE_LATENCY_BASELINE_MS", defaults.peerScoreLatencyBaselineMillis()),
-                doubleValue(env, "TASKFLOW_SCORE_DURATION_BASELINE_MS", defaults.peerScoreDurationBaselineMillis()),
-                doubleValue(env, "TASKFLOW_SCORE_EWMA_ALPHA", defaults.peerScoreEwmaAlpha())
+                longValue(scheduler, env, "taskTimeoutMs", "TASKFLOW_TASK_TIMEOUT_MS", defaults.taskTimeoutMillis()),
+                intValue(scheduler, env, "maxTasksPerPeer", "TASKFLOW_MAX_TASKS_PER_PEER", defaults.maxTasksPerPeer()),
+                intValue(scheduler, env, "maxTaskRetries", "TASKFLOW_MAX_TASK_RETRIES", defaults.maxTaskRetries()),
+                longValue(scheduler, env, "metricsLogIntervalMs", "TASKFLOW_METRICS_LOG_INTERVAL_MS",
+                        defaults.metricsLogIntervalMillis()),
+                doubleValue(scoring, env, "loadWeight", "TASKFLOW_SCORE_LOAD_WEIGHT",
+                        defaults.peerScoreLoadWeight()),
+                doubleValue(scoring, env, "latencyWeight", "TASKFLOW_SCORE_LATENCY_WEIGHT",
+                        defaults.peerScoreLatencyWeight()),
+                doubleValue(scoring, env, "durationWeight", "TASKFLOW_SCORE_DURATION_WEIGHT",
+                        defaults.peerScoreDurationWeight()),
+                doubleValue(scoring, env, "failureWeight", "TASKFLOW_SCORE_FAILURE_WEIGHT",
+                        defaults.peerScoreFailureWeight()),
+                doubleValue(scoring, env, "latencyBaselineMs", "TASKFLOW_SCORE_LATENCY_BASELINE_MS",
+                        defaults.peerScoreLatencyBaselineMillis()),
+                doubleValue(scoring, env, "durationBaselineMs", "TASKFLOW_SCORE_DURATION_BASELINE_MS",
+                        defaults.peerScoreDurationBaselineMillis()),
+                doubleValue(scoring, env, "ewmaAlpha", "TASKFLOW_SCORE_EWMA_ALPHA",
+                        defaults.peerScoreEwmaAlpha())
         );
     }
 
-    private static int intValue(Map<String, String> env, String key, int fallback) {
-        String value = env.get(key);
-        return value == null || value.isBlank() ? fallback : Integer.parseInt(value);
+    private static Path configuredPath(Map<String, String> env) {
+        String explicitPath = env.get(CONFIG_PATH_ENV);
+        if (explicitPath != null && !explicitPath.isBlank()) {
+            return Path.of(explicitPath);
+        }
+        return DEFAULT_CONFIG_PATH;
     }
 
-    private static long longValue(Map<String, String> env, String key, long fallback) {
-        String value = env.get(key);
-        return value == null || value.isBlank() ? fallback : Long.parseLong(value);
+    private static Map<String, Object> readConfigFile(Path path) {
+        try (InputStream input = Files.newInputStream(path)) {
+            Object loaded = new Yaml(new SafeConstructor(new LoaderOptions())).load(input);
+            if (loaded == null) {
+                return Map.of();
+            }
+            if (!(loaded instanceof Map<?, ?> rawMap)) {
+                throw new IllegalArgumentException("TaskFlow config root must be a YAML object: " + path);
+            }
+            return stringKeyMap(rawMap);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Could not read TaskFlow config file: " + path, e);
+        }
     }
 
-    private static double doubleValue(Map<String, String> env, String key, double fallback) {
+    private static int intValue(Map<String, Object> yaml,
+                                Map<String, String> env,
+                                String yamlKey,
+                                String envKey,
+                                int fallback) {
+        if (hasValue(env, envKey)) {
+            return Integer.parseInt(env.get(envKey));
+        }
+        Object value = yaml.get(yamlKey);
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        return value == null ? fallback : Integer.parseInt(String.valueOf(value));
+    }
+
+    private static long longValue(Map<String, Object> yaml,
+                                  Map<String, String> env,
+                                  String yamlKey,
+                                  String envKey,
+                                  long fallback) {
+        if (hasValue(env, envKey)) {
+            return Long.parseLong(env.get(envKey));
+        }
+        Object value = yaml.get(yamlKey);
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return value == null ? fallback : Long.parseLong(String.valueOf(value));
+    }
+
+    private static double doubleValue(Map<String, Object> yaml,
+                                      Map<String, String> env,
+                                      String yamlKey,
+                                      String envKey,
+                                      double fallback) {
+        if (hasValue(env, envKey)) {
+            return Double.parseDouble(env.get(envKey));
+        }
+        Object value = yaml.get(yamlKey);
+        if (value instanceof Number number) {
+            return number.doubleValue();
+        }
+        return value == null ? fallback : Double.parseDouble(String.valueOf(value));
+    }
+
+    private static boolean hasValue(Map<String, String> env, String key) {
         String value = env.get(key);
-        return value == null || value.isBlank() ? fallback : Double.parseDouble(value);
+        return value != null && !value.isBlank();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> childMap(Map<String, Object> source, String key) {
+        Object value = source.get(key);
+        if (value == null) {
+            return Map.of();
+        }
+        if (value instanceof Map<?, ?> map) {
+            return (Map<String, Object>) map;
+        }
+        throw new IllegalArgumentException("TaskFlow config field must be an object: " + key);
+    }
+
+    private static Map<String, Object> stringKeyMap(Map<?, ?> rawMap) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : rawMap.entrySet()) {
+            Object value = entry.getValue();
+            if (value instanceof Map<?, ?> nested) {
+                value = stringKeyMap(nested);
+            }
+            out.put(String.valueOf(entry.getKey()), value);
+        }
+        return out;
     }
 
     private static void requirePositive(long value, String field) {

@@ -38,5 +38,6 @@ target/
 taskflow.db
 taskflow.db-shm
 taskflow.db-wal
+config/taskflow.yml
 java/in_PEER_*/
 java/out_PEER_*/

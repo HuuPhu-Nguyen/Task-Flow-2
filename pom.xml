@@ -28,6 +28,7 @@
         <javacv.version>1.5.10</javacv.version>
         <sqlite.version>3.45.3.0</sqlite.version>
         <rabbitmq.client.version>5.30.0</rabbitmq.client.version>
+        <snakeyaml.version>2.4</snakeyaml.version>
         <junit.version>5.10.2</junit.version>
     </properties>
 
@@ -97,6 +98,11 @@
                 <groupId>com.rabbitmq</groupId>
                 <artifactId>amqp-client</artifactId>
                 <version>${rabbitmq.client.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>${snakeyaml.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit.jupiter</groupId>

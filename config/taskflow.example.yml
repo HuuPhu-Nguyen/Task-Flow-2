@@ -1,0 +1,16 @@
+# Copy this file to config/taskflow.yml for local runtime tuning.
+# Environment variables override values in this file.
+
+scheduler:
+  taskTimeoutMs: 60000
+  maxTasksPerPeer: 3
+  maxTaskRetries: 20
+  metricsLogIntervalMs: 10000
+  scoring:
+    loadWeight: 6.0
+    latencyWeight: 2.0
+    durationWeight: 1.5
+    failureWeight: 4.0
+    latencyBaselineMs: 200.0
+    durationBaselineMs: 5000.0
+    ewmaAlpha: 0.2

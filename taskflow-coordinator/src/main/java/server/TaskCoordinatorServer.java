@@ -33,7 +33,7 @@ public class TaskCoordinatorServer {
 
         BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
         PeerRegistry registry = new InMemoryPeerRegistry();
-        SchedulerConfig schedulerConfig = SchedulerConfig.fromEnvironment();
+        SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
 
         DatabaseManager db = null;
         try {
