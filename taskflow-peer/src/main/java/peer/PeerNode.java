@@ -116,7 +116,7 @@ public class PeerNode {
     private static MessageDispatcher createDispatcher(PeerExecutionEngine engine, PrintWriter out) {
         MessageDispatcher dispatcher = new MessageDispatcher();
         // Static handler for immediate responses (PING)
-        dispatcher.register(MessageType.PING, new PingHandler());
+        dispatcher.register(MessageType.PING, new PingHandler(() -> engine.getRegisteredTaskTypes()));
         // TASK_ASSIGN -> Background Engine
         // prevents the networking thread from blocking during image conversion
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {

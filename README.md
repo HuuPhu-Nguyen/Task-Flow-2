@@ -11,7 +11,7 @@ The project is designed to demonstrate production-relevant distributed systems w
 TaskFlow follows a **coordinated peer-to-peer model**:
 
 - A **Coordinator Server** manages job state, task assignment, retries, and result aggregation.
-- **Peer nodes** can submit jobs and execute tasks assigned by the coordinator.
+- **Peer nodes** can submit jobs, advertise supported task types, and execute tasks assigned by the coordinator.
 - The **JavaFX peer** acts as both a job submitter and a task executor.
 - Command-line peers can be started to add more compute capacity.
 
@@ -36,9 +36,9 @@ Jobs are submitted dynamically by peers and processed in a fully asynchronous, m
 ```mermaid
 flowchart LR
     PeerA[GUI Peer\nsubmits jobs + executes tasks] -->|JOB_SUBMIT| Coordinator
-    PeerA -->|PONG / TASK_RESULT| Coordinator
-    PeerB[CLI Peer\nexecutes tasks] -->|PONG / TASK_RESULT| Coordinator
-    PeerC[Additional Peer\nexecutes tasks] -->|PONG / TASK_RESULT| Coordinator
+    PeerA -->|PONG + capabilities / TASK_RESULT| Coordinator
+    PeerB[CLI Peer\nexecutes tasks] -->|PONG + capabilities / TASK_RESULT| Coordinator
+    PeerC[Additional Peer\nexecutes tasks] -->|PONG + capabilities / TASK_RESULT| Coordinator
     Coordinator --> Mailbox[Scheduler Mailbox]
     Mailbox --> Scheduler[TaskScheduler]
     Scheduler --> Registry[Peer Registry]
@@ -76,7 +76,7 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
 - `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
 
-Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.WorkerPlugin`, then register providers under `META-INF/services`.
+Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.PeerProcessorPlugin`, then register providers under `META-INF/services`.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
@@ -112,7 +112,8 @@ The `TaskScheduler` is the core of the system.
 
 **Load Balancing**
 - Default maximum of **3 concurrent tasks per peer**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`
-- Peers are selected by a configurable weighted score using load, latency, average task duration, and failure rate
+- Peers are filtered by advertised task capability before assignment
+- Eligible peers are selected by a configurable weighted score using load, latency, average task duration, and failure rate
 
 **Fault Tolerance**
 - Default task timeout: **60 seconds**, configurable with `TASKFLOW_TASK_TIMEOUT_MS`
@@ -128,6 +129,7 @@ A `PeerNode` connects to the coordinator and executes assigned tasks.
 **Responsibilities:**
 - Maintain TCP connection with the server
 - Respond to heartbeat messages (`PING` / `PONG`)
+- Advertise supported task types through heartbeat metadata
 - Receive `TASK_ASSIGN` messages
 - Execute tasks using the execution engine
 - Send results back via `TASK_RESULT`
@@ -198,7 +200,7 @@ TCP communication is done using JSON messages over sockets. RabbitMQ communicati
 - `TASK_RESULT` - return result from peer
 - `JOB_RESULT` - final aggregated result
 - `PING` - heartbeat from server
-- `PONG` - heartbeat response from peer
+- `PONG` - heartbeat response from peer, including supported task types
 
 ---
 
@@ -244,11 +246,12 @@ The JavaFX GUI (`PeerApp`) acts as both:
 
 ### Load Balancing
 - Dynamic scheduling
+- Capability-aware peer filtering
 - Peer scoring and task limits
 
 ### Extensibility
 - New job types via `TaskPlugin` and Java `ServiceLoader`
-- New peer-side processors via `WorkerPlugin` and `TaskProcessor`
+- New peer-side processors via `PeerProcessorPlugin` and `TaskProcessor`
 
 ---
 

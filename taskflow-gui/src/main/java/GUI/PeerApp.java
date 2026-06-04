@@ -404,7 +404,7 @@ public class PeerApp extends Application {
 
     private MessageDispatcher createDispatcher(PeerExecutionEngine engine, PrintWriter out) {
         MessageDispatcher dispatcher = new MessageDispatcher();
-        dispatcher.register(MessageType.PING, new messaging.handlers.PingHandler());
+        dispatcher.register(MessageType.PING, new messaging.handlers.PingHandler(() -> engine.getRegisteredTaskTypes()));
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {
             // Offload execution so the networking thread stays responsive.
             engine.submitTask((TaskAssignMessage) message, out);

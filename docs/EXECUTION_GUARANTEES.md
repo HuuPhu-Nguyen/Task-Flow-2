@@ -22,10 +22,16 @@ Invalid/stale transitions are ignored (for example duplicate success from a peer
 
 - **Timeout per assigned task:** 60 seconds.
 - **Maximum retries per task:** 20 attempts.
-- On timeout or explicit worker failure:
+- On timeout or explicit peer execution failure:
   - the attempt is counted as failed,
   - the task is retried if attempts remain,
   - otherwise the task moves to terminal `FAILED`.
+
+## Capability-Aware Assignment
+
+- Peers advertise supported task types in heartbeat metadata.
+- The scheduler assigns a task only to peers that advertise support for that task type.
+- If no capable peer is available, the task remains pending instead of being assigned to an incompatible peer.
 
 ## Job Completion/Failure
 

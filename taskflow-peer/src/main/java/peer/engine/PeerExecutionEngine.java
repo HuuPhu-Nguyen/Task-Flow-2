@@ -11,7 +11,7 @@ import java.util.ServiceLoader;
 import java.util.concurrent.*;
 
 public class PeerExecutionEngine {
-    private final ExecutorService workerPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private final ExecutorService executionPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
     private final Gson gson = new Gson();
     private final String nodeId;
     private final Map<String, TaskProcessor<?>> processors = new ConcurrentHashMap<>();
@@ -26,7 +26,7 @@ public class PeerExecutionEngine {
     }
 
     public void registerDiscoveredProcessors() {
-        for (WorkerPlugin plugin : ServiceLoader.load(WorkerPlugin.class)) {
+        for (PeerProcessorPlugin plugin : ServiceLoader.load(PeerProcessorPlugin.class)) {
             registerProcessor(plugin.taskType(), plugin.createProcessor());
         }
     }
@@ -65,7 +65,7 @@ public class PeerExecutionEngine {
                         e.getMessage()
                 );
             }
-        }, workerPool);
+        }, executionPool);
     }
 
     public void submitTask(TaskAssignMessage task, PrintWriter out) {

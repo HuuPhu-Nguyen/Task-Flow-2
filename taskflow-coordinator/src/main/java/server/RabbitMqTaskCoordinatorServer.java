@@ -84,7 +84,7 @@ public class RabbitMqTaskCoordinatorServer {
                                         SchedulerConfig schedulerConfig,
                                         InboundTransportMessage delivery) {
         Message message = delivery.message();
-        if (!(message instanceof PongMessage)) {
+        if (!(message instanceof PongMessage pong)) {
             return;
         }
         String peerNodeId = delivery.fromNodeId();
@@ -97,9 +97,10 @@ public class RabbitMqTaskCoordinatorServer {
 
         PeerInfo peer = registry.get(peerNodeId);
         if (peer == null) {
-            registry.register(peerNodeId, new PeerInfo(peerNodeId, schedulerConfig));
+            registry.register(peerNodeId, new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes()));
         } else {
             registry.updateHeartbeat(peerNodeId);
+            peer.setSupportedTaskTypes(pong.getSupportedTaskTypes());
         }
     }
 }

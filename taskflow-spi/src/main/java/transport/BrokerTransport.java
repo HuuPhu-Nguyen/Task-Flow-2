@@ -8,7 +8,7 @@ public interface BrokerTransport extends AutoCloseable {
     default void publishToPeer(TransportRoute route,
                                String peerNodeId,
                                OutboundTransportMessage message) throws Exception {
-        publish(message);
+        throw new UnsupportedOperationException("Peer-targeted publish is not supported by this transport.");
     }
 
     String subscribe(TransportRoute route, TransportMessageHandler handler) throws Exception;
@@ -16,7 +16,7 @@ public interface BrokerTransport extends AutoCloseable {
     default String subscribePeer(TransportRoute route,
                                  String peerNodeId,
                                  TransportMessageHandler handler) throws Exception {
-        return subscribe(route, handler);
+        throw new UnsupportedOperationException("Peer-targeted subscribe is not supported by this transport.");
     }
 
     void cancel(String consumerTag) throws Exception;

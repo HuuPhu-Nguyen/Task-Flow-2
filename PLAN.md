@@ -1,6 +1,6 @@
 # TaskFlow Framework Migration Plan
 
-Last updated: 2026-06-04 10:06 Asia/Bangkok
+Last updated: 2026-06-04 11:17 Asia/Bangkok
 
 ## Showcase Objective
 
@@ -29,7 +29,7 @@ TaskFlow has moved from a single Maven demo project into a modular framework fou
 
 Completed so far:
 
-- Converted the project into a Maven reactor with separate SPI, core, plugin, transport, coordinator, worker, and GUI modules.
+- Converted the project into a Maven reactor with separate SPI, core, plugin, transport, coordinator, peer, and GUI modules.
 - Added plugin contracts for coordinator-side job creation and peer-side task processing.
 - Moved image and video conversion into a concrete conversion plugin module loaded through Java ServiceLoader.
 - Removed hardcoded image/video job branching from core job creation.
@@ -37,6 +37,8 @@ Completed so far:
 - Added a TransportConnection abstraction so core peer tracking no longer depends directly on java.net.Socket.
 - Added a SchedulerOutput abstraction so the scheduler can dispatch through TCP or a broker transport.
 - Added SchedulerConfig so retry limits, task timeouts, peer concurrency, peer scoring weights, metric intervals, and EWMA smoothing are externally configurable through YAML and environment overrides.
+- Renamed the peer-side processor SPI to PeerProcessorPlugin.
+- Added capability-aware peer registration through heartbeat metadata and scheduler filtering by supported task type.
 - Added a RabbitMQ transport module with topology declaration, JSON message envelopes, publish/subscribe, manual ack, requeue, reject, and prefetch configuration.
 - Added RabbitMQ coordinator and command-line peer runtime entry points.
 - Added TASKFLOW_TRANSPORT mode selection while keeping TCP as the default runtime.
@@ -47,6 +49,7 @@ Current runtime status:
 - TCP is still the default coordinated peer runtime.
 - The JavaFX GUI is a peer: it can submit jobs and execute assigned tasks in the same runtime.
 - The command-line peer executes assigned tasks. In RabbitMQ mode it also has a basic CLI submit command.
+- Peers advertise supported task types, and the scheduler filters candidates by capability before applying peer score and load limits.
 - RabbitMQ can be selected with TASKFLOW_TRANSPORT=rabbitmq.
 - RabbitMQ coordinator/peer runtime now models first-class broker peers with peer IDs, heartbeat registration, peer-specific task assignment, peer-specific job-result routing, and a basic broker-aware peer submit path.
 - RabbitMQ can support the coordinated peer-to-peer objective, but the current implementation still needs a live broker integration test, broker backpressure, dead-letter handling, and stronger restart/recovery semantics.
@@ -108,8 +111,8 @@ Root pom.xml is packaging=pom and includes:
 - taskflow-spi/src/main/java/server/job/TaskPlugin.java
   Coordinator-side plugin contract for creating jobs from JobSubmitMessage.
 
-- taskflow-spi/src/main/java/peer/engine/WorkerPlugin.java
-  Historical peer-side plugin contract for creating task processors.
+- taskflow-spi/src/main/java/peer/engine/PeerProcessorPlugin.java
+  Peer-side plugin contract for creating task processors and declaring supported task types.
 
 - taskflow-spi/src/main/java/peer/engine/TaskProcessor.java
   Peer task execution contract.
@@ -182,15 +185,15 @@ Root pom.xml is packaging=pom and includes:
 ### Conversion Plugin
 
 - taskflow-plugin-conversion/src/main/java/server/concreteJobs/conversion/ImageConversionTaskPlugin.java
-  Registers image conversion as both TaskPlugin and WorkerPlugin.
+  Registers image conversion as both TaskPlugin and PeerProcessorPlugin.
 
 - taskflow-plugin-conversion/src/main/java/server/concreteJobs/conversion/VideoTranscodingTaskPlugin.java
-  Registers video transcoding as both TaskPlugin and WorkerPlugin.
+  Registers video transcoding as both TaskPlugin and PeerProcessorPlugin.
 
 - taskflow-plugin-conversion/src/main/resources/META-INF/services/server.job.TaskPlugin
   ServiceLoader provider registration for coordinator-side job plugins.
 
-- taskflow-plugin-conversion/src/main/resources/META-INF/services/peer.engine.WorkerPlugin
+- taskflow-plugin-conversion/src/main/resources/META-INF/services/peer.engine.PeerProcessorPlugin
   ServiceLoader provider registration for peer-side processor plugins.
 
 ### RabbitMQ Transport
@@ -239,7 +242,7 @@ Root pom.xml is packaging=pom and includes:
   RabbitMQ peer execution runtime. Subscribes to TASK_ASSIGN, executes tasks, publishes TASK_RESULT, and relies on transport auto-ack after successful handler completion.
 
 - taskflow-peer/src/main/java/peer/engine/PeerExecutionEngine.java
-  Peer execution engine. Discovers WorkerPlugin implementations through ServiceLoader and exposes executeTask for broker runtime plus submitTask for TCP runtime.
+  Peer execution engine. Discovers PeerProcessorPlugin implementations through ServiceLoader and exposes executeTask for broker runtime plus submitTask for TCP runtime.
 
 ### GUI Runtime
 

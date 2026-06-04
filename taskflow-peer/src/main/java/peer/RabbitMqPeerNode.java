@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -53,7 +54,7 @@ public class RabbitMqPeerNode {
         transport.subscribePeer(TransportRoute.JOB_RESULT, nodeId,
                 delivery -> handleJobResult(jobResults, delivery));
 
-        ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId);
+        ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId, engine.getRegisteredTaskTypes());
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             heartbeats.shutdownNow();
             try {
@@ -116,7 +117,9 @@ public class RabbitMqPeerNode {
                 + " success=" + result.isSuccessful());
     }
 
-    private static ScheduledExecutorService startHeartbeats(RabbitMqTransport transport, String nodeId) {
+    private static ScheduledExecutorService startHeartbeats(RabbitMqTransport transport,
+                                                            String nodeId,
+                                                            Collection<String> supportedTaskTypes) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "rabbitmq-peer-heartbeat");
             thread.setDaemon(true);
@@ -127,7 +130,7 @@ public class RabbitMqPeerNode {
                 transport.publish(new OutboundTransportMessage(
                         TransportRoute.HEARTBEAT,
                         nodeId,
-                        new PongMessage(nodeId, Instant.now().toString())
+                        new PongMessage(nodeId, Instant.now().toString(), supportedTaskTypes)
                 ));
             } catch (Exception e) {
                 System.err.println("RabbitMQ heartbeat failed for " + nodeId + ": " + e.getMessage());

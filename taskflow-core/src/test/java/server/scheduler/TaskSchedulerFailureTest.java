@@ -60,6 +60,51 @@ class TaskSchedulerFailureTest {
         }
     }
 
+    @Test
+    void dispatchesOnlyToPeersWithMatchingCapabilities() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        registry.register("image-peer", new PeerInfo(
+                "image-peer",
+                SchedulerConfig.defaults(),
+                List.of("IMAGE_CONVERSION")
+        ));
+        registry.register("test-peer", new PeerInfo(
+                "test-peer",
+                SchedulerConfig.defaults(),
+                List.of("TEST_TASK")
+        ));
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-capability-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage supportedJob = new JobSubmitMessage(
+                    "requester-1",
+                    "2026-06-04T00:00:00Z",
+                    "job-capability",
+                    "TEST_TASK",
+                    List.of("payload"),
+                    ""
+            );
+            mailbox.put(new MessageEnvelope(supportedJob, "requester-1"));
+
+            assertTrue(output.awaitTask());
+            assertEquals("test-peer", output.peerId());
+            assertEquals("TEST_TASK", output.task().getTaskType());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
     private static class CapturingOutput implements SchedulerOutput {
         private final CountDownLatch resultReceived = new CountDownLatch(1);
         private final AtomicReference<JobResultMessage> result = new AtomicReference<>();
@@ -82,6 +127,36 @@ class TaskSchedulerFailureTest {
 
         JobResultMessage result() {
             return result.get();
+        }
+    }
+
+    private static class TaskCapturingOutput implements SchedulerOutput {
+        private final CountDownLatch taskReceived = new CountDownLatch(1);
+        private final AtomicReference<String> peerId = new AtomicReference<>();
+        private final AtomicReference<TaskAssignMessage> task = new AtomicReference<>();
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            peerId.set(peer.getNodeId());
+            task.set(message);
+            taskReceived.countDown();
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            return true;
+        }
+
+        boolean awaitTask() throws InterruptedException {
+            return taskReceived.await(2, TimeUnit.SECONDS);
+        }
+
+        String peerId() {
+            return peerId.get();
+        }
+
+        TaskAssignMessage task() {
+            return task.get();
         }
     }
 }

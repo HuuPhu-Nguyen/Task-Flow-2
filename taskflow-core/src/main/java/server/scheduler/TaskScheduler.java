@@ -220,12 +220,14 @@ public class TaskScheduler implements Runnable {
     }
 
     private void dispatchPendingTasks() {
-        //Get our candidates for work
-        List<PeerInfo> candidates = getAvailablePeers();
-        if (candidates.isEmpty()) return;
-
         //Process jobs in order
         for (EmbarrassinglyParallelJob<?,?> job : activeJobs.values()) {
+            // Capabilities are evaluated per job type before score/load selection.
+            List<PeerInfo> candidates = getAvailablePeers(job.getTaskType());
+            if (candidates.isEmpty()) {
+                continue;
+            }
+
             //Prioritize high-retry tasks
             List<? extends TaskUnit<?>> pending = job.getPendingTasks().stream()
                     .sorted(Comparator.comparingInt((TaskUnit<?> t) -> t.getRetryCount()).reversed())
@@ -241,7 +243,7 @@ public class TaskScheduler implements Runnable {
                 if (bestPeer != null) {
                     assign(job, task, bestPeer);
                 } else {
-                    return; // All peers have hit the configured concurrency limit.
+                    break; // Compatible peers for this job have hit the configured concurrency limit.
                 }
             }
         }
@@ -279,10 +281,11 @@ public class TaskScheduler implements Runnable {
         ));
     }
 
-    private List<PeerInfo> getAvailablePeers() {
+    private List<PeerInfo> getAvailablePeers(String taskType) {
         return registry.getAllPeers().stream()
-                // 1. Filter out dead or over-encumbered peers
+                // 1. Filter out dead, incapable, or over-encumbered peers
                 .filter(PeerInfo::isConnected)
+                .filter(p -> p.supportsTaskType(taskType))
                 .filter(p -> p.getActiveTasks() < config.maxTasksPerPeer())
 
                 // 2. Sort by our composite score (Lowest score = Best peer)

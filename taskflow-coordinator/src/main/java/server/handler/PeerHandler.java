@@ -113,6 +113,7 @@ public class PeerHandler implements Runnable {
                         PeerInfo info = registry.get(nodeId);
                         if (info != null) {
                             info.updateLatency(rtt);
+                            info.setSupportedTaskTypes(((PongMessage) message).getSupportedTaskTypes());
                         }
                         continue;
                     }

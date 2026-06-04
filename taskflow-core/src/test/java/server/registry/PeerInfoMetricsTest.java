@@ -3,9 +3,12 @@ package server.registry;
 import org.junit.jupiter.api.Test;
 import server.scheduler.SchedulerConfig;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PeerInfoMetricsTest {
@@ -81,5 +84,19 @@ class PeerInfoMetricsTest {
         peer.updateLatency(300);
 
         assertEquals(300L, peer.getLatency());
+    }
+
+    @Test
+    void normalizesAndMatchesSupportedTaskTypes() {
+        PeerInfo peer = new PeerInfo("peer-6", SchedulerConfig.defaults(), List.of(
+                " image_conversion ",
+                "IMAGE_CONVERSION",
+                "video_transcoding"
+        ));
+
+        assertEquals(Set.of("IMAGE_CONVERSION", "VIDEO_TRANSCODING"), peer.getSupportedTaskTypes());
+        assertTrue(peer.supportsTaskType("image_conversion"));
+        assertTrue(peer.supportsTaskType("VIDEO_TRANSCODING"));
+        assertFalse(peer.supportsTaskType("UNKNOWN_TASK"));
     }
 }

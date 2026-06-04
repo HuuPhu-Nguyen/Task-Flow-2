@@ -3,6 +3,9 @@ package server.registry;
 import server.scheduler.SchedulerConfig;
 import transport.TransportConnection;
 
+import java.util.Collection;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -11,6 +14,7 @@ public class PeerInfo {
     private final String nodeId;
     private final TransportConnection connection;
     private final SchedulerConfig config;
+    private volatile Set<String> supportedTaskTypes;
 
     private final AtomicLong lastHeartbeatReceivedAtMillis;
     private final AtomicInteger activeTasks = new AtomicInteger(0);
@@ -21,21 +25,33 @@ public class PeerInfo {
     private final AtomicLong failedTasks = new AtomicLong(0);
 
     public PeerInfo(String nodeId) {
-        this(nodeId, new NoopTransportConnection(nodeId), SchedulerConfig.defaults());
+        this(nodeId, new NoopTransportConnection(nodeId), SchedulerConfig.defaults(), Set.of());
     }
 
     public PeerInfo(String nodeId, TransportConnection connection) {
-        this(nodeId, connection, SchedulerConfig.defaults());
+        this(nodeId, connection, SchedulerConfig.defaults(), Set.of());
     }
 
     public PeerInfo(String nodeId, SchedulerConfig config) {
-        this(nodeId, new NoopTransportConnection(nodeId), config);
+        this(nodeId, new NoopTransportConnection(nodeId), config, Set.of());
+    }
+
+    public PeerInfo(String nodeId, SchedulerConfig config, Collection<String> supportedTaskTypes) {
+        this(nodeId, new NoopTransportConnection(nodeId), config, supportedTaskTypes);
     }
 
     public PeerInfo(String nodeId, TransportConnection connection, SchedulerConfig config) {
+        this(nodeId, connection, config, Set.of());
+    }
+
+    public PeerInfo(String nodeId,
+                    TransportConnection connection,
+                    SchedulerConfig config,
+                    Collection<String> supportedTaskTypes) {
         this.nodeId = nodeId;
         this.connection = connection;
         this.config = config == null ? SchedulerConfig.defaults() : config;
+        this.supportedTaskTypes = normalizeTaskTypes(supportedTaskTypes);
         this.lastHeartbeatReceivedAtMillis = new AtomicLong(System.currentTimeMillis());
     }
 
@@ -66,6 +82,21 @@ public class PeerInfo {
     public void updateHeartbeatReceivedNow() {lastHeartbeatReceivedAtMillis.set(System.currentTimeMillis());}
 
     public int getActiveTasks() {return activeTasks.get();}
+
+    public Set<String> getSupportedTaskTypes() {
+        return supportedTaskTypes;
+    }
+
+    public void setSupportedTaskTypes(Collection<String> supportedTaskTypes) {
+        this.supportedTaskTypes = normalizeTaskTypes(supportedTaskTypes);
+    }
+
+    public boolean supportsTaskType(String taskType) {
+        if (taskType == null || taskType.isBlank()) {
+            return false;
+        }
+        return supportedTaskTypes.contains(normalizeTaskType(taskType));
+    }
 
     public int incrementTasks() {return activeTasks.incrementAndGet();}
 
@@ -125,6 +156,20 @@ public class PeerInfo {
             return 0.0;
         }
         return Math.min(5.0, value / reference);
+    }
+
+    private Set<String> normalizeTaskTypes(Collection<String> taskTypes) {
+        if (taskTypes == null) {
+            return Set.of();
+        }
+        return taskTypes.stream()
+                .filter(taskType -> taskType != null && !taskType.isBlank())
+                .map(this::normalizeTaskType)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    private String normalizeTaskType(String taskType) {
+        return taskType.trim().toUpperCase(Locale.ROOT);
     }
 
     private static class NoopTransportConnection implements TransportConnection {

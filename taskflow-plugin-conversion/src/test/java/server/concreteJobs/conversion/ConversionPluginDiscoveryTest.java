@@ -1,7 +1,7 @@
 package server.concreteJobs.conversion;
 
 import org.junit.jupiter.api.Test;
-import peer.engine.WorkerPlugin;
+import peer.engine.PeerProcessorPlugin;
 import server.job.TaskPlugin;
 
 import java.util.ServiceLoader;
@@ -22,9 +22,9 @@ class ConversionPluginDiscoveryTest {
     }
 
     @Test
-    void discoversWorkerProcessorPlugins() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(WorkerPlugin.class).spliterator(), false)
-                .map(WorkerPlugin::taskType)
+    void discoversPeerProcessorPlugins() {
+        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(PeerProcessorPlugin.class).spliterator(), false)
+                .map(PeerProcessorPlugin::taskType)
                 .collect(Collectors.toSet());
 
         assertEquals(Set.of("IMAGE_CONVERSION", "VIDEO_TRANSCODING"), taskTypes);
