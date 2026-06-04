@@ -57,6 +57,17 @@ public class RabbitMqTransport implements BrokerTransport {
 
     @Override
     public void publish(OutboundTransportMessage message) throws Exception {
+        publish(message, message.route().routingKey());
+    }
+
+    @Override
+    public void publishToPeer(TransportRoute route,
+                              String peerNodeId,
+                              OutboundTransportMessage message) throws Exception {
+        publish(message, topology.peerRoutingKey(route, peerNodeId));
+    }
+
+    private void publish(OutboundTransportMessage message, String routingKey) throws Exception {
         byte[] body = codec.encode(message);
         AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder()
                 .contentType("application/json")
@@ -65,33 +76,55 @@ public class RabbitMqTransport implements BrokerTransport {
                 .timestamp(Date.from(Instant.now()))
                 .build();
         synchronized (channel) {
-            channel.basicPublish(topology.exchangeName(), message.route().routingKey(), properties, body);
+            channel.basicPublish(topology.exchangeName(), routingKey, properties, body);
         }
     }
 
     @Override
     public String subscribe(TransportRoute route, TransportMessageHandler handler) throws Exception {
         String queueName = topology.queueName(route);
-        return channel.basicConsume(queueName, false, (consumerTag, delivery) -> {
-            RabbitMqAcknowledgement acknowledgement =
-                    new RabbitMqAcknowledgement(channel, delivery.getEnvelope().getDeliveryTag());
-            try {
-                InboundTransportMessage message = codec.decode(delivery.getBody(), route, acknowledgement);
-                handler.handle(message);
-                if (!acknowledgement.isSettled()) {
-                    acknowledgement.ack();
-                }
-            } catch (Exception e) {
-                if (!acknowledgement.isSettled()) {
-                    try {
-                        acknowledgement.requeue();
-                    } catch (Exception ackError) {
-                        throw new IOException("Failed to requeue RabbitMQ delivery", ackError);
+        return consume(queueName, route, handler);
+    }
+
+    @Override
+    public String subscribePeer(TransportRoute route,
+                                String peerNodeId,
+                                TransportMessageHandler handler) throws Exception {
+        declarePeerEndpoint(route, peerNodeId);
+        return consume(topology.peerQueueName(route, peerNodeId), route, handler);
+    }
+
+    public void declarePeerEndpoint(TransportRoute route, String peerNodeId) throws Exception {
+        synchronized (channel) {
+            String queueName = topology.peerQueueName(route, peerNodeId);
+            channel.queueDeclare(queueName, false, true, true, null);
+            channel.queueBind(queueName, topology.exchangeName(), topology.peerRoutingKey(route, peerNodeId));
+        }
+    }
+
+    private String consume(String queueName, TransportRoute route, TransportMessageHandler handler) throws Exception {
+        synchronized (channel) {
+            return channel.basicConsume(queueName, false, (consumerTag, delivery) -> {
+                RabbitMqAcknowledgement acknowledgement =
+                        new RabbitMqAcknowledgement(channel, delivery.getEnvelope().getDeliveryTag());
+                try {
+                    InboundTransportMessage message = codec.decode(delivery.getBody(), route, acknowledgement);
+                    handler.handle(message);
+                    if (!acknowledgement.isSettled()) {
+                        acknowledgement.ack();
+                    }
+                } catch (Exception e) {
+                    if (!acknowledgement.isSettled()) {
+                        try {
+                            acknowledgement.requeue();
+                        } catch (Exception ackError) {
+                            throw new IOException("Failed to requeue RabbitMQ delivery", ackError);
+                        }
                     }
                 }
-            }
-        }, consumerTag -> {
-        });
+            }, consumerTag -> {
+            });
+        }
     }
 
     @Override

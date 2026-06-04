@@ -25,4 +25,18 @@ class RabbitMqTopologyTest {
         assertEquals("jobs.result", TransportRoute.JOB_RESULT.routingKey());
         assertEquals("heartbeats", TransportRoute.HEARTBEAT.routingKey());
     }
+
+    @Test
+    void mapsPeerRoutesToPeerSpecificQueuesAndRoutingKeys() {
+        RabbitMqTopology topology = new RabbitMqTopology(RabbitMqTransportConfig.localDefaults());
+
+        assertEquals("taskflow.peer.peer_1.task-assign",
+                topology.peerQueueName(TransportRoute.TASK_ASSIGN, "peer.1"));
+        assertEquals("tasks.assign.peer_1",
+                topology.peerRoutingKey(TransportRoute.TASK_ASSIGN, "peer.1"));
+        assertEquals("taskflow.peer.peer_1.job-result",
+                topology.peerQueueName(TransportRoute.JOB_RESULT, "peer.1"));
+        assertEquals("jobs.result.peer_1",
+                topology.peerRoutingKey(TransportRoute.JOB_RESULT, "peer.1"));
+    }
 }

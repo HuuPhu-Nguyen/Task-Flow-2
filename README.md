@@ -60,7 +60,7 @@ flowchart LR
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the default runtime. RabbitMQ support exists as a transport adapter and runtime path, but the current broker mode is still transitional because it uses a synthetic worker-pool peer ID. Per-worker broker metrics and broker-aware backpressure are documented as next steps.
+TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode is still transitional until it has a live broker integration test, broker backpressure, dead-letter handling, and GUI support.
 
 ---
 
@@ -80,7 +80,7 @@ Framework core no longer imports concrete image or video job classes. New task t
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and command-line peer entry points, but still needs a live integration test and a broker-aware peer submit path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
 ---
 
@@ -288,6 +288,11 @@ The RabbitMQ transport module uses the following routes:
 - `jobs.result` -> `taskflow.job-results`
 - `heartbeats` -> `taskflow.heartbeats`
 
+RabbitMQ peers also declare peer-specific queues for direct assignment/result routing:
+
+- `tasks.assign.<peerId>` -> `taskflow.peer.<peerId>.task-assign`
+- `jobs.result.<peerId>` -> `taskflow.peer.<peerId>.job-result`
+
 Configuration can be supplied through environment variables:
 
 - `TASKFLOW_RABBITMQ_HOST`
@@ -299,8 +304,9 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_QUEUE_PREFIX`
 - `TASKFLOW_RABBITMQ_DURABLE`
 - `TASKFLOW_RABBITMQ_PREFETCH`
+- `TASKFLOW_PEER_ID`
 
-Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable queues enabled, and prefetch `3`.
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, and prefetch `3`. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
 
 Run the RabbitMQ coordinator on Windows PowerShell:
 
@@ -313,18 +319,27 @@ Run a RabbitMQ command-line peer on Windows PowerShell:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
+$env:TASKFLOW_PEER_ID = "peer-a"
 .\mvnw.cmd -pl taskflow-worker exec:java
 ```
 
-The current RabbitMQ runtime uses a synthetic worker-pool peer ID so the existing scheduler ownership checks still work. This is a transitional design; per-worker metrics and broker-aware backpressure should be added next.
+Submit a RabbitMQ job from a command-line peer on Windows PowerShell:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+$env:TASKFLOW_PEER_ID = "peer-submit"
+.\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="submit image png path\to\input.jpg"
+```
+
+The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
 ---
 
 ## Known Limitations
 
-- RabbitMQ mode is functional but transitional; it does not yet model individual broker peers for per-peer metrics.
 - RabbitMQ integration tests against a live broker are not implemented yet.
-- The JavaFX GUI currently submits through TCP, not RabbitMQ.
+- RabbitMQ mode is functional but transitional; peer-specific routing is implemented, but broker backpressure, dead-letter handling, and restart recovery are not complete.
+- The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
 - Runtime logging still uses console output in several paths and should be migrated to SLF4J/Logback.
 - SQLite is the current local history store; PostgreSQL/Flyway support is planned for durable production-style state management.
@@ -334,7 +349,7 @@ The current RabbitMQ runtime uses a synthetic worker-pool peer ID so the existin
 ## Future Improvements
 
 - PostgreSQL/Flyway state-store implementation
-- Add live RabbitMQ integration tests and a broker-aware client submitter
+- Add live RabbitMQ integration tests and JavaFX RabbitMQ submit support
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard

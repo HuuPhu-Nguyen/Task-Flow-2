@@ -1,9 +1,10 @@
 package server;
 
 import protocol.Message;
-import protocol.TaskResultMessage;
+import protocol.PongMessage;
 import server.db.DatabaseManager;
 import server.model.MessageEnvelope;
+import server.monitor.PeerLivenessMonitor;
 import server.rabbitmq.RabbitMqSchedulerOutput;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
@@ -11,7 +12,6 @@ import server.registry.PeerRegistry;
 import server.scheduler.TaskScheduler;
 import transport.InboundTransportMessage;
 import transport.TransportRoute;
-import transport.rabbitmq.RabbitMqRuntimeDefaults;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
@@ -19,6 +19,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class RabbitMqTaskCoordinatorServer {
+    private static final long HEARTBEAT_TIMEOUT_MILLIS = 90_000;
 
     public static void main(String[] args) throws Exception {
         RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
@@ -26,8 +27,6 @@ public class RabbitMqTaskCoordinatorServer {
 
         BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
         PeerRegistry registry = new InMemoryPeerRegistry();
-        registry.register(RabbitMqRuntimeDefaults.WORKER_POOL_NODE_ID,
-                new PeerInfo(RabbitMqRuntimeDefaults.WORKER_POOL_NODE_ID));
 
         DatabaseManager db = null;
         try {
@@ -44,16 +43,20 @@ public class RabbitMqTaskCoordinatorServer {
                 new RabbitMqSchedulerOutput(transport)
         );
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
+        PeerLivenessMonitor monitor = new PeerLivenessMonitor(registry, HEARTBEAT_TIMEOUT_MILLIS);
 
         transport.subscribe(TransportRoute.JOB_SUBMIT,
                 delivery -> enqueueForScheduler(inboundMailbox, delivery));
         transport.subscribe(TransportRoute.TASK_RESULT,
-                delivery -> enqueueForScheduler(inboundMailbox, normalizeWorkerPoolResult(delivery)));
+                delivery -> enqueueForScheduler(inboundMailbox, delivery));
+        transport.subscribe(TransportRoute.HEARTBEAT,
+                delivery -> handleHeartbeat(registry, delivery));
 
         DatabaseManager finalDb = db;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("Shutting down RabbitMQ coordinator...");
             schedulerThread.interrupt();
+            monitor.shutdown();
             if (finalDb != null) {
                 finalDb.close();
             }
@@ -63,6 +66,7 @@ public class RabbitMqTaskCoordinatorServer {
             }
         }));
 
+        monitor.start();
         schedulerThread.start();
         System.out.println("RabbitMqTaskCoordinatorServer listening on RabbitMQ routes.");
         Thread.currentThread().join();
@@ -73,25 +77,24 @@ public class RabbitMqTaskCoordinatorServer {
         inboundMailbox.put(new MessageEnvelope(delivery.message(), delivery.fromNodeId()));
     }
 
-    private static InboundTransportMessage normalizeWorkerPoolResult(InboundTransportMessage delivery) {
+    private static void handleHeartbeat(PeerRegistry registry, InboundTransportMessage delivery) {
         Message message = delivery.message();
-        if (!(message instanceof TaskResultMessage result)) {
-            return delivery;
+        if (!(message instanceof PongMessage)) {
+            return;
         }
-        TaskResultMessage normalized = new TaskResultMessage(
-                RabbitMqRuntimeDefaults.WORKER_POOL_NODE_ID,
-                result.getTime(),
-                result.getTaskId(),
-                result.getJobId(),
-                result.getResultPayload(),
-                result.isSuccessful(),
-                result.getErrorMessage()
-        );
-        return new InboundTransportMessage(
-                delivery.route(),
-                RabbitMqRuntimeDefaults.WORKER_POOL_NODE_ID,
-                normalized,
-                delivery.acknowledgement()
-        );
+        String peerNodeId = delivery.fromNodeId();
+        if (peerNodeId == null || peerNodeId.isBlank()) {
+            peerNodeId = message.getNodeId();
+        }
+        if (peerNodeId == null || peerNodeId.isBlank()) {
+            return;
+        }
+
+        PeerInfo peer = registry.get(peerNodeId);
+        if (peer == null) {
+            registry.register(peerNodeId, new PeerInfo(peerNodeId));
+        } else {
+            registry.updateHeartbeat(peerNodeId);
+        }
     }
 }

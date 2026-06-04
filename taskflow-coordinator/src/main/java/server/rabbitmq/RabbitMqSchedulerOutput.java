@@ -18,8 +18,9 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
 
     @Override
     public void sendTask(PeerInfo peer, TaskAssignMessage message) throws Exception {
+        String peerNodeId = peer.getNodeId();
         TaskAssignMessage brokerMessage = new TaskAssignMessage(
-                peer.getNodeId(),
+                peerNodeId,
                 java.time.Instant.now().toString(),
                 message.getTaskId(),
                 message.getJobId(),
@@ -27,20 +28,31 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
                 message.getPayload(),
                 message.getParam()
         );
-        transport.publish(new OutboundTransportMessage(
+        transport.publishToPeer(
                 TransportRoute.TASK_ASSIGN,
-                RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID,
-                brokerMessage
-        ));
+                peerNodeId,
+                new OutboundTransportMessage(
+                        TransportRoute.TASK_ASSIGN,
+                        RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID,
+                        brokerMessage
+                )
+        );
     }
 
     @Override
     public boolean sendJobResult(String requesterNodeId, JobResultMessage message) throws Exception {
-        transport.publish(new OutboundTransportMessage(
+        if (requesterNodeId == null || requesterNodeId.isBlank()) {
+            return false;
+        }
+        transport.publishToPeer(
                 TransportRoute.JOB_RESULT,
-                RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID,
-                message
-        ));
+                requesterNodeId,
+                new OutboundTransportMessage(
+                        TransportRoute.JOB_RESULT,
+                        RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID,
+                        message
+                )
+        );
         return true;
     }
 }

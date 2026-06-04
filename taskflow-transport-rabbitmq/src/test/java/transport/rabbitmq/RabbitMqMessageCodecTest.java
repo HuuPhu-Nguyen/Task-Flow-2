@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import protocol.FilePayload;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
@@ -71,6 +72,23 @@ class RabbitMqMessageCodecTest {
         assertEquals("job-1", decodedMessage.getJobId());
         assertEquals("IMAGE_CONVERSION", decodedMessage.getTaskType());
         assertEquals("png", decodedMessage.getParam());
+    }
+
+    @Test
+    void roundTripsHeartbeatMessages() {
+        PongMessage message = new PongMessage("peer-1", "2026-06-04T00:00:00Z");
+
+        InboundTransportMessage decoded = decode(new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                message
+        ));
+
+        assertEquals(TransportRoute.HEARTBEAT, decoded.route());
+        assertEquals("peer-1", decoded.fromNodeId());
+        PongMessage decodedMessage = assertInstanceOf(PongMessage.class, decoded.message());
+        assertEquals(MessageType.PONG, decodedMessage.getType());
+        assertEquals("peer-1", decodedMessage.getNodeId());
     }
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {
