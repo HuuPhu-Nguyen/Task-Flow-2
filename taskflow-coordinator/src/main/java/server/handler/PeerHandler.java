@@ -22,6 +22,7 @@ import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
+import server.scheduler.SchedulerConfig;
 import server.transport.TcpPeerConnection;
 import transport.TransportConnection;
 
@@ -33,13 +34,22 @@ public class PeerHandler implements Runnable {
     private final Socket socket;
     private final PeerRegistry registry;
     private final BlockingQueue<MessageEnvelope> mailbox;
+    private final SchedulerConfig schedulerConfig;
 
     public PeerHandler(Socket socket,
                        PeerRegistry registry,
                        BlockingQueue<MessageEnvelope> mailbox) {
+        this(socket, registry, mailbox, SchedulerConfig.defaults());
+    }
+
+    public PeerHandler(Socket socket,
+                       PeerRegistry registry,
+                       BlockingQueue<MessageEnvelope> mailbox,
+                       SchedulerConfig schedulerConfig) {
         this.socket = socket;
         this.registry = registry;
         this.mailbox = mailbox;
+        this.schedulerConfig = schedulerConfig == null ? SchedulerConfig.defaults() : schedulerConfig;
     }
 
     @Override
@@ -62,7 +72,7 @@ public class PeerHandler implements Runnable {
                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))
         ) {
             TransportConnection connection = new TcpPeerConnection(nodeId, socket, out, gson);
-            registry.register(nodeId, new PeerInfo(nodeId, connection));
+            registry.register(nodeId, new PeerInfo(nodeId, connection, schedulerConfig));
 
             System.out.println("Handling peer: " + nodeId);
             long nextHeartbeatAt = 0L;

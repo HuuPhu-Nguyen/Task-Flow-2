@@ -1,6 +1,9 @@
 package server.registry;
 
 import org.junit.jupiter.api.Test;
+import server.scheduler.SchedulerConfig;
+
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -49,5 +52,34 @@ class PeerInfoMetricsTest {
 
         peer.recordTaskSuccess(3_000);
         assertTrue(peer.getAvgTaskDuration() > 1_000L && peer.getAvgTaskDuration() < 3_000L);
+    }
+
+    @Test
+    void selectionScoreUsesConfiguredLoadLimitAndWeight() {
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_TASKS_PER_PEER", "1",
+                "TASKFLOW_SCORE_LOAD_WEIGHT", "10",
+                "TASKFLOW_SCORE_LATENCY_WEIGHT", "0",
+                "TASKFLOW_SCORE_DURATION_WEIGHT", "0",
+                "TASKFLOW_SCORE_FAILURE_WEIGHT", "0"
+        ));
+        PeerInfo peer = new PeerInfo("peer-4", config);
+
+        peer.incrementTasks();
+
+        assertEquals(10.0, peer.getSelectionScore());
+    }
+
+    @Test
+    void ewmaUsesConfiguredAlpha() {
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_SCORE_EWMA_ALPHA", "1.0"
+        ));
+        PeerInfo peer = new PeerInfo("peer-5", config);
+
+        peer.updateLatency(100);
+        peer.updateLatency(300);
+
+        assertEquals(300L, peer.getLatency());
     }
 }

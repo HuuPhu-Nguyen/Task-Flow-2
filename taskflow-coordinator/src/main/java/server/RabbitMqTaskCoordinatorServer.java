@@ -9,6 +9,7 @@ import server.rabbitmq.RabbitMqSchedulerOutput;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
+import server.scheduler.SchedulerConfig;
 import server.scheduler.TaskScheduler;
 import transport.InboundTransportMessage;
 import transport.TransportRoute;
@@ -27,6 +28,7 @@ public class RabbitMqTaskCoordinatorServer {
 
         BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
         PeerRegistry registry = new InMemoryPeerRegistry();
+        SchedulerConfig schedulerConfig = SchedulerConfig.fromEnvironment();
 
         DatabaseManager db = null;
         try {
@@ -40,7 +42,8 @@ public class RabbitMqTaskCoordinatorServer {
                 inboundMailbox,
                 registry,
                 db,
-                new RabbitMqSchedulerOutput(transport)
+                new RabbitMqSchedulerOutput(transport),
+                schedulerConfig
         );
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(registry, HEARTBEAT_TIMEOUT_MILLIS);
@@ -50,7 +53,7 @@ public class RabbitMqTaskCoordinatorServer {
         transport.subscribe(TransportRoute.TASK_RESULT,
                 delivery -> enqueueForScheduler(inboundMailbox, delivery));
         transport.subscribe(TransportRoute.HEARTBEAT,
-                delivery -> handleHeartbeat(registry, delivery));
+                delivery -> handleHeartbeat(registry, schedulerConfig, delivery));
 
         DatabaseManager finalDb = db;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -77,7 +80,9 @@ public class RabbitMqTaskCoordinatorServer {
         inboundMailbox.put(new MessageEnvelope(delivery.message(), delivery.fromNodeId()));
     }
 
-    private static void handleHeartbeat(PeerRegistry registry, InboundTransportMessage delivery) {
+    private static void handleHeartbeat(PeerRegistry registry,
+                                        SchedulerConfig schedulerConfig,
+                                        InboundTransportMessage delivery) {
         Message message = delivery.message();
         if (!(message instanceof PongMessage)) {
             return;
@@ -92,7 +97,7 @@ public class RabbitMqTaskCoordinatorServer {
 
         PeerInfo peer = registry.get(peerNodeId);
         if (peer == null) {
-            registry.register(peerNodeId, new PeerInfo(peerNodeId));
+            registry.register(peerNodeId, new PeerInfo(peerNodeId, schedulerConfig));
         } else {
             registry.updateHeartbeat(peerNodeId);
         }

@@ -11,31 +11,36 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class TaskScheduler implements Runnable {
-    private static final long TASK_TIMEOUT_MILLIS = 60_000;
-    private static final int MAX_TASKS_PER_PEER = 3;
-    private static final int MAX_TASK_RETRIES = 20;
-    private static final long METRICS_LOG_INTERVAL_MILLIS = 10_000;
-
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final PeerRegistry registry;
     private final DatabaseManager db;
     private final SchedulerOutput output;
+    private final SchedulerConfig config;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final SchedulerMetrics metrics = new SchedulerMetrics();
     private long lastMetricsLogAtMillis = 0L;
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox, PeerRegistry registry, DatabaseManager db) {
-        this(mailbox, registry, db, new PeerRegistrySchedulerOutput(registry));
+        this(mailbox, registry, db, new PeerRegistrySchedulerOutput(registry), SchedulerConfig.fromEnvironment());
     }
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
                          DatabaseManager db,
                          SchedulerOutput output) {
+        this(mailbox, registry, db, output, SchedulerConfig.fromEnvironment());
+    }
+
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
+                         PeerRegistry registry,
+                         DatabaseManager db,
+                         SchedulerOutput output,
+                         SchedulerConfig config) {
         this.inboundMailbox = mailbox;
         this.registry = registry;
         this.db = db;
         this.output = output;
+        this.config = config == null ? SchedulerConfig.defaults() : config;
     }
 
     @Override
@@ -68,7 +73,7 @@ public class TaskScheduler implements Runnable {
                     continue;
                 }
                 long startedAt = task.getStartTime();
-                if (startedAt <= 0 || (now - startedAt) <= TASK_TIMEOUT_MILLIS) {
+                if (startedAt <= 0 || (now - startedAt) <= config.taskTimeoutMillis()) {
                     continue;
                 }
 
@@ -77,7 +82,7 @@ public class TaskScheduler implements Runnable {
                     continue;
                 }
 
-                TaskUnit.FailureOutcome outcome = task.failAttemptBy(assignedPeerId, MAX_TASK_RETRIES);
+                TaskUnit.FailureOutcome outcome = task.failAttemptBy(assignedPeerId, config.maxTaskRetries());
                 if (outcome == TaskUnit.FailureOutcome.IGNORED) {
                     continue;
                 }
@@ -162,7 +167,7 @@ public class TaskScheduler implements Runnable {
         }
 
         if (!result.isSuccessful()) {
-            TaskUnit.FailureOutcome outcome = task.failAttemptBy(envelope.fromNodeId(), MAX_TASK_RETRIES);
+            TaskUnit.FailureOutcome outcome = task.failAttemptBy(envelope.fromNodeId(), config.maxTaskRetries());
             if (outcome == TaskUnit.FailureOutcome.IGNORED) {
                 return;
             }
@@ -229,14 +234,14 @@ public class TaskScheduler implements Runnable {
             for (TaskUnit<?> task : pending) {
                 // Find the first peer in our sorted list who still has room.
                 PeerInfo bestPeer = candidates.stream()
-                        .filter(p -> p.getActiveTasks() < MAX_TASKS_PER_PEER)
+                        .filter(p -> p.getActiveTasks() < config.maxTasksPerPeer())
                         .findFirst()
                         .orElse(null);
 
                 if (bestPeer != null) {
                     assign(job, task, bestPeer);
                 } else {
-                    return; // All peers have hit the limit of 3
+                    return; // All peers have hit the configured concurrency limit.
                 }
             }
         }
@@ -278,7 +283,7 @@ public class TaskScheduler implements Runnable {
         return registry.getAllPeers().stream()
                 // 1. Filter out dead or over-encumbered peers
                 .filter(PeerInfo::isConnected)
-                .filter(p -> p.getActiveTasks() < MAX_TASKS_PER_PEER)
+                .filter(p -> p.getActiveTasks() < config.maxTasksPerPeer())
 
                 // 2. Sort by our composite score (Lowest score = Best peer)
                 .sorted(Comparator.comparingDouble(PeerInfo::getSelectionScore))
@@ -416,7 +421,7 @@ public class TaskScheduler implements Runnable {
         long now = System.currentTimeMillis();
         metrics.setQueueDepth(inboundMailbox.size());
         metrics.setActiveJobs(activeJobs.size());
-        if (now - lastMetricsLogAtMillis < METRICS_LOG_INTERVAL_MILLIS) {
+        if (now - lastMetricsLogAtMillis < config.metricsLogIntervalMillis()) {
             return;
         }
         lastMetricsLogAtMillis = now;

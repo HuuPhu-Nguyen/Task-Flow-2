@@ -14,6 +14,8 @@ import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerRegistry;
+import server.scheduler.PeerRegistrySchedulerOutput;
+import server.scheduler.SchedulerConfig;
 import server.scheduler.TaskScheduler;
 
 public class TaskCoordinatorServer {
@@ -31,6 +33,7 @@ public class TaskCoordinatorServer {
 
         BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
         PeerRegistry registry = new InMemoryPeerRegistry();
+        SchedulerConfig schedulerConfig = SchedulerConfig.fromEnvironment();
 
         DatabaseManager db = null;
         try {
@@ -40,7 +43,13 @@ public class TaskCoordinatorServer {
             System.err.println("Warning: could not open database, history will not be persisted: " + e.getMessage());
         }
 
-        TaskScheduler schedulerLogic = new TaskScheduler(inboundMailbox, registry, db);
+        TaskScheduler schedulerLogic = new TaskScheduler(
+                inboundMailbox,
+                registry,
+                db,
+                new PeerRegistrySchedulerOutput(registry),
+                schedulerConfig
+        );
         Thread schedulerThread = new Thread(schedulerLogic, "task-scheduler");
 
         //Monitoring and Networking
@@ -108,7 +117,7 @@ public class TaskCoordinatorServer {
             while (true) {
                 Socket socket = serverSocket.accept();
                 // PeerHandler will drop messages into 'inboundMailbox', which schedulerThread pulls from
-                ioPool.submit(new PeerHandler(socket, registry, inboundMailbox));
+                ioPool.submit(new PeerHandler(socket, registry, inboundMailbox, schedulerConfig));
             }
         } catch (IOException e) {
             e.printStackTrace();

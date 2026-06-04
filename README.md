@@ -111,12 +111,12 @@ The `TaskScheduler` is the core of the system.
 - Aggregates results and returns them to the requester
 
 **Load Balancing**
-- Maximum of **3 concurrent tasks per peer**
-- Peers are selected based on a scoring function (load + performance)
+- Default maximum of **3 concurrent tasks per peer**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`
+- Peers are selected by a configurable weighted score using load, latency, average task duration, and failure rate
 
 **Fault Tolerance**
-- Task timeout: **60 seconds**
-- Automatic retries on failure
+- Default task timeout: **60 seconds**, configurable with `TASKFLOW_TASK_TIMEOUT_MS`
+- Automatic retries on failure, configurable with `TASKFLOW_MAX_TASK_RETRIES`
 - Failed tasks are returned to the pending queue and retried by available peers
 
 ---
@@ -273,6 +273,33 @@ Detailed guarantee definitions are documented in:
 - JavaFX - GUI
 - JavaCV / FFmpeg - video transcoding
 - RabbitMQ Java Client - broker transport adapter
+
+---
+
+## Scheduler Configuration
+
+Scheduler retry and peer-selection behavior can be configured through environment variables. Defaults preserve the current demo behavior.
+
+- `TASKFLOW_TASK_TIMEOUT_MS` - task attempt timeout, default `60000`
+- `TASKFLOW_MAX_TASKS_PER_PEER` - per-peer concurrent task limit, default `3`
+- `TASKFLOW_MAX_TASK_RETRIES` - terminal failure threshold, default `20`
+- `TASKFLOW_METRICS_LOG_INTERVAL_MS` - scheduler metrics log interval, default `10000`
+- `TASKFLOW_SCORE_LOAD_WEIGHT` - peer load score weight, default `6.0`
+- `TASKFLOW_SCORE_LATENCY_WEIGHT` - peer latency score weight, default `2.0`
+- `TASKFLOW_SCORE_DURATION_WEIGHT` - average task duration score weight, default `1.5`
+- `TASKFLOW_SCORE_FAILURE_WEIGHT` - failure-rate score weight, default `4.0`
+- `TASKFLOW_SCORE_LATENCY_BASELINE_MS` - latency normalization baseline, default `200.0`
+- `TASKFLOW_SCORE_DURATION_BASELINE_MS` - duration normalization baseline, default `5000.0`
+- `TASKFLOW_SCORE_EWMA_ALPHA` - smoothing factor for latency and duration metrics, default `0.2`
+
+Example:
+
+```powershell
+$env:TASKFLOW_TASK_TIMEOUT_MS = "120000"
+$env:TASKFLOW_MAX_TASKS_PER_PEER = "5"
+$env:TASKFLOW_MAX_TASK_RETRIES = "8"
+.\mvnw.cmd -pl taskflow-coordinator exec:java
+```
 
 ---
 

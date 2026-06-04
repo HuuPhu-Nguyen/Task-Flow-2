@@ -1,6 +1,6 @@
 # TaskFlow Framework Migration Plan
 
-Last updated: 2026-06-04 09:24 Asia/Bangkok
+Last updated: 2026-06-04 09:54 Asia/Bangkok
 
 ## Showcase Objective
 
@@ -36,6 +36,7 @@ Completed so far:
 - Added a peer processor discovery path through ServiceLoader.
 - Added a TransportConnection abstraction so core peer tracking no longer depends directly on java.net.Socket.
 - Added a SchedulerOutput abstraction so the scheduler can dispatch through TCP or a broker transport.
+- Added SchedulerConfig so retry limits, task timeouts, peer concurrency, peer scoring weights, metric intervals, and EWMA smoothing are configurable through environment variables.
 - Added a RabbitMQ transport module with topology declaration, JSON message envelopes, publish/subscribe, manual ack, requeue, reject, and prefetch configuration.
 - Added RabbitMQ coordinator and command-line peer runtime entry points.
 - Added TASKFLOW_TRANSPORT mode selection while keeping TCP as the default runtime.
@@ -49,6 +50,7 @@ Current runtime status:
 - RabbitMQ can be selected with TASKFLOW_TRANSPORT=rabbitmq.
 - RabbitMQ coordinator/peer runtime now models first-class broker peers with peer IDs, heartbeat registration, peer-specific task assignment, peer-specific job-result routing, and a basic broker-aware peer submit path.
 - RabbitMQ can support the coordinated peer-to-peer objective, but the current implementation still needs a live broker integration test, broker backpressure, dead-letter handling, and stronger restart/recovery semantics.
+- Scheduler retry and peer-selection rules are now configurable through `TASKFLOW_*` environment variables while retaining the original defaults.
 - Local RabbitMQ was not running in the latest session: localhost:5672 was not reachable on 2026-06-03 at 23:38 Asia/Bangkok.
 - Runtime state store is still SQLite through DatabaseManager.
 - PostgreSQL/Flyway migration has not started.
@@ -158,6 +160,9 @@ Root pom.xml is packaging=pom and includes:
 
 - taskflow-core/src/main/java/server/scheduler/SchedulerMetrics.java
   Scheduler metrics snapshot and counters.
+
+- taskflow-core/src/main/java/server/scheduler/SchedulerConfig.java
+  Typed scheduler/runtime tuning config loaded from environment variables.
 
 - taskflow-core/src/main/java/server/registry/PeerInfo.java
   Peer state and load tracking through TransportConnection.
@@ -598,6 +603,7 @@ Completed since latest review:
 - RabbitMQ command-line peers now use real peer IDs with heartbeat registration.
 - RabbitMQ task assignment and job-result delivery now use peer-specific routes.
 - RabbitMQ command-line peers can submit jobs through the broker.
+- Scheduler retry limits, task timeout, max tasks per peer, peer score weights, metric interval, and EWMA smoothing are configurable.
 - Existing tests pass.
 - All modules package.
 
@@ -614,6 +620,7 @@ Completed:
 - Refactor has been committed as a clean modular Maven migration.
 - README now includes stronger project positioning, technical differentiators, an architecture diagram, and known limitations.
 - Repository now has `.gitattributes` for consistent text and binary handling.
+- README now documents scheduler configuration variables and defaults.
 
 Pending:
 

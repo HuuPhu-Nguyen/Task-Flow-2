@@ -1,5 +1,6 @@
 package server.registry;
 
+import server.scheduler.SchedulerConfig;
 import transport.TransportConnection;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -7,11 +8,9 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class PeerInfo {
 
-    private static final int MAX_ACTIVE_TASKS = 3;
-    private static final double EWMA_ALPHA = 0.2;
-
     private final String nodeId;
     private final TransportConnection connection;
+    private final SchedulerConfig config;
 
     private final AtomicLong lastHeartbeatReceivedAtMillis;
     private final AtomicInteger activeTasks = new AtomicInteger(0);
@@ -22,12 +21,21 @@ public class PeerInfo {
     private final AtomicLong failedTasks = new AtomicLong(0);
 
     public PeerInfo(String nodeId) {
-        this(nodeId, new NoopTransportConnection(nodeId));
+        this(nodeId, new NoopTransportConnection(nodeId), SchedulerConfig.defaults());
     }
 
     public PeerInfo(String nodeId, TransportConnection connection) {
+        this(nodeId, connection, SchedulerConfig.defaults());
+    }
+
+    public PeerInfo(String nodeId, SchedulerConfig config) {
+        this(nodeId, new NoopTransportConnection(nodeId), config);
+    }
+
+    public PeerInfo(String nodeId, TransportConnection connection, SchedulerConfig config) {
         this.nodeId = nodeId;
         this.connection = connection;
+        this.config = config == null ? SchedulerConfig.defaults() : config;
         this.lastHeartbeatReceivedAtMillis = new AtomicLong(System.currentTimeMillis());
     }
 
@@ -90,25 +98,26 @@ public class PeerInfo {
     public long getCompletedTasks() { return completedTasks.get(); }
 
     public double getSelectionScore() {
-        double loadScore = activeTasks.get() / (double) MAX_ACTIVE_TASKS;
-        double latencyScore = normalize(latencyEwmaMs, 200.0);
-        double durationScore = normalize(taskDurationEwmaMs, 5_000.0);
+        double loadScore = activeTasks.get() / (double) config.maxTasksPerPeer();
+        double latencyScore = normalize(latencyEwmaMs, config.peerScoreLatencyBaselineMillis());
+        double durationScore = normalize(taskDurationEwmaMs, config.peerScoreDurationBaselineMillis());
 
         long totalObserved = completedTasks.get() + failedTasks.get();
         double failureRate = totalObserved == 0 ? 0.0 : failedTasks.get() / (double) totalObserved;
 
         // lower score means better candidate
-        return (loadScore * 6.0)
-                + (latencyScore * 2.0)
-                + (durationScore * 1.5)
-                + (failureRate * 4.0);
+        return (loadScore * config.peerScoreLoadWeight())
+                + (latencyScore * config.peerScoreLatencyWeight())
+                + (durationScore * config.peerScoreDurationWeight())
+                + (failureRate * config.peerScoreFailureWeight());
     }
 
     private long applyEwma(long previous, long sample) {
         if (previous <= 0) {
             return sample;
         }
-        return Math.round((1.0 - EWMA_ALPHA) * previous + EWMA_ALPHA * sample);
+        return Math.round((1.0 - config.peerScoreEwmaAlpha()) * previous
+                + config.peerScoreEwmaAlpha() * sample);
     }
 
     private double normalize(long value, double reference) {

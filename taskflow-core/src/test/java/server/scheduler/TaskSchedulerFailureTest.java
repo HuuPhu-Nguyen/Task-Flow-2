@@ -30,7 +30,8 @@ class TaskSchedulerFailureTest {
                 mailbox,
                 new InMemoryPeerRegistry(),
                 null,
-                output
+                output,
+                SchedulerConfig.defaults()
         );
         Thread schedulerThread = new Thread(scheduler, "scheduler-failure-test");
         schedulerThread.start();
