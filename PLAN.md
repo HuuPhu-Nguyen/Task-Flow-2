@@ -87,7 +87,7 @@ Root pom.xml is packaging=pom and includes:
 - taskflow-plugin-conversion
 - taskflow-transport-rabbitmq
 - taskflow-coordinator
-- taskflow-worker
+- taskflow-peer
 - taskflow-gui
 
 ## Important Files And Responsibilities
@@ -232,13 +232,13 @@ Root pom.xml is packaging=pom and includes:
 
 ### Command-Line Peer Runtime
 
-- taskflow-worker/src/main/java/peer/PeerNode.java
+- taskflow-peer/src/main/java/peer/PeerNode.java
   Main command-line peer entry point. Defaults to TCP and delegates to RabbitMqPeerNode when TASKFLOW_TRANSPORT=rabbitmq.
 
-- taskflow-worker/src/main/java/peer/RabbitMqPeerNode.java
+- taskflow-peer/src/main/java/peer/RabbitMqPeerNode.java
   RabbitMQ peer execution runtime. Subscribes to TASK_ASSIGN, executes tasks, publishes TASK_RESULT, and relies on transport auto-ack after successful handler completion.
 
-- taskflow-worker/src/main/java/peer/engine/PeerExecutionEngine.java
+- taskflow-peer/src/main/java/peer/engine/PeerExecutionEngine.java
   Peer execution engine. Discovers WorkerPlugin implementations through ServiceLoader and exposes executeTask for broker runtime plus submitTask for TCP runtime.
 
 ### GUI Runtime
@@ -362,7 +362,7 @@ Run TCP coordinator, default mode:
 Run TCP command-line peer:
 
 ```powershell
-.\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
+.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="localhost 6789"
 ```
 
 Run GUI TCP peer:
@@ -382,7 +382,7 @@ Run RabbitMQ command-line peer after RabbitMQ is available at localhost:5672:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
-.\mvnw.cmd -pl taskflow-worker exec:java
+.\mvnw.cmd -pl taskflow-peer exec:java
 ```
 
 Reset to TCP in the same PowerShell session:
@@ -672,7 +672,7 @@ Run TCP coordinator:
 Run TCP command-line peer:
 
 ```powershell
-.\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
+.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="localhost 6789"
 ```
 
 Run current GUI:
@@ -692,5 +692,5 @@ Run RabbitMQ command-line peer:
 
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
-.\mvnw.cmd -pl taskflow-worker exec:java
+.\mvnw.cmd -pl taskflow-peer exec:java
 ```

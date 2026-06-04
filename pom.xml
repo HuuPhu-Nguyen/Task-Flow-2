@@ -14,7 +14,7 @@
         <module>taskflow-plugin-conversion</module>
         <module>taskflow-transport-rabbitmq</module>
         <module>taskflow-coordinator</module>
-        <module>taskflow-worker</module>
+        <module>taskflow-peer</module>
         <module>taskflow-gui</module>
     </modules>
 
@@ -56,7 +56,7 @@
             </dependency>
             <dependency>
                 <groupId>com.dickinson.cs</groupId>
-                <artifactId>taskflow-worker</artifactId>
+                <artifactId>taskflow-peer</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

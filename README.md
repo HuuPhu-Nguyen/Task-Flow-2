@@ -73,7 +73,7 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-plugin-conversion` - image/video job and peer-side processor implementations discovered through `ServiceLoader`
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
-- `taskflow-worker` - command-line peer runtime for TCP or RabbitMQ
+- `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
 - `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
 
 Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.WorkerPlugin`, then register providers under `META-INF/services`.
@@ -375,7 +375,7 @@ Run a RabbitMQ command-line peer on Windows PowerShell:
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
 $env:TASKFLOW_PEER_ID = "peer-a"
-.\mvnw.cmd -pl taskflow-worker exec:java
+.\mvnw.cmd -pl taskflow-peer exec:java
 ```
 
 Submit a RabbitMQ job from a command-line peer on Windows PowerShell:
@@ -383,7 +383,7 @@ Submit a RabbitMQ job from a command-line peer on Windows PowerShell:
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
 $env:TASKFLOW_PEER_ID = "peer-submit"
-.\mvnw.cmd -pl taskflow-worker exec:java -Dexec.args="submit image png path\to\input.jpg"
+.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit image png path\to\input.jpg"
 ```
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
@@ -518,7 +518,7 @@ Inside the GUI:
 The GUI also executes assigned tasks, so this is optional. Use this when you want another machine or terminal to contribute compute capacity without opening the GUI:
 
 ```bash
-./mvnw -pl taskflow-worker exec:java -Dexec.args="localhost 6789"
+./mvnw -pl taskflow-peer exec:java -Dexec.args="localhost 6789"
 ```
 
 Replace `localhost` with the coordinator machine's IP address when running across computers.
