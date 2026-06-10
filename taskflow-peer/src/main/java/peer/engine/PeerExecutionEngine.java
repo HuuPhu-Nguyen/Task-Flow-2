@@ -35,6 +35,10 @@ public class PeerExecutionEngine {
         return Set.copyOf(processors.keySet());
     }
 
+    public void shutdown() {
+        executionPool.shutdownNow();
+    }
+
     public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
         return CompletableFuture.supplyAsync(() -> {
             try {

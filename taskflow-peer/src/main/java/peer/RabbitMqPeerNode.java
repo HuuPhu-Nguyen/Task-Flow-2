@@ -57,6 +57,7 @@ public class RabbitMqPeerNode {
         ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId, engine.getRegisteredTaskTypes());
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             heartbeats.shutdownNow();
+            engine.shutdown();
             try {
                 transport.close();
             } catch (Exception ignored) {
@@ -65,9 +66,13 @@ public class RabbitMqPeerNode {
 
         if (isSubmitCommand(args)) {
             String jobId = submitJob(nodeId, transport, args);
-            waitForJobResult(jobId, jobResults);
-            heartbeats.shutdownNow();
-            transport.close();
+            try {
+                waitForJobResult(jobId, jobResults);
+            } finally {
+                heartbeats.shutdownNow();
+                engine.shutdown();
+                transport.close();
+            }
             return;
         }
 

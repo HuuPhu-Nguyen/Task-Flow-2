@@ -393,6 +393,53 @@ The submitting peer stays available for task execution while waiting for `JOB_RE
 
 ---
 
+## Quick RabbitMQ Demo
+
+The recommended broker-backed demo path is Docker Compose. It builds a local TaskFlow image, then runs RabbitMQ, the coordinator, two peers, and a one-shot submitting peer that generates twelve tiny image tasks:
+
+```bash
+docker compose up --build --abort-on-container-exit --exit-code-from submitter
+```
+
+Converted outputs are written to `target/demo-results`, and RabbitMQ job output is retained under `target/rabbitmq-results`. After a default run, clean up the demo services with:
+
+```bash
+docker compose down --remove-orphans
+```
+
+RabbitMQ management is available during the run at `http://localhost:15672` with `guest` / `guest`.
+
+If you want a third peer in the same demo:
+
+```bash
+docker compose --profile full-demo up --build --abort-on-container-exit --exit-code-from submitter
+docker compose --profile full-demo down --remove-orphans
+```
+
+On Windows, there is also a PowerShell convenience wrapper:
+
+```powershell
+.\scripts\demo-rabbitmq.ps1
+```
+
+The script builds the Maven modules with tests skipped, starts RabbitMQ with Docker Compose, generates twelve small sample PNG inputs, starts one coordinator and three RabbitMQ peers, submits an image conversion job, and copies the latest converted outputs to `target\demo-results`. Runtime logs are written under `target\demo-logs`.
+
+Useful options:
+
+```powershell
+.\scripts\demo-rabbitmq.ps1 -PeerCount 5 -FileCount 15 -TargetFormat jpg
+.\scripts\demo-rabbitmq.ps1 -SkipDocker
+.\scripts\demo-rabbitmq.ps1 -KeepRabbitMq
+```
+
+Requirements:
+
+- Docker Desktop or Docker Engine with Compose
+
+The Docker path does not require Java or Maven on the host machine. Use `-KeepRabbitMq` with the PowerShell wrapper if you want the broker to remain available after the script finishes.
+
+---
+
 ## Known Limitations
 
 - RabbitMQ integration tests against a live broker are not implemented yet.
@@ -431,6 +478,7 @@ It should run on a normal Windows, macOS, or Linux desktop/laptop if all of thes
 
 - Java 21 or newer is installed.
 - Maven 3.9 or newer is installed.
+- Docker Desktop is installed if you want to run the one-command RabbitMQ demo.
 - The machine can download Maven dependencies the first time it builds.
 - The GUI machine has a desktop environment available. Headless servers can run the coordinator or command-line peer, but not the JavaFX GUI.
 - Port `6789` is open between the coordinator and peer machines.
