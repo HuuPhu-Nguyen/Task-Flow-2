@@ -4,6 +4,8 @@ import org.junit.jupiter.api.Test;
 import transport.TransportRoute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqTopologyTest {
     @Test
@@ -38,5 +40,44 @@ class RabbitMqTopologyTest {
                 topology.peerQueueName(TransportRoute.JOB_RESULT, "peer.1"));
         assertEquals("jobs.result.peer_1",
                 topology.peerRoutingKey(TransportRoute.JOB_RESULT, "peer.1"));
+    }
+
+    @Test
+    void exposesDeadLetterTopologyAndQueueArguments() {
+        RabbitMqTopology topology = new RabbitMqTopology(RabbitMqTransportConfig.localDefaults());
+
+        assertTrue(topology.deadLetterEnabled());
+        assertEquals("taskflow.dead-letter.exchange", topology.deadLetterExchangeName());
+        assertEquals("taskflow.dead-letter", topology.deadLetterQueueName());
+        assertEquals("dead-letter", topology.deadLetterRoutingKey());
+        assertEquals("taskflow.dead-letter.exchange",
+                topology.queueArguments().get("x-dead-letter-exchange"));
+        assertEquals("dead-letter",
+                topology.queueArguments().get("x-dead-letter-routing-key"));
+    }
+
+    @Test
+    void omitsDeadLetterArgumentsWhenDisabled() {
+        RabbitMqTransportConfig defaults = RabbitMqTransportConfig.localDefaults();
+        RabbitMqTransportConfig config = new RabbitMqTransportConfig(
+                defaults.host(),
+                defaults.port(),
+                defaults.username(),
+                defaults.password(),
+                defaults.virtualHost(),
+                defaults.exchangeName(),
+                defaults.queuePrefix(),
+                defaults.durable(),
+                defaults.prefetchCount(),
+                false,
+                "",
+                "",
+                "",
+                defaults.requeueOnHandlerFailure()
+        );
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        assertFalse(topology.deadLetterEnabled());
+        assertTrue(topology.queueArguments().isEmpty());
     }
 }

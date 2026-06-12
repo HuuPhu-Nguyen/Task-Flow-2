@@ -1,5 +1,7 @@
 package server.registry;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import server.scheduler.SchedulerConfig;
 import transport.TransportConnection;
 
@@ -10,6 +12,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class PeerInfo {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerInfo.class);
 
     private final String nodeId;
     private final TransportConnection connection;
@@ -59,7 +63,7 @@ public class PeerInfo {
         if (connection != null && connection.isOpen()) {
             connection.send(message);
         } else {
-            System.err.println("No sender attached for " + nodeId);
+            LOGGER.warn("event=peer_send_skipped peer_id={} reason=no_open_sender", nodeId);
         }
     }
 

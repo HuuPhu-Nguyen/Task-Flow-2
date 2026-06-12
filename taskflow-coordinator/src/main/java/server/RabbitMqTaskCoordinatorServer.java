@@ -1,5 +1,7 @@
 package server;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import protocol.Message;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
@@ -20,6 +22,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
 public class RabbitMqTaskCoordinatorServer {
+    private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTaskCoordinatorServer.class);
+
     private static final long HEARTBEAT_TIMEOUT_MILLIS = 90_000;
 
     public static void main(String[] args) throws Exception {
@@ -33,9 +37,10 @@ public class RabbitMqTaskCoordinatorServer {
         DatabaseManager db = null;
         try {
             db = new DatabaseManager();
-            System.out.println("Database initialized: " + DatabaseManager.DB_PATH);
+            LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
         } catch (Exception e) {
-            System.err.println("Warning: could not open database, history will not be persisted: " + e.getMessage());
+            LOGGER.warn("event=database_unavailable path={} error={}",
+                    DatabaseManager.DB_PATH, e.getMessage(), e);
         }
 
         TaskScheduler schedulerLogic = new TaskScheduler(
@@ -57,7 +62,7 @@ public class RabbitMqTaskCoordinatorServer {
 
         DatabaseManager finalDb = db;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("Shutting down RabbitMQ coordinator...");
+            LOGGER.info("event=rabbitmq_coordinator_shutdown");
             schedulerThread.interrupt();
             monitor.shutdown();
             if (finalDb != null) {
@@ -71,7 +76,7 @@ public class RabbitMqTaskCoordinatorServer {
 
         monitor.start();
         schedulerThread.start();
-        System.out.println("RabbitMqTaskCoordinatorServer listening on RabbitMQ routes.");
+        LOGGER.info("event=coordinator_started transport=rabbitmq");
         Thread.currentThread().join();
     }
 

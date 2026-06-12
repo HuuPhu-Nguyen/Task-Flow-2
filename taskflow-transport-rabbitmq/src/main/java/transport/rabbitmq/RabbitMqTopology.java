@@ -3,6 +3,7 @@ package transport.rabbitmq;
 import transport.TransportRoute;
 
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
@@ -21,6 +22,32 @@ public class RabbitMqTopology {
 
     public boolean durable() {
         return config.durable();
+    }
+
+    public boolean deadLetterEnabled() {
+        return config.deadLetterEnabled();
+    }
+
+    public String deadLetterExchangeName() {
+        return config.deadLetterExchangeName();
+    }
+
+    public String deadLetterQueueName() {
+        return config.deadLetterQueueName();
+    }
+
+    public String deadLetterRoutingKey() {
+        return config.deadLetterRoutingKey();
+    }
+
+    public Map<String, Object> queueArguments() {
+        if (!config.deadLetterEnabled()) {
+            return Map.of();
+        }
+        Map<String, Object> arguments = new LinkedHashMap<>();
+        arguments.put("x-dead-letter-exchange", config.deadLetterExchangeName());
+        arguments.put("x-dead-letter-routing-key", config.deadLetterRoutingKey());
+        return Map.copyOf(arguments);
     }
 
     public String queueName(TransportRoute route) {

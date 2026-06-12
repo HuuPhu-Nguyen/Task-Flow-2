@@ -16,6 +16,8 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import messaging.MessageDispatcher;
 import messaging.MessageFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import peer.PeerNode;
 import peer.engine.PeerExecutionEngine;
 import protocol.*;
@@ -33,6 +35,8 @@ import java.util.Base64;
 import java.util.List;
 
 public class PeerApp extends Application {
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
+
     private Stage window;
     private PeerExecutionEngine engine;
     private final Gson gson = new Gson();
@@ -59,9 +63,10 @@ public class PeerApp extends Application {
 
             // Initialize Engine with the same unique ID
             engine = new PeerExecutionEngine(sessionId);
-            System.out.println("GUI peer registered task processors: " + engine.getRegisteredTaskTypes());
+            LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
+                    sessionId, engine.getRegisteredTaskTypes());
         } catch (IOException e) {
-            e.printStackTrace();
+            LOGGER.error("event=gui_init_failed error={}", e.getMessage(), e);
         }
     }
 
@@ -184,20 +189,20 @@ public class PeerApp extends Application {
 
                 if (jobId != null) {
                     myActiveJobIds.add(jobId);
-                    System.out.println("GUI: Job submitted via PeerNode. ID: " + jobId + " Type: " + jobType);
+                    LOGGER.info("event=gui_job_submitted job_id={} job_type={}", jobId, jobType);
 
                     gallery.getChildren().clear();
 
                     for (File f : files) {
                         if (!f.delete()) {
-                            System.err.println("Could not delete temporary file: " + f.getName());
+                            LOGGER.warn("event=temp_file_delete_failed file={}", f.getName());
                         }
                     }
 
                     new Alert(Alert.AlertType.CONFIRMATION, jobType + " Started! The gallery will be cleared.").show();
                 }
             } catch (Exception ex) {
-                ex.printStackTrace();
+                LOGGER.error("event=gui_job_submit_failed error={}", ex.getMessage(), ex);
                 new Alert(Alert.AlertType.ERROR, "Error: " + ex.getMessage()).show();
             }
         });
@@ -228,7 +233,8 @@ public class PeerApp extends Application {
                         fileCard.getChildren().add(new Label(file.getName()));
                         gallery.getChildren().add(fileCard);
                     } catch (IOException ex) {
-                        ex.printStackTrace();
+                        LOGGER.warn("event=gui_upload_copy_failed source={} error={}",
+                                file.getAbsolutePath(), ex.getMessage(), ex);
                     }
                 }
             }
@@ -387,7 +393,7 @@ public class PeerApp extends Application {
             } catch (IOException e) {
                 socketOut = null;
                 onFailed.accept(e.getMessage());
-                Platform.runLater(() -> System.err.println("Connection lost: " + e.getMessage()));
+                Platform.runLater(() -> LOGGER.warn("event=gui_connection_lost error={}", e.getMessage(), e));
             }
         });
         netThread.setDaemon(true);
@@ -491,9 +497,10 @@ public class PeerApp extends Application {
                 Path path = safeOutputPath(outputDir, fp.fileName());
                 Files.write(path, data);
 
-                System.out.println("[GUI] File saved to: " + path.toAbsolutePath());
+                LOGGER.info("event=gui_file_saved path={}", path.toAbsolutePath());
             } catch (Exception ex) {
-                System.err.println("[GUI] Failed to save " + fp.fileName() + ": " + ex.getMessage());
+                LOGGER.warn("event=gui_file_save_failed file={} error={}",
+                        fp.fileName(), ex.getMessage(), ex);
             }
         }
     }

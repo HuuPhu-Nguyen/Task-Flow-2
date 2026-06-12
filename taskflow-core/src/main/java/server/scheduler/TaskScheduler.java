@@ -1,16 +1,19 @@
 package server.scheduler;
 
 import protocol.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import server.db.DatabaseManager;
 import server.job.*;
 import server.model.MessageEnvelope;
 import server.registry.*;
 
-import java.io.PrintStream;
 import java.util.*;
 import java.util.concurrent.*;
 
 public class TaskScheduler implements Runnable {
+    private static final Logger LOGGER = LoggerFactory.getLogger(TaskScheduler.class);
+
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final PeerRegistry registry;
     private final DatabaseManager db;
@@ -452,22 +455,21 @@ public class TaskScheduler implements Runnable {
     }
 
     private void logInfoEvent(String event, Map<String, Object> fields) {
-        logEvent(System.out, "INFO", event, fields);
+        LOGGER.info("event={}{}", event, formatFields(fields));
     }
 
     private void logErrorEvent(String event, Map<String, Object> fields) {
-        logEvent(System.err, "ERROR", event, fields);
+        LOGGER.error("event={}{}", event, formatFields(fields));
     }
 
-    private void logEvent(PrintStream stream, String level, String event, Map<String, Object> fields) {
-        StringBuilder builder = new StringBuilder("[Scheduler]");
-        builder.append(" level=").append(level).append(" event=").append(event);
+    private String formatFields(Map<String, Object> fields) {
+        StringBuilder builder = new StringBuilder();
         for (Map.Entry<String, Object> entry : fields.entrySet()) {
             builder.append(' ')
                     .append(entry.getKey())
                     .append('=')
                     .append(String.valueOf(entry.getValue()));
         }
-        stream.println(builder);
+        return builder.toString();
     }
 }

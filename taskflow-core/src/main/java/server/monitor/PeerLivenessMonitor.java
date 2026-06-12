@@ -1,5 +1,7 @@
 package server.monitor;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 
@@ -9,6 +11,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class PeerLivenessMonitor {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerLivenessMonitor.class);
 
     private final PeerRegistry registry;
     private final ScheduledExecutorService scheduler;
@@ -35,7 +39,7 @@ public class PeerLivenessMonitor {
         for (PeerInfo peer : registry.getAllPeers()) {
             long lastSeen = peer.getLastHeartbeatReceivedAtMillis();
             if (now - lastSeen > timeoutMillis) {
-                System.out.println("Peer timed out: " + peer.getNodeId());
+                LOGGER.warn("event=peer_timeout peer_id={} timeout_ms={}", peer.getNodeId(), timeoutMillis);
                 if (onTimeout != null) {
                     onTimeout.accept(peer);
                 }

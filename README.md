@@ -60,7 +60,7 @@ flowchart LR
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode is still transitional until it has a live broker integration test, broker backpressure, dead-letter handling, and GUI support.
+TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode is still transitional until it has a live broker integration test, broker backpressure, live dead-letter validation, and GUI support.
 
 ---
 
@@ -80,7 +80,7 @@ Framework core no longer imports concrete image or video job classes. New task t
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, and reject support. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, and dead-letter exchange/queue configuration. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
 ---
 
@@ -362,9 +362,14 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_QUEUE_PREFIX`
 - `TASKFLOW_RABBITMQ_DURABLE`
 - `TASKFLOW_RABBITMQ_PREFETCH`
+- `TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED`
+- `TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE`
+- `TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE`
+- `TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY`
+- `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE`
 - `TASKFLOW_PEER_ID`
 
-Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, and prefetch `3`. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
 
 Run the RabbitMQ coordinator on Windows PowerShell:
 
@@ -443,10 +448,10 @@ The Docker path does not require Java or Maven on the host machine. Use `-KeepRa
 ## Known Limitations
 
 - RabbitMQ integration tests against a live broker are not implemented yet.
-- RabbitMQ mode is functional but transitional; peer-specific routing is implemented, but broker backpressure, dead-letter handling, and restart recovery are not complete.
+- RabbitMQ mode is functional but transitional; peer-specific routing and dead-letter topology configuration are implemented, but broker backpressure, live dead-letter validation, and restart recovery are not complete.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
-- Runtime logging still uses console output in several paths and should be migrated to SLF4J/Logback.
+- Main Java runtime paths now use SLF4J/Logback with explicit runtime configuration; operational logging polish still needs live-runtime review.
 - SQLite is the current local history store; PostgreSQL/Flyway support is planned for durable production-style state management.
 
 ---

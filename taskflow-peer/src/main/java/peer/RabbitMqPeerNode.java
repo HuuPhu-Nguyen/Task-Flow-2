@@ -1,6 +1,8 @@
 package peer;
 
 import com.google.gson.Gson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import peer.engine.PeerExecutionEngine;
 import protocol.FilePayload;
 import protocol.JobResultMessage;
@@ -35,6 +37,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class RabbitMqPeerNode {
+    private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqPeerNode.class);
+
     private static final long HEARTBEAT_INTERVAL_MILLIS = 30_000;
     private static final long JOB_RESULT_TIMEOUT_MINUTES = 15;
     private static final Gson GSON = new Gson();
@@ -46,8 +50,8 @@ public class RabbitMqPeerNode {
 
         BlockingQueue<JobResultMessage> jobResults = new LinkedBlockingQueue<>();
         PeerExecutionEngine engine = new PeerExecutionEngine(nodeId);
-        System.out.println("RabbitMQ peer " + nodeId + " registered task processors: "
-                + engine.getRegisteredTaskTypes());
+        LOGGER.info("event=peer_processors_registered transport=rabbitmq peer_id={} task_types={}",
+                nodeId, engine.getRegisteredTaskTypes());
 
         transport.subscribePeer(TransportRoute.TASK_ASSIGN, nodeId,
                 delivery -> handleTaskAssignment(nodeId, transport, engine, delivery));
@@ -76,7 +80,7 @@ public class RabbitMqPeerNode {
             return;
         }
 
-        System.out.println("RabbitMqPeerNode consuming peer-specific task assignments.");
+        LOGGER.info("event=peer_consuming_assignments transport=rabbitmq peer_id={}", nodeId);
         Thread.currentThread().join();
     }
 
@@ -90,7 +94,8 @@ public class RabbitMqPeerNode {
             return;
         }
         if (!nodeId.equals(task.getNodeId())) {
-            System.err.println("Ignoring task assigned to " + task.getNodeId() + " on peer " + nodeId);
+            LOGGER.warn("event=task_assignment_ignored peer_id={} assigned_peer_id={}",
+                    nodeId, task.getNodeId());
             ack(delivery.acknowledgement());
             return;
         }
@@ -118,8 +123,8 @@ public class RabbitMqPeerNode {
             return;
         }
         jobResults.offer(result);
-        System.out.println("Received JOB_RESULT for " + result.getJobId()
-                + " success=" + result.isSuccessful());
+        LOGGER.info("event=job_result_received job_id={} success={}",
+                result.getJobId(), result.isSuccessful());
     }
 
     private static ScheduledExecutorService startHeartbeats(RabbitMqTransport transport,
@@ -138,7 +143,8 @@ public class RabbitMqPeerNode {
                         new PongMessage(nodeId, Instant.now().toString(), supportedTaskTypes)
                 ));
             } catch (Exception e) {
-                System.err.println("RabbitMQ heartbeat failed for " + nodeId + ": " + e.getMessage());
+                LOGGER.warn("event=rabbitmq_heartbeat_failed peer_id={} error={}",
+                        nodeId, e.getMessage(), e);
             }
         };
         heartbeat.run();
@@ -176,7 +182,7 @@ public class RabbitMqPeerNode {
                 parameter
         );
         transport.publish(new OutboundTransportMessage(TransportRoute.JOB_SUBMIT, nodeId, message));
-        System.out.println("Submitted RabbitMQ job " + jobId + " from peer " + nodeId);
+        LOGGER.info("event=job_submitted transport=rabbitmq job_id={} peer_id={}", jobId, nodeId);
         return jobId;
     }
 
@@ -193,11 +199,11 @@ public class RabbitMqPeerNode {
                 continue;
             }
             if (!result.isSuccessful()) {
-                System.err.println("Job " + jobId + " failed: " + result.getErrorMessage());
+                LOGGER.error("event=job_failed job_id={} error={}", jobId, result.getErrorMessage());
                 return;
             }
             Path outputDir = writeJobResults(result);
-            System.out.println("Job " + jobId + " completed. Results written to " + outputDir);
+            LOGGER.info("event=job_completed job_id={} output_dir={}", jobId, outputDir);
             return;
         }
         throw new IllegalStateException("Timed out waiting for JOB_RESULT for " + jobId);

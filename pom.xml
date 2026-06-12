@@ -29,6 +29,8 @@
         <sqlite.version>3.45.3.0</sqlite.version>
         <rabbitmq.client.version>5.30.0</rabbitmq.client.version>
         <snakeyaml.version>2.4</snakeyaml.version>
+        <slf4j.version>2.0.17</slf4j.version>
+        <logback.version>1.5.18</logback.version>
         <junit.version>5.10.2</junit.version>
     </properties>
 
@@ -103,6 +105,16 @@
                 <groupId>org.yaml</groupId>
                 <artifactId>snakeyaml</artifactId>
                 <version>${snakeyaml.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-api</artifactId>
+                <version>${slf4j.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+                <version>${logback.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit.jupiter</groupId>

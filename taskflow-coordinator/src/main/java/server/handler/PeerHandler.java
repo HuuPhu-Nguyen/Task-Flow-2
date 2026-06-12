@@ -14,6 +14,8 @@ import java.util.concurrent.BlockingQueue;
 import com.google.gson.Gson;
 
 import messaging.MessageFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import protocol.Message;
 import protocol.MessageType;
 import protocol.PingMessage;
@@ -27,6 +29,8 @@ import server.transport.TcpPeerConnection;
 import transport.TransportConnection;
 
 public class PeerHandler implements Runnable {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerHandler.class);
 
     private static final long HEARTBEAT_INTERVAL_MILLIS = 30_000;
     private static final int SOCKET_POLL_TIMEOUT_MILLIS = 1_000;
@@ -62,7 +66,8 @@ public class PeerHandler implements Runnable {
         try {
             socket.setSoTimeout(SOCKET_POLL_TIMEOUT_MILLIS);
         } catch (IOException e) {
-            System.err.println("Failed to configure socket timeout for " + nodeId);
+            LOGGER.warn("event=peer_socket_timeout_config_failed peer_id={} error={}",
+                    nodeId, e.getMessage(), e);
             cleanup(nodeId);
             return;
         }
@@ -74,7 +79,7 @@ public class PeerHandler implements Runnable {
             TransportConnection connection = new TcpPeerConnection(nodeId, socket, out, gson);
             registry.register(nodeId, new PeerInfo(nodeId, connection, schedulerConfig));
 
-            System.out.println("Handling peer: " + nodeId);
+            LOGGER.info("event=peer_handler_started peer_id={}", nodeId);
             long nextHeartbeatAt = 0L;
             ArrayDeque<Long> outstandingPings = new ArrayDeque<>();
             while (connection.isOpen()) {
@@ -93,7 +98,7 @@ public class PeerHandler implements Runnable {
                     String incomingJson = in.readLine();
 
                     if (incomingJson == null) {
-                        System.out.println("Peer closed connection: " + nodeId);
+                        LOGGER.info("event=peer_connection_closed peer_id={}", nodeId);
                         break;
                     }
 
@@ -123,19 +128,19 @@ public class PeerHandler implements Runnable {
                 } catch (SocketTimeoutException ignored) {
                     // Normal polling timeout
                 } catch (SocketException e) {
-                    System.out.println("Peer connection reset: " + nodeId);
+                    LOGGER.info("event=peer_connection_reset peer_id={} error={}", nodeId, e.getMessage());
                     break;
                 } catch (IOException e) {
-                    System.out.println("I/O error from peer " + nodeId + ": " + e.getMessage());
+                    LOGGER.warn("event=peer_io_error peer_id={} error={}", nodeId, e.getMessage(), e);
                     break;
                 } catch (Exception e) {
-                    System.err.println("Error processing non-fatal message from " + nodeId);
-                    e.printStackTrace();
+                    LOGGER.warn("event=peer_message_processing_failed peer_id={} error={}",
+                            nodeId, e.getMessage(), e);
                 }
             }
 
         } catch (IOException e) {
-            System.out.println("Outer connection failure for " + nodeId + ": " + e.getMessage());
+            LOGGER.warn("event=peer_connection_failed peer_id={} error={}", nodeId, e.getMessage(), e);
         } finally {
             cleanup(nodeId);
         }
@@ -149,7 +154,7 @@ public class PeerHandler implements Runnable {
         } catch (IOException ignored) {
         }
 
-        System.out.println("Disconnected: " + nodeId);
+        LOGGER.info("event=peer_disconnected peer_id={}", nodeId);
     }
 
     private MessageFactory createFactory(Gson gson) {

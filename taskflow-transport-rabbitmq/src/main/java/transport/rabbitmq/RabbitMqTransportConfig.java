@@ -11,7 +11,12 @@ public record RabbitMqTransportConfig(
         String exchangeName,
         String queuePrefix,
         boolean durable,
-        int prefetchCount
+        int prefetchCount,
+        boolean deadLetterEnabled,
+        String deadLetterExchangeName,
+        String deadLetterQueueName,
+        String deadLetterRoutingKey,
+        boolean requeueOnHandlerFailure
 ) {
     public static final int DEFAULT_PORT = 5672;
 
@@ -40,6 +45,17 @@ public record RabbitMqTransportConfig(
         if (prefetchCount <= 0) {
             throw new IllegalArgumentException("prefetchCount must be positive");
         }
+        if (deadLetterEnabled) {
+            if (deadLetterExchangeName == null || deadLetterExchangeName.isBlank()) {
+                throw new IllegalArgumentException("deadLetterExchangeName is required when dead lettering is enabled");
+            }
+            if (deadLetterQueueName == null || deadLetterQueueName.isBlank()) {
+                throw new IllegalArgumentException("deadLetterQueueName is required when dead lettering is enabled");
+            }
+            if (deadLetterRoutingKey == null || deadLetterRoutingKey.isBlank()) {
+                throw new IllegalArgumentException("deadLetterRoutingKey is required when dead lettering is enabled");
+            }
+        }
     }
 
     public static RabbitMqTransportConfig localDefaults() {
@@ -52,7 +68,12 @@ public record RabbitMqTransportConfig(
                 "taskflow.exchange",
                 "taskflow",
                 true,
-                3
+                3,
+                true,
+                "taskflow.dead-letter.exchange",
+                "taskflow.dead-letter",
+                "dead-letter",
+                true
         );
     }
 
@@ -71,7 +92,12 @@ public record RabbitMqTransportConfig(
                 value(env, "TASKFLOW_RABBITMQ_EXCHANGE", defaults.exchangeName()),
                 value(env, "TASKFLOW_RABBITMQ_QUEUE_PREFIX", defaults.queuePrefix()),
                 booleanValue(env, "TASKFLOW_RABBITMQ_DURABLE", defaults.durable()),
-                intValue(env, "TASKFLOW_RABBITMQ_PREFETCH", defaults.prefetchCount())
+                intValue(env, "TASKFLOW_RABBITMQ_PREFETCH", defaults.prefetchCount()),
+                booleanValue(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", defaults.deadLetterEnabled()),
+                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", defaults.deadLetterExchangeName()),
+                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", defaults.deadLetterQueueName()),
+                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", defaults.deadLetterRoutingKey()),
+                booleanValue(env, "TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE", defaults.requeueOnHandlerFailure())
         );
     }
 

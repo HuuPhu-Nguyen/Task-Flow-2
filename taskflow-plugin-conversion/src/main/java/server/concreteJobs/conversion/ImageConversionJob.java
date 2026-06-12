@@ -1,6 +1,8 @@
 package server.concreteJobs.conversion;
 
 import com.google.gson.Gson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import protocol.FilePayload;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
@@ -10,6 +12,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ImageConversionJob extends EmbarrassinglyParallelJob<FilePayload, FilePayload> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(ImageConversionJob.class);
 
     private final String targetFormat;
     private final Gson gson = new Gson();
@@ -47,12 +51,13 @@ public class ImageConversionJob extends EmbarrassinglyParallelJob<FilePayload, F
     protected void onTaskSuccess(TaskUnit<FilePayload> task, FilePayload resultData) {
         // Just store the data. The parent handles the "is it done?" logic.
         results.put(task.getTaskId(), resultData);
-        System.out.println("  Task stored: " + task.getTaskId());
+        LOGGER.debug("event=conversion_task_result_stored job_id={} task_id={}",
+                jobId, task.getTaskId());
     }
 
     @Override
     public List<Object> aggregateAndSendResult() {
-        System.out.println("Job [" + jobId + "] is finished. Packaging " + results.size() + " files.");
+        LOGGER.info("event=conversion_job_packaging job_id={} result_count={}", jobId, results.size());
         return tasks.keySet().stream()
                 .sorted(Comparator.comparingInt(this::taskIndex))
                 .map(results::get)

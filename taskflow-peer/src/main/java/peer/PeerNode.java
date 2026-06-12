@@ -15,10 +15,14 @@ import com.google.gson.Gson;
 import messaging.MessageDispatcher;
 import messaging.MessageFactory;
 import messaging.handlers.PingHandler;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import peer.engine.PeerExecutionEngine;
 import protocol.*;
 
 public class PeerNode {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerNode.class);
 
     private final Set<String> myActiveJobIds = ConcurrentHashMap.newKeySet();
     private static final String TRANSPORT_ENV = "TASKFLOW_TRANSPORT";
@@ -30,7 +34,7 @@ public class PeerNode {
         }
 
         if (args.length < 2) {
-            System.out.println("Usage: java peer.PeerNode <host> <port>");
+            LOGGER.info("event=peer_usage command=\"java peer.PeerNode <host> <port>\"");
             return;
         }
         String host = args[0];
@@ -39,11 +43,11 @@ public class PeerNode {
 
         //Initialize the Execution Engine
         PeerExecutionEngine engine = new PeerExecutionEngine("PEER");
-        System.out.println("Registered task processors: " + engine.getRegisteredTaskTypes());
+        LOGGER.info("event=peer_processors_registered task_types={}", engine.getRegisteredTaskTypes());
 
         MessageFactory factory = createFactory(gson);
 
-        System.out.println("Connecting to Coordinator at " + host + ":" + port);
+        LOGGER.info("event=peer_connecting host={} port={}", host, port);
 
         try (Socket socket = new Socket(host, port)) {
             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
@@ -52,7 +56,7 @@ public class PeerNode {
             //Create dispatcher with the engine and the shared output stream
             MessageDispatcher dispatcher = createDispatcher(engine, out);
 
-            System.out.println("Connected! Node ID recognized by Server as: " + socket.getLocalSocketAddress());
+            LOGGER.info("event=peer_connected local_address={}", socket.getLocalSocketAddress());
 
             String incomingJson;
             while ((incomingJson = in.readLine()) != null) {
@@ -66,13 +70,13 @@ public class PeerNode {
                     dispatcher.dispatch(msg, out);
 
                 } catch (Exception e) {
-                    System.err.println("Error processing message: " + e.getMessage());
+                    LOGGER.warn("event=peer_message_processing_failed error={}", e.getMessage(), e);
                 }
             }
-            System.out.println("Server closed connection.");
+            LOGGER.info("event=server_connection_closed");
 
         } catch (IOException e) {
-            System.err.println("Connection lost: " + e.getMessage());
+            LOGGER.warn("event=server_connection_lost error={}", e.getMessage(), e);
         }
     }
 

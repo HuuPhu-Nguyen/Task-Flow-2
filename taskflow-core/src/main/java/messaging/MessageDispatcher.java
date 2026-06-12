@@ -1,6 +1,8 @@
 package messaging;
 
 import protocol.Message;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.PrintWriter;
 import java.util.HashMap;
@@ -8,7 +10,9 @@ import java.util.Map;
 
 public class MessageDispatcher {
 
-    private Map<String, MessageHandler> handlers = new HashMap<>();
+    private static final Logger LOGGER = LoggerFactory.getLogger(MessageDispatcher.class);
+
+    private final Map<String, MessageHandler> handlers = new HashMap<>();
 
     public void register(String type, MessageHandler handler) {
         handlers.put(type, handler);
@@ -19,7 +23,7 @@ public class MessageDispatcher {
         if (handler != null) {
             handler.handle(message, out);
         } else {
-            System.out.println("No handler for type: " + message.getType());
+            LOGGER.warn("event=message_handler_missing type={}", message.getType());
         }
     }
 }

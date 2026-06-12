@@ -1,10 +1,15 @@
 package server.db;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 
 public class DatabaseManager {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
 
@@ -61,7 +66,7 @@ public class DatabaseManager {
             ps.setInt(6, fileCount);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] insertJob failed: " + e.getMessage());
+            logSqlFailure("insertJob", e);
         }
     }
 
@@ -73,7 +78,7 @@ public class DatabaseManager {
             ps.setString(3, "PENDING");
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] insertTask failed: " + e.getMessage());
+            logSqlFailure("insertTask", e);
         }
     }
 
@@ -85,7 +90,7 @@ public class DatabaseManager {
             ps.setString(3, taskId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markTaskAssigned failed: " + e.getMessage());
+            logSqlFailure("markTaskAssigned", e);
         }
     }
 
@@ -97,7 +102,7 @@ public class DatabaseManager {
             ps.setString(3, taskId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markTaskCompleted failed: " + e.getMessage());
+            logSqlFailure("markTaskCompleted", e);
         }
     }
 
@@ -108,7 +113,7 @@ public class DatabaseManager {
             ps.setString(2, taskId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markTaskRetried failed: " + e.getMessage());
+            logSqlFailure("markTaskRetried", e);
         }
     }
 
@@ -119,7 +124,7 @@ public class DatabaseManager {
             ps.setString(2, taskId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markTaskFailed failed: " + e.getMessage());
+            logSqlFailure("markTaskFailed", e);
         }
     }
 
@@ -130,7 +135,7 @@ public class DatabaseManager {
             ps.setString(2, jobId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markJobCompleted failed: " + e.getMessage());
+            logSqlFailure("markJobCompleted", e);
         }
     }
 
@@ -141,7 +146,7 @@ public class DatabaseManager {
             ps.setString(2, jobId);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("[DB] markJobFailed failed: " + e.getMessage());
+            logSqlFailure("markJobFailed", e);
         }
     }
 
@@ -165,7 +170,7 @@ public class DatabaseManager {
                 ));
             }
         } catch (SQLException e) {
-            System.err.println("[DB] getJobHistory failed: " + e.getMessage());
+            logSqlFailure("getJobHistory", e);
         }
         return jobs;
     }
@@ -189,13 +194,17 @@ public class DatabaseManager {
                 ));
             }
         } catch (SQLException e) {
-            System.err.println("[DB] getTasksForJob failed: " + e.getMessage());
+            logSqlFailure("getTasksForJob", e);
         }
         return tasks;
     }
 
     public void close() {
         try { conn.close(); } catch (SQLException ignored) {}
+    }
+
+    private static void logSqlFailure(String operation, SQLException e) {
+        LOGGER.warn("event=db_operation_failed operation={} error={}", operation, e.getMessage(), e);
     }
 
     // -------------------------------------------------------------------------

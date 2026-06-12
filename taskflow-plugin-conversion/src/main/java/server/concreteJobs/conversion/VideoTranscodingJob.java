@@ -7,6 +7,8 @@ import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.google.gson.Gson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import protocol.FilePayload;
 import protocol.JobSubmitMessage;
@@ -19,6 +21,8 @@ import server.job.TaskUnit;
  * Handles splitting jobs into tasks and aggregating results.
  */
 public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, FilePayload> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(VideoTranscodingJob.class);
 
     private final String targetFormat;
     private final Gson gson = new Gson();
@@ -49,12 +53,12 @@ public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, 
     @Override
     protected void onTaskSuccess(TaskUnit<FilePayload> task, FilePayload resultData) {
         results.put(task.getTaskId(), resultData);
-        System.out.println("  Video task stored: " + task.getTaskId());
+        LOGGER.debug("event=video_task_result_stored job_id={} task_id={}", jobId, task.getTaskId());
     }
 
     @Override
     public List<Object> aggregateAndSendResult() {
-        System.out.println("Video Job [" + jobId + "] is finished. Packaging " + results.size() + " files.");
+        LOGGER.info("event=video_job_packaging job_id={} result_count={}", jobId, results.size());
         return tasks.keySet().stream()
                 .sorted(Comparator.comparingInt(this::taskIndex))
                 .map(results::get)

@@ -35,6 +35,7 @@ out/
 target/
 
 # TaskFlow runtime artifacts
+PLAN.md
 taskflow.db
 taskflow.db-shm
 taskflow.db-wal
