@@ -11,7 +11,8 @@
     <modules>
         <module>taskflow-spi</module>
         <module>taskflow-core</module>
-        <module>taskflow-plugin-conversion</module>
+        <module>plugins/conversion</module>
+        <module>plugins/text</module>
         <module>taskflow-transport-rabbitmq</module>
         <module>taskflow-coordinator</module>
         <module>taskflow-peer</module>
@@ -49,6 +50,11 @@
             <dependency>
                 <groupId>com.dickinson.cs</groupId>
                 <artifactId>taskflow-plugin-conversion</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-text</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
@@ -139,8 +145,8 @@
                 </plugin>
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
-                    <artifactId>maven-assembly-plugin</artifactId>
-                    <version>3.7.1</version>
+                    <artifactId>maven-shade-plugin</artifactId>
+                    <version>3.5.0</version>
                 </plugin>
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>

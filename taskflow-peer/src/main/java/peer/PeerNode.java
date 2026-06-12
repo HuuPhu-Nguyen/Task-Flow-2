@@ -80,25 +80,18 @@ public class PeerNode {
         }
     }
 
-    public String submitImageJob(List<FilePayload> payloads, String format, PrintWriter out) {
-        return submitJob("IMAGE_CONVERSION", payloads, format, out);
-    }
-
-    public String submitVideoJob(List<FilePayload> payloads, String format, PrintWriter out) {
-        return submitJob("VIDEO_TRANSCODING", payloads, format, out);
-    }
-
-    public String submitJob(String taskType, List<FilePayload> payloads, String parameter, PrintWriter out) {
+    public String submitJob(String taskType, List<?> payloads, String parameter, PrintWriter out) {
         String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
 
         myActiveJobIds.add(jobId);
+        List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
 
         JobSubmitMessage msg = new JobSubmitMessage(
                 "CLIENT",
                 java.time.Instant.now().toString(),
                 jobId,
                 taskType,
-                new ArrayList<>(payloads),
+                taskPayloads,
                 parameter
         );
 
@@ -122,13 +115,13 @@ public class PeerNode {
         // Static handler for immediate responses (PING)
         dispatcher.register(MessageType.PING, new PingHandler(() -> engine.getRegisteredTaskTypes()));
         // TASK_ASSIGN -> Background Engine
-        // prevents the networking thread from blocking during image conversion
+        // prevents the networking thread from blocking during task execution
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {
             TaskAssignMessage task = (TaskAssignMessage) message;
             engine.submitTask(task, out);
         });
 
-        //Handling Job Results (If this peer submitted a folder)
+        //Handling Job Results (If this peer submitted a job)
         //dispatcher.register(MessageType.JOB_RESULT, new messaging.handlers.JobResultHandler());
 
         return dispatcher;

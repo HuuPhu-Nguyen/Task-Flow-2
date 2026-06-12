@@ -68,15 +68,16 @@ TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runt
 
 TaskFlow is now organized as a Maven reactor:
 
-- `taskflow-spi` - protocol messages, job abstractions, and plugin contracts
+- `taskflow-spi` - protocol messages, job abstractions, and coordinator, peer, and client plugin contracts
 - `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
-- `taskflow-plugin-conversion` - image/video job and peer-side processor implementations discovered through `ServiceLoader`
+- `plugins/conversion` - image/video client payload, job, and peer-side processor implementations discovered through `ServiceLoader`
+- `plugins/text` - text-analysis example plugin using custom non-`FilePayload` payload/result models
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
 - `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
 
-Framework core no longer imports concrete image or video job classes. New task types should be added as plugin modules that implement `server.job.TaskPlugin` and `peer.engine.PeerProcessorPlugin`, then register providers under `META-INF/services`.
+Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>`. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
@@ -174,20 +175,27 @@ Currently implemented job types:
 
 - `IMAGE_CONVERSION`
 - `VIDEO_TRANSCODING`
+- `TEXT_ANALYSIS`
 
 **Image conversion features:**
 - Converts between PNG, JPG, BMP, GIF
 - Supports PDF to image conversion
 - Uses Apache PDFBox for PDF rendering
-- Transfers files as Base64-encoded payloads
+- Uses the conversion client plugin to encode local files as Base64 payloads and save decoded results
 
 **Video transcoding features:**
 - Converts between MP4, AVI, MKV, MOV, WEBM, FLV, WMV
 - Uses JavaCV with bundled FFmpeg native libraries
 - Uses broadly available FFmpeg encoders for portability across machines
-- Transfers files as Base64-encoded payloads
+- Uses the conversion client plugin to encode local files as Base64 payloads and save decoded results
 
-Each file is processed independently, allowing full parallel execution across peers.
+**Text analysis features:**
+- Reads TXT, Markdown, CSV, and log files as UTF-8 text
+- Uses custom `TextAnalysisPayload` and `TextAnalysisResult` models instead of `FilePayload`
+- Counts lines, words, characters, and unique words per document
+- Saves aggregated CSV results through the text client plugin
+
+Each input is processed independently, allowing full parallel execution across peers.
 
 ---
 
@@ -254,6 +262,8 @@ The JavaFX GUI (`PeerApp`) acts as both:
 ### Extensibility
 - New job types via `TaskPlugin` and Java `ServiceLoader`
 - New peer-side processors via `PeerProcessorPlugin` and `TaskProcessor`
+- New client payload/result handlers via `ClientJobPlugin`
+- New plugin bundles should live under `plugins/<domain>` while keeping their Maven artifact IDs stable
 
 ---
 
@@ -394,6 +404,14 @@ Submit a RabbitMQ job from a command-line peer on Windows PowerShell:
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
 $env:TASKFLOW_PEER_ID = "peer-submit"
 .\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit image png path\to\input.jpg"
+```
+
+Text analysis uses the same plugin-driven submit path:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+$env:TASKFLOW_PEER_ID = "peer-submit"
+.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit text csv path\to\notes.txt"
 ```
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
@@ -583,7 +601,7 @@ Inside the GUI:
 2. Click **Connect**
 3. Upload files
 4. Choose output format
-5. Click **Start Conversion**
+5. Click **Start Job**
 6. Select a folder to save results
 
 ---

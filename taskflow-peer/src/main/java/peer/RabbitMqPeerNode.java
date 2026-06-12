@@ -1,15 +1,14 @@
 package peer;
 
-import com.google.gson.Gson;
+import client.ClientJobPlugin;
+import client.ClientJobPlugins;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import peer.engine.PeerExecutionEngine;
-import protocol.FilePayload;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PongMessage;
-import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.InboundTransportMessage;
@@ -20,15 +19,12 @@ import transport.rabbitmq.RabbitMqRuntimeDefaults;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
-import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
@@ -42,7 +38,6 @@ public class RabbitMqPeerNode {
 
     private static final long HEARTBEAT_INTERVAL_MILLIS = 30_000;
     private static final long JOB_RESULT_TIMEOUT_MINUTES = 15;
-    private static final Gson GSON = new Gson();
 
     public static void main(String[] args) throws Exception {
         String nodeId = resolveNodeId();
@@ -70,9 +65,12 @@ public class RabbitMqPeerNode {
         }));
 
         if (isSubmitCommand(args)) {
-            String jobId = submitJob(nodeId, transport, args);
+            Map<String, ClientJobPlugin> clientPlugins = ClientJobPlugins.byTaskType(ClientJobPlugins.discover());
+            LOGGER.info("event=peer_client_plugins_registered task_types={}", clientPlugins.keySet());
+
+            String jobId = submitJob(nodeId, transport, args, clientPlugins);
             try {
-                waitForJobResult(jobId, jobResults);
+                waitForJobResult(jobId, jobResults, clientPlugins);
             } finally {
                 heartbeats.shutdownNow();
                 engine.shutdown();
@@ -158,7 +156,10 @@ public class RabbitMqPeerNode {
         return scheduler;
     }
 
-    private static String submitJob(String nodeId, RabbitMqTransport transport, String[] args) throws Exception {
+    private static String submitJob(String nodeId,
+                                    RabbitMqTransport transport,
+                                    String[] args,
+                                    Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         if (args.length < 4) {
             throw new IllegalArgumentException("""
                     Usage: TASKFLOW_TRANSPORT=rabbitmq peer.PeerNode submit <image|video|task-type> <target-format> <file> [file...]
@@ -166,12 +167,14 @@ public class RabbitMqPeerNode {
                     """);
         }
 
-        String taskType = normalizeTaskType(args[1]);
-        String parameter = args[2];
-        List<Object> payloads = new ArrayList<>();
+        ClientJobPlugin plugin = resolveClientPlugin(args[1], clientPlugins);
+        String taskType = plugin.taskType();
+        String parameter = plugin.normalizeParameter(args[2]);
+        List<Path> inputPaths = new java.util.ArrayList<>();
         for (int i = 3; i < args.length; i++) {
-            payloads.add(readPayload(Path.of(args[i])));
+            inputPaths.add(Path.of(args[i]));
         }
+        List<Object> payloads = plugin.buildPayloads(inputPaths, parameter);
 
         String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
         JobSubmitMessage message = new JobSubmitMessage(
@@ -188,7 +191,8 @@ public class RabbitMqPeerNode {
     }
 
     private static void waitForJobResult(String jobId,
-                                         BlockingQueue<JobResultMessage> jobResults) throws Exception {
+                                         BlockingQueue<JobResultMessage> jobResults,
+                                         Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(JOB_RESULT_TIMEOUT_MINUTES);
         while (System.nanoTime() < deadline) {
             long remaining = deadline - System.nanoTime();
@@ -203,39 +207,31 @@ public class RabbitMqPeerNode {
                 LOGGER.error("event=job_failed job_id={} error={}", jobId, result.getErrorMessage());
                 return;
             }
-            Path outputDir = writeJobResults(result);
+            Path outputDir = writeJobResults(result, clientPlugins);
             LOGGER.info("event=job_completed job_id={} output_dir={}", jobId, outputDir);
             return;
         }
         throw new IllegalStateException("Timed out waiting for JOB_RESULT for " + jobId);
     }
 
-    private static Path writeJobResults(JobResultMessage result) throws IOException {
+    private static Path writeJobResults(JobResultMessage result,
+                                        Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         Path outputDir = Path.of("target", "rabbitmq-results", result.getJobId());
-        Files.createDirectories(outputDir);
-        List<Object> results = result.getResultsByTaskId();
-        if (results == null) {
-            return outputDir;
-        }
-
-        for (int i = 0; i < results.size(); i++) {
-            FilePayload payload = GSON.fromJson(GSON.toJson(results.get(i)), FilePayload.class);
-            if (payload == null || payload.base64Data() == null) {
-                continue;
-            }
-            String fileName = i + "-" + SafeFileNames.sanitize(payload.fileName(), "result.bin");
-            Files.write(SafeFileNames.safeOutputPath(outputDir, fileName, i + "-result.bin"),
-                    Base64.getDecoder().decode(payload.base64Data()));
-        }
+        ClientJobPlugin plugin = resolveClientPlugin(result.getTaskType(), clientPlugins);
+        plugin.saveResults(result.getResultsByTaskId(), outputDir);
         return outputDir;
     }
 
-    private static FilePayload readPayload(Path path) throws IOException {
-        if (!Files.isRegularFile(path)) {
-            throw new IOException("Input file does not exist: " + path);
+    private static ClientJobPlugin resolveClientPlugin(String rawTaskType,
+                                                       Map<String, ClientJobPlugin> clientPlugins) {
+        String taskType = normalizeTaskType(rawTaskType);
+        ClientJobPlugin plugin = clientPlugins.get(taskType);
+        if (plugin == null) {
+            throw new IllegalArgumentException(
+                    "No client job plugin found for task type '" + rawTaskType
+                            + "'. Available task types: " + clientPlugins.keySet());
         }
-        String base64 = Base64.getEncoder().encodeToString(Files.readAllBytes(path));
-        return new FilePayload(path.getFileName().toString(), base64);
+        return plugin;
     }
 
     private static String normalizeTaskType(String raw) {
@@ -243,6 +239,7 @@ public class RabbitMqPeerNode {
         return switch (value) {
             case "IMAGE", "IMAGE_CONVERSION" -> "IMAGE_CONVERSION";
             case "VIDEO", "VIDEO_TRANSCODING" -> "VIDEO_TRANSCODING";
+            case "TEXT", "TEXT_ANALYSIS" -> "TEXT_ANALYSIS";
             default -> value;
         };
     }

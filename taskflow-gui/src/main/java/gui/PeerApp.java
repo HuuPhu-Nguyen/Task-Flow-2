@@ -1,5 +1,7 @@
 package gui;
 
+import client.ClientJobPlugin;
+import client.ClientJobPlugins;
 import com.google.gson.Gson;
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -21,7 +23,6 @@ import org.slf4j.LoggerFactory;
 import peer.PeerNode;
 import peer.engine.PeerExecutionEngine;
 import protocol.*;
-import protocol.SafeFileNames;
 import server.db.DatabaseManager;
 
 import java.io.*;
@@ -31,9 +32,11 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Base64;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Stream;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
@@ -51,6 +54,8 @@ public class PeerApp extends Application {
     private String sessionId;
     private TilePane gallery;
     private DatabaseManager historyDb;
+    private List<ClientJobPlugin> clientJobPlugins = List.of();
+    private Map<String, ClientJobPlugin> clientJobPluginsByType = Map.of();
 
     @Override
     public void init() {
@@ -66,7 +71,10 @@ public class PeerApp extends Application {
             engine = new PeerExecutionEngine(sessionId);
             LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
                     sessionId, engine.getRegisteredTaskTypes());
-        } catch (IOException e) {
+            clientJobPlugins = ClientJobPlugins.discover();
+            clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
+            LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
+        } catch (Exception e) {
             LOGGER.error("event=gui_init_failed error={}", e.getMessage(), e);
         }
     }
@@ -133,30 +141,33 @@ public class PeerApp extends Application {
         BorderPane root = new BorderPane();
         root.setPadding(new Insets(10));
 
+        if (clientJobPlugins.isEmpty()) {
+            Label message = new Label("No client job plugins were found. Add a plugin with META-INF/services/client.ClientJobPlugin.");
+            message.setWrapText(true);
+            VBox emptyState = new VBox(10, message);
+            emptyState.setPadding(new Insets(20));
+            root.setCenter(emptyState);
+            return root;
+        }
+
         HBox topBar = new HBox(10);
 
-        ComboBox<String> jobTypeBox = new ComboBox<>();
-        jobTypeBox.getItems().addAll("Image Conversion", "Video Transcoding");
-        jobTypeBox.setValue("Image Conversion");
+        ComboBox<ClientJobPlugin> jobTypeBox = new ComboBox<>();
+        configurePluginComboBox(jobTypeBox);
+        jobTypeBox.getItems().addAll(clientJobPlugins);
+        jobTypeBox.getSelectionModel().selectFirst();
 
         ComboBox<String> formatBox = new ComboBox<>();
-        formatBox.getItems().addAll("PNG", "JPG", "BMP", "GIF");
-        formatBox.setValue("PNG");
+        refreshParameterOptions(jobTypeBox.getValue(), formatBox);
 
         Button uploadBtn = new Button("Upload Files");
-        Button startBtn = new Button("Start Conversion");
+        Button startBtn = new Button("Start Job");
         topBar.getChildren().addAll(new Label("Job Type:"), jobTypeBox, new Label("Target:"), formatBox, uploadBtn, startBtn);
 
         jobTypeBox.setOnAction(e -> {
-            String jobType = jobTypeBox.getValue();
-            formatBox.getItems().clear();
-            if ("Image Conversion".equals(jobType)) {
-                formatBox.getItems().addAll("PNG", "JPG", "BMP", "GIF");
-                formatBox.setValue("PNG");
-            } else {
-                formatBox.getItems().addAll("MP4", "AVI", "MKV", "MOV", "WEBM");
-                formatBox.setValue("MP4");
-            }
+            refreshParameterOptions(jobTypeBox.getValue(), formatBox);
+            clearStagedInputs();
+            gallery.getChildren().clear();
         });
 
         gallery = new TilePane();
@@ -176,42 +187,32 @@ public class PeerApp extends Application {
                     return;
                 }
 
-                File folder = new File(currentInPath);
-                File[] files = folder.listFiles();
-                if (files == null || files.length == 0) {
+                List<Path> inputPaths = stagedInputFiles();
+                if (inputPaths.isEmpty()) {
                     new Alert(Alert.AlertType.WARNING, "No files to process. Upload files first.").show();
                     return;
                 }
 
-                List<FilePayload> payloads = new ArrayList<>();
-                for (File f : files) {
-                    byte[] bytes = Files.readAllBytes(f.toPath());
-                    payloads.add(new FilePayload(f.getName(), Base64.getEncoder().encodeToString(bytes)));
+                ClientJobPlugin plugin = jobTypeBox.getValue();
+                String selectedFormat = formatBox.getValue();
+                if (plugin == null || selectedFormat == null || selectedFormat.isBlank()) {
+                    new Alert(Alert.AlertType.ERROR, "Select a job type and target before starting.").show();
+                    return;
                 }
 
-                String jobType = jobTypeBox.getValue();
-                String targetFormat = formatBox.getValue().toLowerCase();
-                String taskType = "Image Conversion".equals(jobType)
-                        ? "IMAGE_CONVERSION"
-                        : "VIDEO_TRANSCODING";
-                String jobId = backendNode.submitJob(taskType, payloads, targetFormat, socketOut);
+                String targetFormat = plugin.normalizeParameter(selectedFormat);
+                List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
+                String jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, socketOut);
 
                 if (jobId != null) {
                     myActiveJobIds.add(jobId);
-                    LOGGER.info("event=gui_job_submitted job_id={} job_type={}", jobId, jobType);
+                    LOGGER.info("event=gui_job_submitted job_id={} task_type={}", jobId, plugin.taskType());
 
                     gallery.getChildren().clear();
+                    clearStagedInputs();
 
-                    for (File f : files) {
-                        try {
-                            Files.deleteIfExists(f.toPath());
-                        } catch (IOException deleteError) {
-                            LOGGER.warn("event=temp_file_delete_failed file={} error={}",
-                                    f.getName(), deleteError.getMessage(), deleteError);
-                        }
-                    }
-
-                    new Alert(Alert.AlertType.CONFIRMATION, jobType + " Started! The gallery will be cleared.").show();
+                    new Alert(Alert.AlertType.CONFIRMATION,
+                            plugin.displayName() + " started. The gallery will be cleared.").show();
                 }
             } catch (Exception ex) {
                 LOGGER.error("event=gui_job_submit_failed error={}", ex.getMessage(), ex);
@@ -220,18 +221,24 @@ public class PeerApp extends Application {
         });
 
         uploadBtn.setOnAction(e -> {
-            FileChooser fileChooser = new FileChooser();
-            String jobType = jobTypeBox.getValue();
+            ClientJobPlugin plugin = jobTypeBox.getValue();
+            if (plugin == null) {
+                new Alert(Alert.AlertType.ERROR, "No job type is selected.").show();
+                return;
+            }
 
-            if ("Image Conversion".equals(jobType)) {
-                fileChooser.setTitle("Select Images or PDFs");
+            FileChooser fileChooser = new FileChooser();
+            fileChooser.setTitle("Select " + plugin.displayName() + " Inputs");
+            List<String> extensionPatterns = plugin.supportedInputExtensions().stream()
+                    .map(PeerApp::fileChooserPattern)
+                    .toList();
+            if (extensionPatterns.isEmpty()) {
                 fileChooser.getExtensionFilters().add(
-                    new FileChooser.ExtensionFilter("Images", "*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.pdf")
+                        new FileChooser.ExtensionFilter("All Files", "*.*")
                 );
             } else {
-                fileChooser.setTitle("Select Videos");
                 fileChooser.getExtensionFilters().add(
-                    new FileChooser.ExtensionFilter("Videos", "*.mp4", "*.avi", "*.mkv", "*.mov", "*.webm", "*.flv", "*.wmv")
+                        new FileChooser.ExtensionFilter(plugin.displayName() + " Inputs", extensionPatterns)
                 );
             }
 
@@ -253,6 +260,71 @@ public class PeerApp extends Application {
         });
 
         return root;
+    }
+
+    private void configurePluginComboBox(ComboBox<ClientJobPlugin> jobTypeBox) {
+        jobTypeBox.setCellFactory(listView -> pluginListCell());
+        jobTypeBox.setButtonCell(pluginListCell());
+    }
+
+    private ListCell<ClientJobPlugin> pluginListCell() {
+        return new ListCell<>() {
+            @Override
+            protected void updateItem(ClientJobPlugin plugin, boolean empty) {
+                super.updateItem(plugin, empty);
+                setText(empty || plugin == null ? null : plugin.displayName());
+            }
+        };
+    }
+
+    private void refreshParameterOptions(ClientJobPlugin plugin, ComboBox<String> formatBox) {
+        formatBox.getItems().clear();
+        if (plugin == null) {
+            return;
+        }
+        formatBox.getItems().addAll(plugin.parameterOptions());
+        String defaultParameter = plugin.defaultParameter();
+        if (defaultParameter != null && formatBox.getItems().contains(defaultParameter)) {
+            formatBox.setValue(defaultParameter);
+        } else if (!formatBox.getItems().isEmpty()) {
+            formatBox.getSelectionModel().selectFirst();
+        }
+    }
+
+    private List<Path> stagedInputFiles() throws IOException {
+        Path inputDir = Paths.get(currentInPath);
+        if (!Files.isDirectory(inputDir)) {
+            return List.of();
+        }
+        try (Stream<Path> paths = Files.list(inputDir)) {
+            return paths.filter(Files::isRegularFile)
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .toList();
+        }
+    }
+
+    private void clearStagedInputs() {
+        try {
+            for (Path path : stagedInputFiles()) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException deleteError) {
+            LOGGER.warn("event=temp_inputs_clear_failed error={}", deleteError.getMessage(), deleteError);
+        }
+    }
+
+    private static String fileChooserPattern(String extension) {
+        if (extension == null || extension.isBlank()) {
+            return "*.*";
+        }
+        String value = extension.trim().toLowerCase(Locale.ROOT);
+        if (value.startsWith("*.")) {
+            return value;
+        }
+        if (value.startsWith(".")) {
+            return "*" + value;
+        }
+        return "*." + value;
     }
 
     private Node buildHistoryPane() {
@@ -488,12 +560,10 @@ public class PeerApp extends Application {
             File selectedDirectory = directoryChooser.showDialog(downloadStage);
 
             if (selectedDirectory != null) {
-                // 2. Perform the actual file writing
-                saveFilesToDisk(result, selectedDirectory.getAbsolutePath());
-                downloadStage.close();
-
-                // Optional: Show a success alert
-                new Alert(Alert.AlertType.INFORMATION, "Files saved successfully!").show();
+                if (saveFilesToDisk(result, selectedDirectory.getAbsolutePath())) {
+                    downloadStage.close();
+                    new Alert(Alert.AlertType.INFORMATION, "Files saved successfully!").show();
+                }
             }
         });
 
@@ -503,31 +573,29 @@ public class PeerApp extends Application {
         downloadStage.show();
     }
 
-    private void saveFilesToDisk(JobResultMessage result, String folderPath) {
+    private boolean saveFilesToDisk(JobResultMessage result, String folderPath) {
         Path outputDir = Paths.get(folderPath).toAbsolutePath().normalize();
-        try {
-            Files.createDirectories(outputDir);
-        } catch (IOException ex) {
-            new Alert(Alert.AlertType.ERROR, "Could not prepare output folder: " + ex.getMessage()).show();
-            return;
+
+        ClientJobPlugin plugin = clientJobPluginsByType.get(ClientJobPlugins.normalizeTaskType(result.getTaskType()));
+        if (plugin == null) {
+            new Alert(Alert.AlertType.ERROR,
+                    "No client job plugin can save results for task type: " + result.getTaskType()).show();
+            return false;
         }
 
         List<Object> payloads = result.getResultsByTaskId() == null
                 ? List.of()
                 : result.getResultsByTaskId();
-        for (Object raw : payloads) {
-            FilePayload fp = gson.fromJson(gson.toJson(raw), FilePayload.class);
-
-            try {
-                byte[] data = java.util.Base64.getDecoder().decode(fp.base64Data());
-                Path path = SafeFileNames.safeOutputPath(outputDir, fp.fileName());
-                Files.write(path, data);
-
-                LOGGER.info("event=gui_file_saved path={}", path.toAbsolutePath());
-            } catch (Exception ex) {
-                LOGGER.warn("event=gui_file_save_failed file={} error={}",
-                        fp.fileName(), ex.getMessage(), ex);
-            }
+        try {
+            plugin.saveResults(payloads, outputDir);
+            LOGGER.info("event=gui_results_saved job_id={} task_type={} output_dir={}",
+                    result.getJobId(), result.getTaskType(), outputDir);
+            return true;
+        } catch (Exception ex) {
+            LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
+                    result.getJobId(), result.getTaskType(), ex.getMessage(), ex);
+            new Alert(Alert.AlertType.ERROR, "Could not save files: " + ex.getMessage()).show();
+            return false;
         }
     }
 

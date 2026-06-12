@@ -21,6 +21,11 @@
             <scope>runtime</scope>
         </dependency>
         <dependency>
+            <groupId>com.dickinson.cs</groupId>
+            <artifactId>taskflow-plugin-text</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
         </dependency>
