@@ -113,6 +113,15 @@ public record RabbitMqTransportConfig(
 
     private static boolean booleanValue(Map<String, String> env, String key, boolean fallback) {
         String value = env.get(key);
-        return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(key + " must be true or false");
     }
 }

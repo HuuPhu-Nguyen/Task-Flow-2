@@ -21,6 +21,7 @@ import org.slf4j.LoggerFactory;
 import peer.PeerNode;
 import peer.engine.PeerExecutionEngine;
 import protocol.*;
+import protocol.SafeFileNames;
 import server.db.DatabaseManager;
 
 import java.io.*;
@@ -86,9 +87,17 @@ public class PeerApp extends Application {
 
         connectBtn.setOnAction(e -> {
             connectBtn.setDisable(true);
+            int port;
+            try {
+                port = Integer.parseInt(portField.getText().trim());
+            } catch (NumberFormatException invalidPort) {
+                connectBtn.setDisable(false);
+                new Alert(Alert.AlertType.ERROR, "Port must be a number.").show();
+                return;
+            }
             startNetworkThread(
                     hostField.getText(),
-                    Integer.parseInt(portField.getText()),
+                    port,
                     () -> Platform.runLater(this::showMainGallery),
                     error -> Platform.runLater(() -> {
                         connectBtn.setDisable(false);
@@ -194,8 +203,11 @@ public class PeerApp extends Application {
                     gallery.getChildren().clear();
 
                     for (File f : files) {
-                        if (!f.delete()) {
-                            LOGGER.warn("event=temp_file_delete_failed file={}", f.getName());
+                        try {
+                            Files.deleteIfExists(f.toPath());
+                        } catch (IOException deleteError) {
+                            LOGGER.warn("event=temp_file_delete_failed file={} error={}",
+                                    f.getName(), deleteError.getMessage(), deleteError);
                         }
                     }
 
@@ -257,7 +269,7 @@ public class PeerApp extends Application {
 
         // ---- Jobs table ----
         TableView<DatabaseManager.JobRecord> jobTable = new TableView<>();
-        jobTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        jobTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         jobTable.setPlaceholder(new Label("No jobs recorded yet. Run the coordinator and submit a job."));
 
         TableColumn<DatabaseManager.JobRecord, String> colType = new TableColumn<>("Type");
@@ -289,11 +301,16 @@ public class PeerApp extends Application {
             return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
         });
 
-        jobTable.getColumns().addAll(colType, colStatus, colFiles, colSubmitted, colDuration, colJobId);
+        jobTable.getColumns().add(colType);
+        jobTable.getColumns().add(colStatus);
+        jobTable.getColumns().add(colFiles);
+        jobTable.getColumns().add(colSubmitted);
+        jobTable.getColumns().add(colDuration);
+        jobTable.getColumns().add(colJobId);
 
         // ---- Tasks table ----
         TableView<DatabaseManager.TaskRecord> taskTable = new TableView<>();
-        taskTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
+        taskTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         taskTable.setPlaceholder(new Label("Select a job above to see its tasks."));
 
         TableColumn<DatabaseManager.TaskRecord, String> tColPeer = new TableColumn<>("Peer");
@@ -319,7 +336,11 @@ public class PeerApp extends Application {
             return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
         });
 
-        taskTable.getColumns().addAll(tColPeer, tColStatus, tColDuration, tColRetries, tColTaskId);
+        taskTable.getColumns().add(tColPeer);
+        taskTable.getColumns().add(tColStatus);
+        taskTable.getColumns().add(tColDuration);
+        taskTable.getColumns().add(tColRetries);
+        taskTable.getColumns().add(tColTaskId);
 
         // When a job row is selected, populate the task table
         jobTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
@@ -386,9 +407,14 @@ public class PeerApp extends Application {
 
                 String line;
                 while ((line = in.readLine()) != null) {
-                    if (line.trim().isEmpty()) continue;
-                    Message msg = factory.fromJson(line);
-                    dispatcher.dispatch(msg, socketOut);
+                    try {
+                        if (line.trim().isEmpty()) continue;
+                        Message msg = factory.fromJson(line);
+                        dispatcher.dispatch(msg, socketOut);
+                    } catch (Exception messageError) {
+                        LOGGER.warn("event=gui_message_processing_failed error={}",
+                                messageError.getMessage(), messageError);
+                    }
                 }
             } catch (IOException e) {
                 socketOut = null;
@@ -494,7 +520,7 @@ public class PeerApp extends Application {
 
             try {
                 byte[] data = java.util.Base64.getDecoder().decode(fp.base64Data());
-                Path path = safeOutputPath(outputDir, fp.fileName());
+                Path path = SafeFileNames.safeOutputPath(outputDir, fp.fileName());
                 Files.write(path, data);
 
                 LOGGER.info("event=gui_file_saved path={}", path.toAbsolutePath());
@@ -503,26 +529,6 @@ public class PeerApp extends Application {
                         fp.fileName(), ex.getMessage(), ex);
             }
         }
-    }
-
-    private Path safeOutputPath(Path outputDir, String fileName) throws IOException {
-        String safeName = sanitizeFileName(fileName);
-        Path outputPath = outputDir.resolve(safeName).normalize();
-        if (!outputPath.startsWith(outputDir)) {
-            throw new IOException("Refusing to write outside the selected folder: " + fileName);
-        }
-        return outputPath;
-    }
-
-    private String sanitizeFileName(String fileName) {
-        if (fileName == null || fileName.isBlank()) {
-            return "taskflow-output";
-        }
-        String normalized = fileName.replace('\\', '/');
-        int slash = normalized.lastIndexOf('/');
-        String baseName = slash >= 0 ? normalized.substring(slash + 1) : normalized;
-        String safeName = baseName.replaceAll("[\\p{Cntrl}\\\\/:*?\"<>|]+", "_").trim();
-        return safeName.isBlank() ? "taskflow-output" : safeName;
     }
 
     @Override

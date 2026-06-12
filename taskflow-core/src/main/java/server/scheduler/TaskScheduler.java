@@ -3,7 +3,7 @@ package server.scheduler;
 import protocol.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import server.db.DatabaseManager;
+import server.db.JobStateStore;
 import server.job.*;
 import server.model.MessageEnvelope;
 import server.registry.*;
@@ -16,27 +16,27 @@ public class TaskScheduler implements Runnable {
 
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final PeerRegistry registry;
-    private final DatabaseManager db;
+    private final JobStateStore db;
     private final SchedulerOutput output;
     private final SchedulerConfig config;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final SchedulerMetrics metrics = new SchedulerMetrics();
     private long lastMetricsLogAtMillis = 0L;
 
-    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox, PeerRegistry registry, DatabaseManager db) {
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox, PeerRegistry registry, JobStateStore db) {
         this(mailbox, registry, db, new PeerRegistrySchedulerOutput(registry), SchedulerConfig.fromEnvironment());
     }
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
-                         DatabaseManager db,
+                         JobStateStore db,
                          SchedulerOutput output) {
         this(mailbox, registry, db, output, SchedulerConfig.fromEnvironment());
     }
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
-                         DatabaseManager db,
+                         JobStateStore db,
                          SchedulerOutput output,
                          SchedulerConfig config) {
         this.inboundMailbox = mailbox;
@@ -53,7 +53,7 @@ public class TaskScheduler implements Runnable {
                 //Process new messages (results or new jobs)
                 MessageEnvelope envelope = inboundMailbox.poll(500, TimeUnit.MILLISECONDS);
                 if (envelope != null) {
-                    handleMessage(envelope);
+                    processEnvelope(envelope);
                 }
                 //Check for stale tasks (Watchdog)
                 checkTimeouts();
@@ -64,6 +64,63 @@ public class TaskScheduler implements Runnable {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    private void processEnvelope(MessageEnvelope envelope) {
+        try {
+            handleMessage(envelope);
+        } catch (Exception e) {
+            logErrorEvent("scheduler_message_processing_failed", fields(
+                    "message_type", messageType(envelope),
+                    "from_node_id", envelope.fromNodeId(),
+                    "error", e.getMessage()
+            ));
+            requeueEnvelope(envelope);
+            return;
+        }
+
+        ackEnvelope(envelope);
+    }
+
+    private void ackEnvelope(MessageEnvelope envelope) {
+        if (envelope.acknowledgement() == null) {
+            return;
+        }
+        try {
+            envelope.acknowledgement().ack();
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            logErrorEvent("scheduler_message_ack_failed", fields(
+                    "message_type", messageType(envelope),
+                    "from_node_id", envelope.fromNodeId(),
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    private void requeueEnvelope(MessageEnvelope envelope) {
+        if (envelope.acknowledgement() == null) {
+            return;
+        }
+        try {
+            envelope.acknowledgement().requeue();
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            logErrorEvent("scheduler_message_requeue_failed", fields(
+                    "message_type", messageType(envelope),
+                    "from_node_id", envelope.fromNodeId(),
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    private String messageType(MessageEnvelope envelope) {
+        Message message = envelope.message();
+        return message == null ? "null" : String.valueOf(message.getType());
     }
 
     private void checkTimeouts() {

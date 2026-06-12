@@ -83,4 +83,14 @@ class RabbitMqTransportConfigTest {
                 defaults.requeueOnHandlerFailure()
         ));
     }
+
+    @Test
+    void rejectsInvalidBooleanEnvironmentValues() {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> RabbitMqTransportConfig.fromEnvironment(Map.of(
+                        "TASKFLOW_RABBITMQ_DURABLE", "maybe"
+                )));
+
+        assertEquals("TASKFLOW_RABBITMQ_DURABLE must be true or false", error.getMessage());
+    }
 }

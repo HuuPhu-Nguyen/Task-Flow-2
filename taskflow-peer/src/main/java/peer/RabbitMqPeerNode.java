@@ -9,6 +9,7 @@ import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PongMessage;
+import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.InboundTransportMessage;
@@ -222,8 +223,9 @@ public class RabbitMqPeerNode {
             if (payload == null || payload.base64Data() == null) {
                 continue;
             }
-            String fileName = i + "-" + sanitizeFileName(payload.fileName());
-            Files.write(outputDir.resolve(fileName), Base64.getDecoder().decode(payload.base64Data()));
+            String fileName = i + "-" + SafeFileNames.sanitize(payload.fileName(), "result.bin");
+            Files.write(SafeFileNames.safeOutputPath(outputDir, fileName, i + "-result.bin"),
+                    Base64.getDecoder().decode(payload.base64Data()));
         }
         return outputDir;
     }
@@ -255,14 +257,6 @@ public class RabbitMqPeerNode {
 
     private static boolean isSubmitCommand(String[] args) {
         return args.length > 0 && "submit".equalsIgnoreCase(args[0]);
-    }
-
-    private static String sanitizeFileName(String fileName) {
-        if (fileName == null || fileName.isBlank()) {
-            return "result.bin";
-        }
-        String sanitized = fileName.replaceAll("[\\\\/:*?\"<>|]", "_");
-        return sanitized.isBlank() ? "result.bin" : sanitized;
     }
 
     private static void ack(TransportAcknowledgement acknowledgement) throws Exception {

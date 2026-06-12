@@ -8,6 +8,7 @@ import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
+import transport.TransportAcknowledgement;
 
 import java.util.List;
 import java.util.Map;
@@ -94,6 +95,43 @@ class TaskSchedulerFailureTest {
             assertEquals("job-empty", result.getJobId());
             assertFalse(result.isSuccessful());
             assertTrue(result.getErrorMessage().contains("at least one task"));
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void brokerDeliveryIsAcknowledgedAfterJobSubmitHandling() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-ack-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage emptyJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-06-12T00:00:00Z",
+                    "job-ack",
+                    "TEST_TASK",
+                    List.of(),
+                    ""
+            );
+            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+
+            assertTrue(output.awaitResult());
+            assertTrue(acknowledgement.awaitAck());
+            assertEquals(1, acknowledgement.ackCount());
+            assertEquals(0, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -431,6 +469,45 @@ class TaskSchedulerFailureTest {
 
         String peerId() {
             return peerId.get();
+        }
+    }
+
+    private static class RecordingAcknowledgement implements TransportAcknowledgement {
+        private final CountDownLatch acked = new CountDownLatch(1);
+        private final AtomicInteger ackCount = new AtomicInteger();
+        private final AtomicInteger requeueCount = new AtomicInteger();
+        private final AtomicInteger rejectCount = new AtomicInteger();
+
+        @Override
+        public void ack() {
+            ackCount.incrementAndGet();
+            acked.countDown();
+        }
+
+        @Override
+        public void requeue() {
+            requeueCount.incrementAndGet();
+        }
+
+        @Override
+        public void reject() {
+            rejectCount.incrementAndGet();
+        }
+
+        boolean awaitAck() throws InterruptedException {
+            return acked.await(2, TimeUnit.SECONDS);
+        }
+
+        int ackCount() {
+            return ackCount.get();
+        }
+
+        int requeueCount() {
+            return requeueCount.get();
+        }
+
+        int rejectCount() {
+            return rejectCount.get();
         }
     }
 }

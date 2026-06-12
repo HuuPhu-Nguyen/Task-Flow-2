@@ -80,7 +80,9 @@ Framework core no longer imports concrete image or video job classes. New task t
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, and dead-letter exchange/queue configuration. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
+Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`.
+
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, and dead-letter exchange/queue configuration. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
 ---
 
@@ -400,13 +402,27 @@ The submitting peer stays available for task execution while waiting for `JOB_RE
 
 ## Quick RabbitMQ Demo
 
-The recommended broker-backed demo path is Docker Compose. It builds a local TaskFlow image, then runs RabbitMQ, the coordinator, two peers, and a one-shot submitting peer that generates twelve tiny image tasks:
+The recommended broker-backed demo path is Docker Compose. It runs RabbitMQ, one coordinator, two worker peers, and a one-shot submitting peer that generates twelve tiny image tasks. The submitting peer also stays available for task execution while it waits for the final `JOB_RESULT`.
+
+Build the local demo image first:
 
 ```bash
-docker compose up --build --abort-on-container-exit --exit-code-from submitter
+docker compose --progress plain build
 ```
 
-Converted outputs are written to `target/demo-results`, and RabbitMQ job output is retained under `target/rabbitmq-results`. After a default run, clean up the demo services with:
+Run the default two-worker demo:
+
+```bash
+docker compose up --no-build --abort-on-container-exit --exit-code-from submitter
+```
+
+Expected success indicators:
+
+- `submitter-1 exited with code 0`
+- coordinator log contains `event=job_completed ... success=true result_count=12`
+- `target/demo-results` contains 12 converted output files
+
+Converted outputs are written to `target/demo-results`, and RabbitMQ job output is retained under `target/rabbitmq-results`. Clean up the demo services with:
 
 ```bash
 docker compose down --remove-orphans
@@ -414,20 +430,22 @@ docker compose down --remove-orphans
 
 RabbitMQ management is available during the run at `http://localhost:15672` with `guest` / `guest`.
 
-If you want a third peer in the same demo:
+Run the larger three-worker profile with the same built image:
 
 ```bash
-docker compose --profile full-demo up --build --abort-on-container-exit --exit-code-from submitter
+docker compose --profile full-demo up --no-build --abort-on-container-exit --exit-code-from submitter
 docker compose --profile full-demo down --remove-orphans
 ```
 
-On Windows, there is also a PowerShell convenience wrapper:
+Build and run can be combined with `docker compose up --build`, but the separate build/run sequence above is easier to debug and gives clearer progress during the first dependency build.
+
+On Windows, there is also a PowerShell convenience wrapper for local development:
 
 ```powershell
 .\scripts\demo-rabbitmq.ps1
 ```
 
-The script builds the Maven modules with tests skipped, starts RabbitMQ with Docker Compose, generates twelve small sample PNG inputs, starts one coordinator and three RabbitMQ peers, submits an image conversion job, and copies the latest converted outputs to `target\demo-results`. Runtime logs are written under `target\demo-logs`.
+The script builds the Maven modules with tests skipped, starts RabbitMQ with Docker Compose, waits for the broker and TaskFlow processes to become ready, generates twelve small sample PNG inputs, starts one coordinator and three RabbitMQ peers, submits an image conversion job, and copies the latest converted outputs to `target\demo-results`. Runtime logs are written under `target\demo-logs`.
 
 Useful options:
 
@@ -440,8 +458,9 @@ Useful options:
 Requirements:
 
 - Docker Desktop or Docker Engine with Compose
+- Enough Docker memory and disk for the Java 21 image plus the JavaCV/FFmpeg-backed conversion plugin
 
-The Docker path does not require Java or Maven on the host machine. Use `-KeepRabbitMq` with the PowerShell wrapper if you want the broker to remain available after the script finishes.
+The Docker Compose path does not require Java or Maven on the host machine. The PowerShell wrapper does require host Java because it runs the Maven wrapper and Java processes locally. Use `-KeepRabbitMq` with the PowerShell wrapper if you want the broker to remain available after the script finishes.
 
 ---
 
@@ -451,8 +470,8 @@ The Docker path does not require Java or Maven on the host machine. Use `-KeepRa
 - RabbitMQ mode is functional but transitional; peer-specific routing and dead-letter topology configuration are implemented, but broker backpressure, live dead-letter validation, and restart recovery are not complete.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
-- Main Java runtime paths now use SLF4J/Logback with explicit runtime configuration; operational logging polish still needs live-runtime review.
-- SQLite is the current local history store; PostgreSQL/Flyway support is planned for durable production-style state management.
+- Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
+- SQLite is the current `JobStateStore` implementation; PostgreSQL/Flyway support is planned for durable production-style state management.
 
 ---
 

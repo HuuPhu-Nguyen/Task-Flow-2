@@ -1,11 +1,14 @@
 package peer.processors;
 
 import com.google.gson.Gson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
 import peer.engine.TaskProcessor;
 import protocol.FilePayload;
+import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
 
 import java.io.*;
@@ -20,6 +23,8 @@ import static org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P;
  * Works on all platforms without requiring FFmpeg installation.
  */
 public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
+    private static final Logger LOGGER = LoggerFactory.getLogger(VideoTranscodingProcessor.class);
+
     private final Gson gson = new Gson();
 
     @Override
@@ -38,7 +43,8 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
         }
         
         // Create temp input file
-        String inputExt = getExtension(input.fileName());
+        String inputFileName = SafeFileNames.sanitize(input.fileName());
+        String inputExt = getExtension(inputFileName);
         File tempIn = File.createTempFile("video_in_", inputExt);
         File tempOut = File.createTempFile("video_out_", "." + targetFormat);
         
@@ -55,13 +61,21 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             byte[] outputBytes = Files.readAllBytes(tempOut.toPath());
             String outBase64 = Base64.getEncoder().encodeToString(outputBytes);
 
-            String newFileName = stripExtension(input.fileName()) + "." + targetFormat;
+            String newFileName = stripExtension(inputFileName) + "." + targetFormat;
             return new FilePayload(newFileName, outBase64);
             
         } finally {
-            // Cleanup temp files
-            if (tempIn.exists()) tempIn.delete();
-            if (tempOut.exists()) tempOut.delete();
+            deleteTempFile(tempIn);
+            deleteTempFile(tempOut);
+        }
+    }
+
+    private void deleteTempFile(File file) {
+        try {
+            Files.deleteIfExists(file.toPath());
+        } catch (IOException e) {
+            LOGGER.warn("event=temp_file_delete_failed file={} error={}",
+                    file.getAbsolutePath(), e.getMessage(), e);
         }
     }
 

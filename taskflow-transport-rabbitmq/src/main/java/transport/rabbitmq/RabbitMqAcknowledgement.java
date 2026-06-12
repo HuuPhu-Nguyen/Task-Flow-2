@@ -3,12 +3,11 @@ package transport.rabbitmq;
 import com.rabbitmq.client.Channel;
 import transport.TransportAcknowledgement;
 
-import java.util.concurrent.atomic.AtomicBoolean;
-
 class RabbitMqAcknowledgement implements TransportAcknowledgement {
     private final Channel channel;
     private final long deliveryTag;
-    private final AtomicBoolean settled = new AtomicBoolean(false);
+    private boolean settled;
+    private boolean deferred;
 
     RabbitMqAcknowledgement(Channel channel, long deliveryTag) {
         this.channel = channel;
@@ -16,33 +15,48 @@ class RabbitMqAcknowledgement implements TransportAcknowledgement {
     }
 
     @Override
-    public void ack() throws Exception {
-        if (settled.compareAndSet(false, true)) {
-            synchronized (channel) {
-                channel.basicAck(deliveryTag, false);
-            }
-        }
+    public synchronized void ack() throws Exception {
+        settle(() -> channel.basicAck(deliveryTag, false));
     }
 
     @Override
-    public void requeue() throws Exception {
-        if (settled.compareAndSet(false, true)) {
-            synchronized (channel) {
-                channel.basicNack(deliveryTag, false, true);
-            }
-        }
+    public synchronized void requeue() throws Exception {
+        settle(() -> channel.basicNack(deliveryTag, false, true));
     }
 
     @Override
-    public void reject() throws Exception {
-        if (settled.compareAndSet(false, true)) {
-            synchronized (channel) {
-                channel.basicReject(deliveryTag, false);
-            }
+    public synchronized void reject() throws Exception {
+        settle(() -> channel.basicReject(deliveryTag, false));
+    }
+
+    @Override
+    public synchronized void defer() {
+        if (!settled) {
+            deferred = true;
         }
     }
 
-    boolean isSettled() {
-        return settled.get();
+    synchronized boolean isSettled() {
+        return settled;
+    }
+
+    synchronized boolean isDeferred() {
+        return deferred;
+    }
+
+    private void settle(SettlementOperation operation) throws Exception {
+        if (settled) {
+            return;
+        }
+        synchronized (channel) {
+            operation.run();
+        }
+        settled = true;
+        deferred = false;
+    }
+
+    @FunctionalInterface
+    private interface SettlementOperation {
+        void run() throws Exception;
     }
 }

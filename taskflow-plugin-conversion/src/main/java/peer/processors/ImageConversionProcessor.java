@@ -6,6 +6,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import peer.engine.TaskProcessor;
 import protocol.FilePayload;
+import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
 
 import javax.imageio.ImageIO;
@@ -13,6 +14,7 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.*;
 import java.util.Base64;
+import java.util.Locale;
 
 public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
     private final Gson gson = new Gson();
@@ -24,7 +26,8 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
         byte[] rawBytes = Base64.getDecoder().decode(input.base64Data());
         BufferedImage img;
         // Check if the input is a PDF
-        if (input.fileName().toLowerCase().endsWith(".pdf")) {
+        String inputFileName = SafeFileNames.sanitize(input.fileName());
+        if (inputFileName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
             try (PDDocument document = Loader.loadPDF(rawBytes)) {
                 PDFRenderer renderer = new PDFRenderer(document);
                 // Render the first page at a standard 300 DPI for high quality
@@ -60,7 +63,7 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
         }
 
         String outBase64 = Base64.getEncoder().encodeToString(baos.toByteArray());
-        String newFileName = stripExtension(input.fileName()) + "." + format;
+        String newFileName = stripExtension(inputFileName) + "." + format;
 
         return new FilePayload(newFileName, outBase64);
     }

@@ -151,7 +151,7 @@ public class RabbitMqTransport implements BrokerTransport {
 
                 try {
                     handler.handle(message);
-                    if (!acknowledgement.isSettled()) {
+                    if (!acknowledgement.isSettled() && !acknowledgement.isDeferred()) {
                         acknowledgement.ack();
                     }
                 } catch (Exception e) {

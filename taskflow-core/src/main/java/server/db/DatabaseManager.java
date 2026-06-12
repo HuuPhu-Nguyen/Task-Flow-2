@@ -6,8 +6,9 @@ import org.slf4j.LoggerFactory;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
-public class DatabaseManager {
+public class DatabaseManager implements JobStateStore {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
@@ -16,7 +17,11 @@ public class DatabaseManager {
     private final Connection conn;
 
     public DatabaseManager() throws SQLException {
-        conn = DriverManager.getConnection("jdbc:sqlite:" + DB_PATH);
+        this(DB_PATH);
+    }
+
+    public DatabaseManager(String dbPath) throws SQLException {
+        conn = DriverManager.getConnection("jdbc:sqlite:" + Objects.requireNonNull(dbPath, "dbPath"));
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("PRAGMA journal_mode=WAL");
         }

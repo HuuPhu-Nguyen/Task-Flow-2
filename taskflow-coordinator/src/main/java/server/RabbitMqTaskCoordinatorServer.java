@@ -82,7 +82,14 @@ public class RabbitMqTaskCoordinatorServer {
 
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> inboundMailbox,
                                             InboundTransportMessage delivery) throws InterruptedException {
-        inboundMailbox.put(new MessageEnvelope(delivery.message(), delivery.fromNodeId()));
+        if (delivery.acknowledgement() != null) {
+            delivery.acknowledgement().defer();
+        }
+        inboundMailbox.put(new MessageEnvelope(
+                delivery.message(),
+                delivery.fromNodeId(),
+                delivery.acknowledgement()
+        ));
     }
 
     private static void handleHeartbeat(PeerRegistry registry,

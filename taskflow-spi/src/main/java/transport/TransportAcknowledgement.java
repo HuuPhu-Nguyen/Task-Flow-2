@@ -6,4 +6,7 @@ public interface TransportAcknowledgement {
     void requeue() throws Exception;
 
     void reject() throws Exception;
+
+    default void defer() {
+    }
 }
