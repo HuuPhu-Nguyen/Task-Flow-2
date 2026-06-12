@@ -416,6 +416,20 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
+### Live RabbitMQ Integration Test
+
+The RabbitMQ transport module includes an opt-in live broker test. It is skipped by default so normal builds do not require RabbitMQ.
+
+Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables at an existing broker. Then run:
+
+```powershell
+.\mvnw.cmd -pl taskflow-transport-rabbitmq -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest test
+```
+
+Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same test.
+
+The test creates unique non-durable exchanges and queues, validates shared-route delivery, validates peer-specific delivery, verifies shared-route acknowledgement drains the queue, and cleans up its broker resources.
+
 ---
 
 ## Quick RabbitMQ Demo
