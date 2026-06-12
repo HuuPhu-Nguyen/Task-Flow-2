@@ -1,0 +1,14 @@
+.git/
+.idea/
+.vscode/
+**/target/
+target/
+out/
+*.iml
+taskflow.db
+taskflow.db-shm
+taskflow.db-wal
+config/taskflow.yml
+PLAN.md
+java/in_PEER_*/
+java/out_PEER_*/

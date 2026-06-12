@@ -1,0 +1,128 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: taskflow-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_listener 5672",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  coordinator:
+    build:
+      context: .
+    image: taskflow-demo:local
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    command:
+      - java
+      - -Xmx256m
+      - -jar
+      - taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+  peer-a:
+    image: taskflow-demo:local
+    pull_policy: never
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+    environment:
+      TASKFLOW_PEER_ID: compose-peer-a
+    command:
+      - java
+      - -Xmx256m
+      - -jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+  peer-b:
+    image: taskflow-demo:local
+    pull_policy: never
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+    environment:
+      TASKFLOW_PEER_ID: compose-peer-b
+    command:
+      - java
+      - -Xmx256m
+      - -jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+  peer-c:
+    image: taskflow-demo:local
+    pull_policy: never
+    profiles: ["full-demo"]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+    environment:
+      TASKFLOW_PEER_ID: compose-peer-c
+    command:
+      - java
+      - -Xmx256m
+      - -jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+
+  submitter:
+    image: taskflow-demo:local
+    pull_policy: never
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      coordinator:
+        condition: service_started
+      peer-a:
+        condition: service_started
+      peer-b:
+        condition: service_started
+    environment:
+      TASKFLOW_PEER_ID: compose-submit
+      TASKFLOW_DEMO_FILE_COUNT: 12
+    volumes:
+      - ./target/demo-results:/app/target/demo-results
+      - ./target/rabbitmq-results:/app/target/rabbitmq-results
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p target/demo-input target/demo-results target/rabbitmq-results
+        PNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII='
+        count="$${TASKFLOW_DEMO_FILE_COUNT:-12}"
+        inputs=""
+        i=1
+        while [ "$$i" -le "$$count" ]; do
+          printf '%s' "$$PNG" | base64 -d > "target/demo-input/sample-$$i.png"
+          inputs="$$inputs target/demo-input/sample-$$i.png"
+          i=$$((i + 1))
+        done
+        echo "Generated $$count demo input files."
+        echo "Waiting for coordinator and peers to register..."
+        sleep 20
+        java -Xmx256m -jar taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar submit image png $$inputs
+        latest="$$(find target/rabbitmq-results -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
+        if [ -z "$$latest" ]; then
+          echo "No result directory was created."
+          exit 1
+        fi
+        rm -rf target/demo-results/*
+        cp -R "$$latest"/. target/demo-results/
+        echo "Demo results:"
+        ls -la target/demo-results
