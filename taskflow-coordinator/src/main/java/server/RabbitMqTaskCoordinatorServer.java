@@ -3,6 +3,7 @@ package server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
+import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
 import server.model.MessageEnvelope;
@@ -18,6 +19,7 @@ import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
+import java.time.Instant;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -38,6 +40,7 @@ public class RabbitMqTaskCoordinatorServer {
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
+            reconcileAbandonedJobs(db);
         } catch (Exception e) {
             LOGGER.warn("event=database_unavailable path={} error={}",
                     DatabaseManager.DB_PATH, e.getMessage(), e);
@@ -51,7 +54,11 @@ public class RabbitMqTaskCoordinatorServer {
                 schedulerConfig
         );
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
-        PeerLivenessMonitor monitor = new PeerLivenessMonitor(registry, HEARTBEAT_TIMEOUT_MILLIS);
+        PeerLivenessMonitor monitor = new PeerLivenessMonitor(
+                registry,
+                HEARTBEAT_TIMEOUT_MILLIS,
+                peer -> enqueuePeerUnavailable(inboundMailbox, peer, "heartbeat_timeout")
+        );
 
         transport.subscribe(TransportRoute.JOB_SUBMIT,
                 delivery -> enqueueForScheduler(inboundMailbox, delivery));
@@ -80,6 +87,15 @@ public class RabbitMqTaskCoordinatorServer {
         Thread.currentThread().join();
     }
 
+    private static void reconcileAbandonedJobs(DatabaseManager db) {
+        int failedJobs = db.markRunningJobsFailedOnStartup(System.currentTimeMillis());
+        if (failedJobs > 0) {
+            LOGGER.warn("event=abandoned_jobs_marked_failed count={}", failedJobs);
+        } else if (failedJobs < 0) {
+            LOGGER.error("event=abandoned_job_reconciliation_failed");
+        }
+    }
+
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> inboundMailbox,
                                             InboundTransportMessage delivery) throws InterruptedException {
         if (delivery.acknowledgement() != null) {
@@ -90,6 +106,21 @@ public class RabbitMqTaskCoordinatorServer {
                 delivery.fromNodeId(),
                 delivery.acknowledgement()
         ));
+    }
+
+    private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,
+                                               PeerInfo peer,
+                                               String reason) {
+        if (peer == null) {
+            return;
+        }
+        boolean queued = inboundMailbox.offer(new MessageEnvelope(
+                new PeerDisconnectedMessage(peer.getNodeId(), Instant.now().toString(), reason),
+                peer.getNodeId()
+        ));
+        if (!queued) {
+            LOGGER.error("event=peer_unavailable_event_dropped peer_id={} reason={}", peer.getNodeId(), reason);
+        }
     }
 
     private static void handleHeartbeat(PeerRegistry registry,

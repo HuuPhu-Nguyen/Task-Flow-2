@@ -3,6 +3,7 @@ package server.scheduler;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
+import protocol.PeerDisconnectedMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
@@ -139,6 +140,121 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void brokerDeliveryIsRequeuedWhenJobStartFailureResultCannotBeSent() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        FailingResultOutput output = new FailingResultOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-start-failure-requeue-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage emptyJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-06-13T00:00:00Z",
+                    "job-start-result-send-failure",
+                    "TEST_TASK",
+                    List.of(),
+                    ""
+            );
+            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+
+            assertTrue(output.awaitAttempt());
+            assertTrue(acknowledgement.awaitRequeue());
+            assertEquals(0, acknowledgement.ackCount());
+            assertEquals(1, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void duplicateActiveJobIdReturnsFailureWithoutReplacingOriginalJob() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-duplicate-job-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-duplicate", List.of("first-payload")), "requester-1"));
+            mailbox.put(new MessageEnvelope(testJob("job-duplicate", List.of("second-payload")), "requester-1"));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage duplicateResult = output.result();
+            assertNotNull(duplicateResult);
+            assertEquals("job-duplicate", duplicateResult.getJobId());
+            assertFalse(duplicateResult.isSuccessful());
+            assertTrue(duplicateResult.getErrorMessage().contains("already active"));
+
+            registry.register("peer-1", new PeerInfo(
+                    "peer-1",
+                    SchedulerConfig.defaults(),
+                    List.of("TEST_TASK")
+            ));
+
+            assertTrue(output.awaitTask());
+            assertEquals("first-payload", output.task().getPayload());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void finalJobResultIsRetriedWhenFirstDeliveryFails() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo peer = new PeerInfo(
+                "peer-1",
+                SchedulerConfig.defaults(),
+                List.of("TEST_TASK")
+        );
+        registry.register(peer.getNodeId(), peer);
+        ResultRetryOutput output = new ResultRetryOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-result-retry-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-result-retry", List.of("payload")), "requester-1"));
+
+            assertTrue(output.awaitTask());
+            mailbox.put(new MessageEnvelope(successResult(output.task(), "accepted-result"), peer.getNodeId()));
+
+            assertTrue(output.awaitFirstDeliveryFailure());
+            assertTrue(output.awaitResult());
+            assertEquals(2, output.resultSendAttempts());
+            assertTrue(output.result().isSuccessful());
+            assertEquals(List.of("accepted-result"), output.result().getResultsByTaskId());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void dispatchesOnlyToPeersWithMatchingCapabilities() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
@@ -222,6 +338,102 @@ class TaskSchedulerFailureTest {
             assertTrue(result.isSuccessful());
             assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
             assertEquals(0, peer.getActiveTasks());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void peerDisconnectReleasesAssignedTaskForImmediateRetryAndIgnoresStaleResult() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        registry.register("peer-1", new PeerInfo(
+                "peer-1",
+                SchedulerConfig.defaults(),
+                List.of("TEST_TASK")
+        ));
+        MultiAssignmentOutput output = new MultiAssignmentOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-peer-disconnect-retry-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-disconnect-retry", List.of("payload")), "requester-1"));
+
+            MultiAssignmentOutput.Assignment first = output.awaitAssignment();
+            assertNotNull(first);
+            assertEquals("peer-1", first.peerId());
+
+            registry.remove("peer-1");
+            registry.register("peer-2", new PeerInfo(
+                    "peer-2",
+                    SchedulerConfig.defaults(),
+                    List.of("TEST_TASK")
+            ));
+            mailbox.put(new MessageEnvelope(
+                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "tcp_disconnect"),
+                    "peer-1"
+            ));
+
+            MultiAssignmentOutput.Assignment retry = output.awaitAssignment();
+            assertNotNull(retry);
+            assertEquals("peer-2", retry.peerId());
+            assertEquals(first.task().getTaskId(), retry.task().getTaskId());
+
+            mailbox.put(new MessageEnvelope(successResult(first.task(), "stale-result"), "peer-1"));
+            assertFalse(output.awaitResult(300));
+
+            mailbox.put(new MessageEnvelope(successResult(retry.task(), "accepted-result"), "peer-2"));
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertTrue(result.isSuccessful());
+            assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void peerDisconnectAtRetryLimitReturnsFailedJobResult() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        registry.register("peer-1", new PeerInfo(
+                "peer-1",
+                SchedulerConfig.defaults(),
+                List.of("TEST_TASK")
+        ));
+        MultiAssignmentOutput output = new MultiAssignmentOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-peer-disconnect-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-disconnect-failure", List.of("payload")), "requester-1"));
+
+            MultiAssignmentOutput.Assignment assignment = output.awaitAssignment();
+            assertNotNull(assignment);
+            registry.remove("peer-1");
+            mailbox.put(new MessageEnvelope(
+                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "tcp_disconnect"),
+                    "peer-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertEquals("job-disconnect-failure", result.getJobId());
+            assertFalse(result.isSuccessful());
+            assertTrue(result.getErrorMessage().contains("peer became unavailable"));
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -439,6 +651,43 @@ class TaskSchedulerFailureTest {
         }
     }
 
+    private static class MultiAssignmentOutput implements SchedulerOutput {
+        private final BlockingQueue<Assignment> assignments = new LinkedBlockingQueue<>();
+        private final CountDownLatch resultReceived = new CountDownLatch(1);
+        private final AtomicReference<JobResultMessage> result = new AtomicReference<>();
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            assignments.offer(new Assignment(peer.getNodeId(), message));
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            result.set(message);
+            resultReceived.countDown();
+            return true;
+        }
+
+        Assignment awaitAssignment() throws InterruptedException {
+            return assignments.poll(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitResult() throws InterruptedException {
+            return awaitResult(2_000);
+        }
+
+        boolean awaitResult(long timeoutMillis) throws InterruptedException {
+            return resultReceived.await(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        JobResultMessage result() {
+            return result.get();
+        }
+
+        record Assignment(String peerId, TaskAssignMessage task) {
+        }
+    }
+
     private static class FlakyTaskOutput implements SchedulerOutput {
         private final AtomicInteger attempts = new AtomicInteger();
         private final CountDownLatch successfulTask = new CountDownLatch(1);
@@ -472,8 +721,79 @@ class TaskSchedulerFailureTest {
         }
     }
 
+    private static class ResultRetryOutput implements SchedulerOutput {
+        private final CountDownLatch taskReceived = new CountDownLatch(1);
+        private final CountDownLatch firstDeliveryFailed = new CountDownLatch(1);
+        private final CountDownLatch resultReceived = new CountDownLatch(1);
+        private final AtomicInteger resultAttempts = new AtomicInteger();
+        private final AtomicReference<TaskAssignMessage> task = new AtomicReference<>();
+        private final AtomicReference<JobResultMessage> result = new AtomicReference<>();
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            task.set(message);
+            taskReceived.countDown();
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            int attempt = resultAttempts.incrementAndGet();
+            if (attempt == 1) {
+                firstDeliveryFailed.countDown();
+                return false;
+            }
+            result.set(message);
+            resultReceived.countDown();
+            return true;
+        }
+
+        boolean awaitTask() throws InterruptedException {
+            return taskReceived.await(2, TimeUnit.SECONDS);
+        }
+
+        TaskAssignMessage task() {
+            return task.get();
+        }
+
+        boolean awaitFirstDeliveryFailure() throws InterruptedException {
+            return firstDeliveryFailed.await(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitResult() throws InterruptedException {
+            return resultReceived.await(3, TimeUnit.SECONDS);
+        }
+
+        int resultSendAttempts() {
+            return resultAttempts.get();
+        }
+
+        JobResultMessage result() {
+            return result.get();
+        }
+    }
+
+    private static class FailingResultOutput implements SchedulerOutput {
+        private final CountDownLatch attempted = new CountDownLatch(1);
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            throw new AssertionError("Failed job starts should not dispatch tasks.");
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) throws Exception {
+            attempted.countDown();
+            throw new Exception("transient result send failure");
+        }
+
+        boolean awaitAttempt() throws InterruptedException {
+            return attempted.await(2, TimeUnit.SECONDS);
+        }
+    }
+
     private static class RecordingAcknowledgement implements TransportAcknowledgement {
         private final CountDownLatch acked = new CountDownLatch(1);
+        private final CountDownLatch requeued = new CountDownLatch(1);
         private final AtomicInteger ackCount = new AtomicInteger();
         private final AtomicInteger requeueCount = new AtomicInteger();
         private final AtomicInteger rejectCount = new AtomicInteger();
@@ -487,6 +807,7 @@ class TaskSchedulerFailureTest {
         @Override
         public void requeue() {
             requeueCount.incrementAndGet();
+            requeued.countDown();
         }
 
         @Override
@@ -496,6 +817,10 @@ class TaskSchedulerFailureTest {
 
         boolean awaitAck() throws InterruptedException {
             return acked.await(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitRequeue() throws InterruptedException {
+            return requeued.await(2, TimeUnit.SECONDS);
         }
 
         int ackCount() {

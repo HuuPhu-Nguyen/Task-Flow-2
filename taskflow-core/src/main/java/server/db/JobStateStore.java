@@ -1,19 +1,29 @@
 package server.db;
 
+import java.util.Collection;
+
 public interface JobStateStore {
-    void insertJob(String jobId, String taskType, String requesterId, int fileCount);
+    boolean insertJobWithTasks(String jobId,
+                               String taskType,
+                               String requesterId,
+                               int fileCount,
+                               Collection<String> taskIds);
 
-    void insertTask(String taskId, String jobId);
+    boolean insertJob(String jobId, String taskType, String requesterId, int fileCount);
 
-    void markTaskAssigned(String taskId, String peerId, long startedAt);
+    boolean insertTask(String taskId, String jobId);
 
-    void markTaskCompleted(String taskId, long completedAt, long durationMs);
+    boolean markTaskAssigned(String taskId, String peerId, long startedAt);
 
-    void markTaskRetried(String taskId, int retryCount);
+    boolean markTaskCompleted(String taskId, long completedAt, long durationMs);
 
-    void markTaskFailed(String taskId);
+    boolean markTaskRetried(String taskId, int retryCount);
 
-    void markJobCompleted(String jobId);
+    boolean markTaskFailed(String taskId);
 
-    void markJobFailed(String jobId);
+    boolean markJobCompleted(String jobId);
+
+    boolean markJobFailed(String jobId);
+
+    int markRunningJobsFailedOnStartup(long completedAt);
 }

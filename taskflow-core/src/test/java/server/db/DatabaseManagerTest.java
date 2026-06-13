@@ -7,6 +7,8 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseManagerTest {
 
@@ -45,6 +47,84 @@ class DatabaseManagerTest {
             assertEquals(456L, task.completedAt());
             assertEquals(333L, task.durationMs());
             assertEquals(0, task.retryCount());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void marksRunningJobsAndNonTerminalTasksFailedOnStartup() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-recovery-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("running-job", "TEST_TASK", "requester-1", 2);
+            db.insertTask("completed-task", "running-job");
+            db.insertTask("assigned-task", "running-job");
+            db.markTaskAssigned("completed-task", "peer-1", 100L);
+            db.markTaskCompleted("completed-task", 200L, 100L);
+            db.markTaskAssigned("assigned-task", "peer-2", 150L);
+
+            db.insertJob("completed-job", "TEST_TASK", "requester-2", 1);
+            db.insertTask("completed-job-task", "completed-job");
+            db.markTaskCompleted("completed-job-task", 250L, 50L);
+            db.markJobCompleted("completed-job");
+
+            assertEquals(1, db.markRunningJobsFailedOnStartup(999L));
+
+            DatabaseManager.JobRecord runningJob = db.getJobHistory().stream()
+                    .filter(job -> job.jobId().equals("running-job"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("FAILED", runningJob.status());
+            assertEquals(999L, runningJob.completedAt());
+
+            DatabaseManager.JobRecord completedJob = db.getJobHistory().stream()
+                    .filter(job -> job.jobId().equals("completed-job"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("COMPLETED", completedJob.status());
+            assertTrue(completedJob.completedAt() > 0L);
+
+            List<DatabaseManager.TaskRecord> runningTasks = db.getTasksForJob("running-job");
+            DatabaseManager.TaskRecord completedTask = runningTasks.stream()
+                    .filter(task -> task.taskId().equals("completed-task"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("COMPLETED", completedTask.status());
+            assertEquals(200L, completedTask.completedAt());
+
+            DatabaseManager.TaskRecord assignedTask = runningTasks.stream()
+                    .filter(task -> task.taskId().equals("assigned-task"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("FAILED", assignedTask.status());
+            assertEquals(999L, assignedTask.completedAt());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void rollsBackAtomicJobStartupWhenTaskInsertFails() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-startup-rollback-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("existing-job", "TEST_TASK", "requester-1", 1);
+            db.insertTask("duplicate-task", "existing-job");
+
+            assertFalse(db.insertJobWithTasks(
+                    "new-job",
+                    "TEST_TASK",
+                    "requester-2",
+                    1,
+                    List.of("duplicate-task")
+            ));
+
+            assertTrue(db.getJobHistory().stream().noneMatch(job -> job.jobId().equals("new-job")));
+            assertEquals(0, db.getTasksForJob("new-job").size());
+            assertEquals(1, db.getTasksForJob("existing-job").size());
         } finally {
             db.close();
         }

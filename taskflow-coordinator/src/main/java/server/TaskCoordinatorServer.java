@@ -3,6 +3,7 @@ package server;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.time.Instant;
 import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -11,11 +12,13 @@ import java.util.concurrent.LinkedBlockingQueue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import protocol.PeerDisconnectedMessage;
 import server.db.DatabaseManager;
 import server.handler.PeerHandler;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
 import server.registry.InMemoryPeerRegistry;
+import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.scheduler.PeerRegistrySchedulerOutput;
 import server.scheduler.SchedulerConfig;
@@ -44,6 +47,7 @@ public class TaskCoordinatorServer {
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
+            reconcileAbandonedJobs(db);
         } catch (Exception e) {
             LOGGER.warn("event=database_unavailable path={} error={}",
                     DatabaseManager.DB_PATH, e.getMessage(), e);
@@ -60,7 +64,11 @@ public class TaskCoordinatorServer {
 
         //Monitoring and Networking
         ExecutorService ioPool = Executors.newFixedThreadPool(IO_POOL_SIZE);
-        PeerLivenessMonitor monitor = new PeerLivenessMonitor(registry, HEARTBEAT_TIMEOUT_MILLIS);
+        PeerLivenessMonitor monitor = new PeerLivenessMonitor(
+                registry,
+                HEARTBEAT_TIMEOUT_MILLIS,
+                peer -> enqueuePeerUnavailable(inboundMailbox, peer, "heartbeat_timeout")
+        );
 
         //Status Printer (Modified to include new performance metrics)
         Thread statusPrinter = new Thread(() -> {
@@ -103,6 +111,30 @@ public class TaskCoordinatorServer {
 
     private static boolean isRabbitMqTransportSelected() {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
+    }
+
+    private static void reconcileAbandonedJobs(DatabaseManager db) {
+        int failedJobs = db.markRunningJobsFailedOnStartup(System.currentTimeMillis());
+        if (failedJobs > 0) {
+            LOGGER.warn("event=abandoned_jobs_marked_failed count={}", failedJobs);
+        } else if (failedJobs < 0) {
+            LOGGER.error("event=abandoned_job_reconciliation_failed");
+        }
+    }
+
+    private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,
+                                               PeerInfo peer,
+                                               String reason) {
+        if (peer == null) {
+            return;
+        }
+        boolean queued = inboundMailbox.offer(new MessageEnvelope(
+                new PeerDisconnectedMessage(peer.getNodeId(), Instant.now().toString(), reason),
+                peer.getNodeId()
+        ));
+        if (!queued) {
+            LOGGER.error("event=peer_unavailable_event_dropped peer_id={} reason={}", peer.getNodeId(), reason);
+        }
     }
 
     private static String buildStatusReport(PeerRegistry registry, TaskScheduler schedulerLogic) {

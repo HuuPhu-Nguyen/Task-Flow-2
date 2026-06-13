@@ -7,5 +7,6 @@ public class MessageType {
     public static final String TASK_ASSIGN = "TASK_ASSIGN";
     public static final String TASK_RESULT = "TASK_RESULT";
     public static final String JOB_RESULT = "JOB_RESULT";
+    public static final String PEER_DISCONNECTED = "PEER_DISCONNECTED";
 }
 

@@ -18,6 +18,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
 import protocol.MessageType;
+import protocol.PeerDisconnectedMessage;
 import protocol.PingMessage;
 import protocol.PongMessage;
 import protocol.TaskResultMessage;
@@ -148,6 +149,7 @@ public class PeerHandler implements Runnable {
 
     private void cleanup(String nodeId) {
         registry.remove(nodeId);
+        notifySchedulerPeerDisconnected(nodeId, "tcp_disconnect");
 
         try {
             socket.close();
@@ -155,6 +157,16 @@ public class PeerHandler implements Runnable {
         }
 
         LOGGER.info("event=peer_disconnected peer_id={}", nodeId);
+    }
+
+    private void notifySchedulerPeerDisconnected(String nodeId, String reason) {
+        boolean queued = mailbox.offer(new MessageEnvelope(
+                new PeerDisconnectedMessage(nodeId, Instant.now().toString(), reason),
+                nodeId
+        ));
+        if (!queued) {
+            LOGGER.error("event=peer_disconnect_event_dropped peer_id={} reason={}", nodeId, reason);
+        }
     }
 
     private MessageFactory createFactory(Gson gson) {

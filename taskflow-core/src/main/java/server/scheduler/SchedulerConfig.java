@@ -15,6 +15,7 @@ public record SchedulerConfig(
         long taskTimeoutMillis,
         int maxTasksPerPeer,
         int maxTaskRetries,
+        int jobResultMaxDeliveryAttempts,
         long metricsLogIntervalMillis,
         double peerScoreLoadWeight,
         double peerScoreLatencyWeight,
@@ -27,6 +28,7 @@ public record SchedulerConfig(
     public static final long DEFAULT_TASK_TIMEOUT_MILLIS = 60_000L;
     public static final int DEFAULT_MAX_TASKS_PER_PEER = 3;
     public static final int DEFAULT_MAX_TASK_RETRIES = 20;
+    public static final int DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = 300;
     public static final long DEFAULT_METRICS_LOG_INTERVAL_MILLIS = 10_000L;
     public static final double DEFAULT_PEER_SCORE_LOAD_WEIGHT = 6.0;
     public static final double DEFAULT_PEER_SCORE_LATENCY_WEIGHT = 2.0;
@@ -42,6 +44,7 @@ public record SchedulerConfig(
         requirePositive(taskTimeoutMillis, "taskTimeoutMillis");
         requirePositive(maxTasksPerPeer, "maxTasksPerPeer");
         requirePositive(maxTaskRetries, "maxTaskRetries");
+        requirePositive(jobResultMaxDeliveryAttempts, "jobResultMaxDeliveryAttempts");
         requirePositive(metricsLogIntervalMillis, "metricsLogIntervalMillis");
         requireNonNegative(peerScoreLoadWeight, "peerScoreLoadWeight");
         requireNonNegative(peerScoreLatencyWeight, "peerScoreLatencyWeight");
@@ -59,6 +62,7 @@ public record SchedulerConfig(
                 DEFAULT_TASK_TIMEOUT_MILLIS,
                 DEFAULT_MAX_TASKS_PER_PEER,
                 DEFAULT_MAX_TASK_RETRIES,
+                DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS,
                 DEFAULT_METRICS_LOG_INTERVAL_MILLIS,
                 DEFAULT_PEER_SCORE_LOAD_WEIGHT,
                 DEFAULT_PEER_SCORE_LATENCY_WEIGHT,
@@ -108,6 +112,8 @@ public record SchedulerConfig(
                 longValue(scheduler, env, "taskTimeoutMs", "TASKFLOW_TASK_TIMEOUT_MS", defaults.taskTimeoutMillis()),
                 intValue(scheduler, env, "maxTasksPerPeer", "TASKFLOW_MAX_TASKS_PER_PEER", defaults.maxTasksPerPeer()),
                 intValue(scheduler, env, "maxTaskRetries", "TASKFLOW_MAX_TASK_RETRIES", defaults.maxTaskRetries()),
+                intValue(scheduler, env, "jobResultMaxDeliveryAttempts", "TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS",
+                        defaults.jobResultMaxDeliveryAttempts()),
                 longValue(scheduler, env, "metricsLogIntervalMs", "TASKFLOW_METRICS_LOG_INTERVAL_MS",
                         defaults.metricsLogIntervalMillis()),
                 doubleValue(scoring, env, "loadWeight", "TASKFLOW_SCORE_LOAD_WEIGHT",

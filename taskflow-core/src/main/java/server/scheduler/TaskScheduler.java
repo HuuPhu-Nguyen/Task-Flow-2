@@ -13,6 +13,7 @@ import java.util.concurrent.*;
 
 public class TaskScheduler implements Runnable {
     private static final Logger LOGGER = LoggerFactory.getLogger(TaskScheduler.class);
+    private static final long RESULT_DELIVERY_RETRY_INTERVAL_MILLIS = 1_000L;
 
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final PeerRegistry registry;
@@ -20,6 +21,7 @@ public class TaskScheduler implements Runnable {
     private final SchedulerOutput output;
     private final SchedulerConfig config;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
+    private final Map<String, PendingJobCompletion> pendingJobCompletions = new LinkedHashMap<>();
     private final SchedulerMetrics metrics = new SchedulerMetrics();
     private long lastMetricsLogAtMillis = 0L;
 
@@ -59,6 +61,7 @@ public class TaskScheduler implements Runnable {
                 checkTimeouts();
                 // Dispatch pending work
                 dispatchPendingTasks();
+                retryPendingJobResults();
                 updateMetricsAndMaybeLog();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -175,16 +178,25 @@ public class TaskScheduler implements Runnable {
         }
     }
 
-    private void handleMessage(MessageEnvelope envelope) {
+    private void handleMessage(MessageEnvelope envelope) throws Exception {
         Message msg = envelope.message();
 
         if (msg instanceof JobSubmitMessage submit) {
             try {
+                if (submit.getJobId() == null || submit.getJobId().isBlank()) {
+                    throw new IllegalArgumentException("Job id is required.");
+                }
+                if (activeJobs.containsKey(submit.getJobId())) {
+                    sendJobStartFailure(envelope.fromNodeId(), submit,
+                            "Job id is already active: " + submit.getJobId());
+                    return;
+                }
                 EmbarrassinglyParallelJob<?,?> job = JobFactory.create(submit, envelope.fromNodeId());
                 job.initializeTasks(submit);
                 if (job.getTasks().isEmpty()) {
                     throw new IllegalArgumentException("Job must create at least one task.");
                 }
+                persistJobStartup(job);
                 activeJobs.put(job.getJobId(), job);
                 metrics.setActiveJobs(activeJobs.size());
                 logInfoEvent("job_started", fields(
@@ -193,13 +205,6 @@ public class TaskScheduler implements Runnable {
                         "requester_id", job.getRequesterNodeId(),
                         "task_count", job.getTasks().size()
                 ));
-
-                if (db != null) {
-                    db.insertJob(job.getJobId(), job.getTaskType(), job.getRequesterNodeId(), job.getTasks().size());
-                    for (String taskId : job.getTasks().keySet()) {
-                        db.insertTask(taskId, job.getJobId());
-                    }
-                }
             } catch (Exception e) {
                 logErrorEvent("job_start_failed", fields(
                         "job_id", submit.getJobId(),
@@ -212,6 +217,96 @@ public class TaskScheduler implements Runnable {
         }
         else if (msg instanceof TaskResultMessage result) {
             handleTaskResult(envelope, result);
+        }
+        else if (msg instanceof PeerDisconnectedMessage disconnected) {
+            String peerId = disconnected.getNodeId();
+            if (peerId == null || peerId.isBlank()) {
+                peerId = envelope.fromNodeId();
+            }
+            handlePeerUnavailable(peerId, disconnected.getReason());
+        }
+    }
+
+    private void handlePeerUnavailable(String peerId, String reason) {
+        if (peerId == null || peerId.isBlank()) {
+            return;
+        }
+
+        String normalizedReason = reason == null || reason.isBlank() ? "peer_unavailable" : reason;
+        Map<String, String> jobsToFail = new LinkedHashMap<>();
+        int retryScheduled = 0;
+        int terminalFailures = 0;
+
+        for (EmbarrassinglyParallelJob<?, ?> job : activeJobs.values()) {
+            for (TaskUnit<?> task : job.getTasks().values()) {
+                if (task.getStatus() != TaskUnit.TaskStatus.ASSIGNED) {
+                    continue;
+                }
+                if (!peerId.equals(task.getAssignedPeerId())) {
+                    continue;
+                }
+
+                TaskUnit.FailureOutcome outcome = task.failAttemptBy(peerId, config.maxTaskRetries());
+                if (outcome == TaskUnit.FailureOutcome.IGNORED) {
+                    continue;
+                }
+
+                if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
+                    retryScheduled++;
+                    metrics.recordRetry();
+                } else if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+                    terminalFailures++;
+                }
+
+                onAttemptFailure(peerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
+                persistTaskFailure(task, outcome);
+                logErrorEvent("task_peer_unavailable", fields(
+                        "job_id", job.getJobId(),
+                        "task_id", task.getTaskId(),
+                        "peer_id", peerId,
+                        "retry_count", task.getRetryCount(),
+                        "terminal_failure", outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
+                        "reason", normalizedReason
+                ));
+
+                if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+                    jobsToFail.putIfAbsent(job.getJobId(),
+                            "Task " + task.getTaskId() + " exceeded max retries after peer became unavailable.");
+                }
+            }
+        }
+
+        if (retryScheduled > 0 || terminalFailures > 0) {
+            logInfoEvent("peer_unavailable_tasks_released", fields(
+                    "peer_id", peerId,
+                    "retry_scheduled", retryScheduled,
+                    "terminal_failures", terminalFailures,
+                    "reason", normalizedReason
+            ));
+        }
+
+        for (Map.Entry<String, String> entry : jobsToFail.entrySet()) {
+            EmbarrassinglyParallelJob<?, ?> job = activeJobs.get(entry.getKey());
+            if (job != null) {
+                failJob(job, entry.getValue());
+            }
+        }
+    }
+
+    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job) {
+        if (db == null) {
+            return;
+        }
+        boolean persisted = db.insertJobWithTasks(
+                job.getJobId(),
+                job.getTaskType(),
+                job.getRequesterNodeId(),
+                job.getTasks().size(),
+                job.getTasks().keySet()
+        );
+        if (!persisted) {
+            recordPersistence("insertJobWithTasks", job.getJobId(), "", false);
+            throw new IllegalStateException("Job could not be persisted.");
         }
     }
 
@@ -263,7 +358,12 @@ public class TaskScheduler implements Runnable {
 
         onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
         if (db != null) {
-            db.markTaskCompleted(task.getTaskId(), System.currentTimeMillis(), Math.max(0L, completion.durationMs()));
+            recordPersistence(
+                    "markTaskCompleted",
+                    job.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskCompleted(task.getTaskId(), System.currentTimeMillis(), Math.max(0L, completion.durationMs()))
+            );
         }
         logInfoEvent("task_completed", fields(
                 "job_id", job.getJobId(),
@@ -332,7 +432,14 @@ public class TaskScheduler implements Runnable {
             ));
             return;
         }
-        if (db != null) db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt);
+        if (db != null) {
+            recordPersistence(
+                    "markTaskAssigned",
+                    job.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt)
+            );
+        }
         logInfoEvent("task_assigned", fields(
                 "job_id", job.getJobId(),
                 "task_id", task.getTaskId(),
@@ -378,9 +485,14 @@ public class TaskScheduler implements Runnable {
             return;
         }
         if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
-            db.markTaskFailed(task.getTaskId());
+            recordPersistence("markTaskFailed", task.getJobId(), task.getTaskId(), db.markTaskFailed(task.getTaskId()));
         } else if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
-            db.markTaskRetried(task.getTaskId(), task.getRetryCount());
+            recordPersistence(
+                    "markTaskRetried",
+                    task.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskRetried(task.getTaskId(), task.getRetryCount())
+            );
         }
     }
 
@@ -389,15 +501,6 @@ public class TaskScheduler implements Runnable {
     }
 
     private void completeJob(EmbarrassinglyParallelJob<?, ?> job, boolean success, String reason) {
-        if (!success && db != null) {
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
-                        && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
-                    db.markTaskFailed(task.getTaskId());
-                }
-            }
-        }
-
         List<Object> finalData = job.aggregateAndSendResult();
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
@@ -409,48 +512,128 @@ public class TaskScheduler implements Runnable {
                 success ? null : reason
         );
 
+        PendingJobCompletion completion = pendingJobCompletions.computeIfAbsent(
+                job.getJobId(),
+                ignored -> new PendingJobCompletion(job, response, success, reason)
+        );
+        tryDeliverJobResult(completion, true);
+    }
+
+    private void retryPendingJobResults() {
+        for (PendingJobCompletion completion : List.copyOf(pendingJobCompletions.values())) {
+            tryDeliverJobResult(completion, false);
+        }
+    }
+
+    private void tryDeliverJobResult(PendingJobCompletion completion, boolean force) {
+        long now = System.currentTimeMillis();
+        if (!force && now - completion.lastAttemptAtMillis < RESULT_DELIVERY_RETRY_INTERVAL_MILLIS) {
+            return;
+        }
+        completion.lastAttemptAtMillis = now;
+        completion.attempts++;
+
         try {
-            boolean sent = output.sendJobResult(job.getRequesterNodeId(), response);
+            boolean sent = output.sendJobResult(completion.job.getRequesterNodeId(), completion.response);
             if (!sent) {
-                logErrorEvent("job_requester_missing", fields(
-                        "job_id", job.getJobId(),
-                        "requester_id", job.getRequesterNodeId()
+                logErrorEvent("job_result_delivery_deferred", fields(
+                        "job_id", completion.job.getJobId(),
+                        "requester_id", completion.job.getRequesterNodeId(),
+                        "attempt", completion.attempts,
+                        "reason", "requester_missing"
                 ));
-            } else {
-                logInfoEvent("job_completed", fields(
-                        "job_id", job.getJobId(),
-                        "requester_id", job.getRequesterNodeId(),
-                        "success", success,
-                        "result_count", finalData.size()
-                ));
+                abandonIfResultDeliveryExhausted(completion, "requester_missing");
+                return;
             }
         } catch (Exception e) {
-            logErrorEvent("job_result_send_failed", fields(
-                    "job_id", job.getJobId(),
-                    "requester_id", job.getRequesterNodeId(),
+            logErrorEvent("job_result_delivery_deferred", fields(
+                    "job_id", completion.job.getJobId(),
+                    "requester_id", completion.job.getRequesterNodeId(),
+                    "attempt", completion.attempts,
                     "error", e.getMessage()
             ));
+            abandonIfResultDeliveryExhausted(completion, e.getMessage());
+            return;
         }
-        activeJobs.remove(job.getJobId());
-        metrics.setActiveJobs(activeJobs.size());
+
+        finalizeJobCompletion(completion);
+    }
+
+    private void abandonIfResultDeliveryExhausted(PendingJobCompletion completion, String reason) {
+        if (completion.attempts < config.jobResultMaxDeliveryAttempts()) {
+            return;
+        }
+
+        EmbarrassinglyParallelJob<?, ?> job = completion.job;
         if (db != null) {
-            if (success) {
-                db.markJobCompleted(job.getJobId());
-            } else {
-                db.markJobFailed(job.getJobId());
+            for (TaskUnit<?> task : job.getTasks().values()) {
+                if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
+                        && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
+                    recordPersistence(
+                            "markTaskFailed",
+                            job.getJobId(),
+                            task.getTaskId(),
+                            db.markTaskFailed(task.getTaskId())
+                    );
+                }
+            }
+            recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
+        }
+
+        activeJobs.remove(job.getJobId());
+        pendingJobCompletions.remove(job.getJobId());
+        metrics.setActiveJobs(activeJobs.size());
+
+        logErrorEvent("job_result_delivery_abandoned", fields(
+                "job_id", job.getJobId(),
+                "requester_id", job.getRequesterNodeId(),
+                "attempts", completion.attempts,
+                "success", completion.success,
+                "reason", reason == null || reason.isBlank() ? "delivery_failed" : reason
+        ));
+    }
+
+    private void finalizeJobCompletion(PendingJobCompletion completion) {
+        EmbarrassinglyParallelJob<?, ?> job = completion.job;
+        if (!completion.success && db != null) {
+            for (TaskUnit<?> task : job.getTasks().values()) {
+                if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
+                        && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
+                    recordPersistence("markTaskFailed", job.getJobId(), task.getTaskId(), db.markTaskFailed(task.getTaskId()));
+                }
             }
         }
 
-        if (!success && reason != null && !reason.isBlank()) {
+        activeJobs.remove(job.getJobId());
+        pendingJobCompletions.remove(job.getJobId());
+        metrics.setActiveJobs(activeJobs.size());
+        if (db != null) {
+            if (completion.success) {
+                recordPersistence("markJobCompleted", job.getJobId(), "", db.markJobCompleted(job.getJobId()));
+            } else {
+                recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
+            }
+        }
+
+        logInfoEvent("job_completed", fields(
+                "job_id", job.getJobId(),
+                "requester_id", job.getRequesterNodeId(),
+                "success", completion.success,
+                "result_count", completion.response.getResultsByTaskId() == null
+                        ? 0
+                        : completion.response.getResultsByTaskId().size()
+        ));
+
+        if (!completion.success && completion.reason != null && !completion.reason.isBlank()) {
             logErrorEvent("job_failed", fields(
                     "job_id", job.getJobId(),
                     "failed_tasks", job.getFailedCount(),
-                    "reason", reason
+                    "reason", completion.reason
             ));
         }
     }
 
-    private void sendJobStartFailure(String requesterNodeId, JobSubmitMessage submit, String reason) {
+    private void sendJobStartFailure(String requesterNodeId, JobSubmitMessage submit, String reason) throws Exception {
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
                 java.time.Instant.now().toString(),
@@ -473,6 +656,7 @@ public class TaskScheduler implements Runnable {
                     "requester_id", requesterNodeId,
                     "error", sendError.getMessage()
             ));
+            throw sendError;
         }
     }
 
@@ -519,6 +703,17 @@ public class TaskScheduler implements Runnable {
         LOGGER.error("event={}{}", event, formatFields(fields));
     }
 
+    private void recordPersistence(String operation, String jobId, String taskId, boolean success) {
+        if (success) {
+            return;
+        }
+        logErrorEvent("scheduler_persistence_failed", fields(
+                "operation", operation,
+                "job_id", jobId,
+                "task_id", taskId
+        ));
+    }
+
     private String formatFields(Map<String, Object> fields) {
         StringBuilder builder = new StringBuilder();
         for (Map.Entry<String, Object> entry : fields.entrySet()) {
@@ -528,5 +723,24 @@ public class TaskScheduler implements Runnable {
                     .append(String.valueOf(entry.getValue()));
         }
         return builder.toString();
+    }
+
+    private static final class PendingJobCompletion {
+        private final EmbarrassinglyParallelJob<?, ?> job;
+        private final JobResultMessage response;
+        private final boolean success;
+        private final String reason;
+        private long lastAttemptAtMillis;
+        private int attempts;
+
+        private PendingJobCompletion(EmbarrassinglyParallelJob<?, ?> job,
+                                     JobResultMessage response,
+                                     boolean success,
+                                     String reason) {
+            this.job = job;
+            this.response = response;
+            this.success = success;
+            this.reason = reason;
+        }
     }
 }
