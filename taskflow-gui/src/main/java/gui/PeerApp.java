@@ -704,27 +704,24 @@ public class PeerApp extends Application {
         });
         dispatcher.register(MessageType.JOB_RESULT, (message, writer) -> {
             JobResultMessage result = (JobResultMessage) message;
-
-            // 1. Check if this GUI instance actually started this job
-            if (myActiveJobIds.contains(result.getJobId())) {
-                myActiveJobIds.remove(result.getJobId()); // Cleanup
-
-                Platform.runLater(() -> {
-                    if (result.isSuccessful()) {
-                        showDownloadWindow(result);
-                    } else {
-                        showFailureWindow(result);
-                    }
-                });
+            GuiJobResultRouter.RoutedJobResult routed = GuiJobResultRouter.route(result, myActiveJobIds);
+            if (routed.action() == GuiJobResultRouter.Action.IGNORE) {
+                return;
             }
+
+            Platform.runLater(() -> {
+                if (routed.action() == GuiJobResultRouter.Action.SHOW_DOWNLOAD) {
+                    showDownloadWindow(routed.result());
+                } else {
+                    showFailureWindow(routed.result());
+                }
+            });
         });
         return dispatcher;
     }
 
     private void showFailureWindow(JobResultMessage result) {
-        String message = result.getErrorMessage() == null || result.getErrorMessage().isBlank()
-                ? "The job failed before producing downloadable results."
-                : result.getErrorMessage();
+        String message = GuiJobResultRouter.failureMessage(result);
         Alert alert = new Alert(Alert.AlertType.ERROR);
         alert.setTitle("Job Failed");
         alert.setHeaderText("Job " + result.getJobId() + " failed");

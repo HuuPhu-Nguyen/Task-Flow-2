@@ -1,9 +1,13 @@
 package peer;
 
+import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import peer.engine.PeerExecutionEngine;
+import protocol.PingMessage;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
@@ -14,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -64,6 +69,51 @@ class PeerNodeTest {
         }
 
         assertNull(serverFailure.get());
+        assertTrue(engine.isShutdown());
+        assertTrue(engine.awaitTermination(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void tcpRuntimeShutsDownEngineWhenConnectionCannotBeOpened() throws Exception {
+        int closedPort;
+        try (ServerSocket reserved = new ServerSocket(0)) {
+            closedPort = reserved.getLocalPort();
+        }
+
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
+
+        PeerNode.runTcpPeer("localhost", closedPort, engine);
+
+        assertTrue(engine.isShutdown());
+        assertTrue(engine.awaitTermination(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void tcpRuntimeKeepsReadingAfterMalformedMessageUntilDisconnect() throws Exception {
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
+        Thread peerThread;
+        String response;
+
+        try (ServerSocket server = new ServerSocket(0)) {
+            peerThread = new Thread(
+                    () -> PeerNode.runTcpPeer("localhost", server.getLocalPort(), engine),
+                    "peer-node-malformed-message-test");
+            peerThread.start();
+
+            try (Socket socket = server.accept();
+                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                socket.setSoTimeout(2_000);
+                out.println("{\"type\":\"UNKNOWN\"}");
+                out.println(new Gson().toJson(new PingMessage("coordinator", "2026-06-13T00:00:00Z")));
+                response = in.readLine();
+            }
+        }
+
+        peerThread.join(2_000);
+        assertFalse(peerThread.isAlive());
+        assertNotNull(response);
+        assertTrue(response.contains("\"type\":\"PONG\""));
         assertTrue(engine.isShutdown());
         assertTrue(engine.awaitTermination(2, TimeUnit.SECONDS));
     }
