@@ -9,6 +9,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -19,6 +21,10 @@ final class InputStaging {
     }
 
     static List<StagedInput> stageFiles(List<Path> sourcePaths, Path stagingRoot) throws IOException {
+        return stageFiles(sourcePaths, stagingRoot, () -> false);
+    }
+
+    static List<StagedInput> stageFiles(List<Path> sourcePaths, Path stagingRoot, BooleanSupplier cancelled) throws IOException {
         if (sourcePaths == null || sourcePaths.isEmpty()) {
             return List.of();
         }
@@ -28,18 +34,25 @@ final class InputStaging {
 
         int nextSlot = nextSlot(root);
         List<StagedInput> stagedInputs = new ArrayList<>();
-        for (Path sourcePath : sourcePaths) {
-            Path source = sourcePath.toAbsolutePath().normalize();
-            if (!Files.isRegularFile(source)) {
-                throw new IOException("Input file does not exist: " + source);
-            }
+        try {
+            for (Path sourcePath : sourcePaths) {
+                throwIfCancelled(cancelled);
+                Path source = sourcePath.toAbsolutePath().normalize();
+                if (!Files.isRegularFile(source)) {
+                    throw new IOException("Input file does not exist: " + source);
+                }
 
-            String displayName = displayName(source);
-            Path slotDir = root.resolve(String.format(Locale.ROOT, "%06d", nextSlot++));
-            Files.createDirectories(slotDir);
-            Path stagedPath = slotDir.resolve(displayName);
-            Files.copy(source, stagedPath, StandardCopyOption.REPLACE_EXISTING);
-            stagedInputs.add(new StagedInput(source, stagedPath, displayName));
+                String displayName = displayName(source);
+                Path slotDir = root.resolve(String.format(Locale.ROOT, "%06d", nextSlot++));
+                Files.createDirectories(slotDir);
+                Path stagedPath = slotDir.resolve(displayName);
+                Files.copy(source, stagedPath, StandardCopyOption.REPLACE_EXISTING);
+                stagedInputs.add(new StagedInput(source, stagedPath, displayName));
+                throwIfCancelled(cancelled);
+            }
+        } catch (CancellationException e) {
+            cleanupStagedInputs(stagedInputs);
+            throw e;
         }
         return stagedInputs;
     }
@@ -97,6 +110,23 @@ final class InputStaging {
             Files.deleteIfExists(path);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void throwIfCancelled(BooleanSupplier cancelled) {
+        if (cancelled != null && cancelled.getAsBoolean()) {
+            throw new CancellationException("Input staging cancelled.");
+        }
+    }
+
+    private static void cleanupStagedInputs(List<StagedInput> stagedInputs) {
+        for (int i = stagedInputs.size() - 1; i >= 0; i--) {
+            Path stagedPath = stagedInputs.get(i).stagedPath();
+            deletePath(stagedPath);
+            Path slotDir = stagedPath.getParent();
+            if (slotDir != null) {
+                deletePath(slotDir);
+            }
         }
     }
 

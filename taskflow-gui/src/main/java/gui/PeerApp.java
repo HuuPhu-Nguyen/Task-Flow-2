@@ -7,6 +7,7 @@ import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleIntegerProperty;
 import javafx.beans.property.SimpleStringProperty;
+import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
 import javafx.scene.Node;
@@ -37,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
@@ -48,6 +50,7 @@ public class PeerApp extends Application {
     // Shared output stream for thread-safe communication
     private PeerNode backendNode;
     private volatile NetworkConnection networkConnection;
+    private volatile Task<?> activeBackgroundTask;
     private volatile boolean stopping;
 
     private String currentInPath;
@@ -163,7 +166,18 @@ public class PeerApp extends Application {
 
         Button uploadBtn = new Button("Upload Files");
         Button startBtn = new Button("Start Job");
-        topBar.getChildren().addAll(new Label("Job Type:"), jobTypeBox, new Label("Target:"), formatBox, uploadBtn, startBtn);
+        ProgressIndicator busyIndicator = new ProgressIndicator();
+        busyIndicator.setMaxSize(18, 18);
+        busyIndicator.setVisible(false);
+        Label statusLabel = new Label();
+        Button cancelBtn = new Button("Cancel");
+        cancelBtn.setVisible(false);
+        cancelBtn.setDisable(true);
+        topBar.getChildren().addAll(
+                new Label("Job Type:"), jobTypeBox,
+                new Label("Target:"), formatBox,
+                uploadBtn, startBtn, busyIndicator, statusLabel, cancelBtn);
+        List<Node> busyControls = List.of(jobTypeBox, formatBox, uploadBtn, startBtn);
 
         jobTypeBox.setOnAction(e -> {
             refreshParameterOptions(jobTypeBox.getValue(), formatBox);
@@ -204,25 +218,23 @@ public class PeerApp extends Application {
                 }
 
                 String targetFormat = plugin.normalizeParameter(selectedFormat);
-                List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
-                String jobId;
-                try {
-                    jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, out);
-                } catch (IllegalStateException sendFailure) {
-                    clearNetworkState(connection, true);
-                    throw sendFailure;
-                }
-
-                if (jobId != null) {
-                    myActiveJobIds.add(jobId);
-                    LOGGER.info("event=gui_job_submitted job_id={} task_type={}", jobId, plugin.taskType());
-
-                    gallery.getChildren().clear();
-                    clearStagedInputs();
-
-                    new Alert(Alert.AlertType.CONFIRMATION,
-                            plugin.displayName() + " started. The gallery will be cleared.").show();
-                }
+                Task<SubmittedJob> submitTask = createSubmitJobTask(connection, out, plugin, inputPaths, targetFormat);
+                runGuiBackgroundTask(
+                        "Submit job",
+                        submitTask,
+                        busyControls,
+                        busyIndicator,
+                        statusLabel,
+                        cancelBtn,
+                        submittedJob -> {
+                            if (submittedJob == null || submittedJob.jobId() == null) {
+                                return;
+                            }
+                            gallery.getChildren().clear();
+                            clearStagedInputs();
+                            new Alert(Alert.AlertType.CONFIRMATION,
+                                    submittedJob.plugin().displayName() + " started. The gallery will be cleared.").show();
+                        });
             } catch (Exception ex) {
                 LOGGER.error("event=gui_job_submit_failed error={}", ex.getMessage(), ex);
                 new Alert(Alert.AlertType.ERROR, "Error: " + ex.getMessage()).show();
@@ -257,22 +269,142 @@ public class PeerApp extends Application {
                     List<Path> sources = selectedFiles.stream()
                             .map(File::toPath)
                             .toList();
-                    for (InputStaging.StagedInput stagedInput : InputStaging.stageFiles(sources, Paths.get(currentInPath))) {
-                        VBox fileCard = new VBox(5);
-                        fileCard.setStyle("-fx-border-color: #ccc; -fx-padding: 5; -fx-background-color: #eee;");
-                        Label fileName = new Label(stagedInput.displayName());
-                        fileName.setTooltip(new Tooltip(stagedInput.sourcePath().toString()));
-                        fileCard.getChildren().add(fileName);
-                        gallery.getChildren().add(fileCard);
-                    }
-                } catch (IOException ex) {
-                    LOGGER.warn("event=gui_upload_copy_failed error={}", ex.getMessage(), ex);
+                    Task<List<InputStaging.StagedInput>> stageTask = createStageInputsTask(sources);
+                    runGuiBackgroundTask(
+                            "Stage inputs",
+                            stageTask,
+                            busyControls,
+                            busyIndicator,
+                            statusLabel,
+                            cancelBtn,
+                            stagedInputs -> stagedInputs.forEach(this::addStagedInputCard));
+                } catch (Exception ex) {
+                    LOGGER.warn("event=gui_upload_stage_start_failed error={}", ex.getMessage(), ex);
                     new Alert(Alert.AlertType.ERROR, "Could not stage selected files: " + ex.getMessage()).show();
                 }
             }
         });
 
         return root;
+    }
+
+    private Task<List<InputStaging.StagedInput>> createStageInputsTask(List<Path> sources) {
+        return new Task<>() {
+            @Override
+            protected List<InputStaging.StagedInput> call() throws Exception {
+                updateMessage("Staging " + sources.size() + " file(s)...");
+                return InputStaging.stageFiles(sources, Paths.get(currentInPath), this::isCancelled);
+            }
+        };
+    }
+
+    private Task<SubmittedJob> createSubmitJobTask(
+            NetworkConnection connection,
+            PrintWriter out,
+            ClientJobPlugin plugin,
+            List<Path> inputPaths,
+            String targetFormat) {
+        return new Task<>() {
+            @Override
+            protected SubmittedJob call() throws Exception {
+                updateMessage("Preparing " + inputPaths.size() + " input(s)...");
+                List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
+                if (isCancelled()) {
+                    return null;
+                }
+                if (networkConnection != connection) {
+                    throw new IllegalStateException("Connection to coordinator changed before submission.");
+                }
+
+                updateMessage("Submitting job...");
+                String jobId;
+                try {
+                    jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, out);
+                } catch (IllegalStateException sendFailure) {
+                    clearNetworkState(connection, true);
+                    throw sendFailure;
+                }
+
+                if (jobId != null) {
+                    myActiveJobIds.add(jobId);
+                    LOGGER.info("event=gui_job_submitted job_id={} task_type={}", jobId, plugin.taskType());
+                }
+                return new SubmittedJob(jobId, plugin);
+            }
+        };
+    }
+
+    private <T> void runGuiBackgroundTask(
+            String taskName,
+            Task<T> task,
+            List<? extends Node> disabledNodes,
+            ProgressIndicator busyIndicator,
+            Label statusLabel,
+            Button cancelBtn,
+            Consumer<T> onSucceeded) {
+        activeBackgroundTask = task;
+        setControlsDisabled(disabledNodes, true);
+        busyIndicator.progressProperty().bind(task.progressProperty());
+        busyIndicator.setVisible(true);
+        statusLabel.textProperty().bind(task.messageProperty());
+        cancelBtn.setVisible(true);
+        cancelBtn.setDisable(false);
+        cancelBtn.setOnAction(event -> task.cancel(true));
+
+        task.setOnSucceeded(event -> {
+            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
+            statusLabel.setText(taskName + " complete.");
+            onSucceeded.accept(task.getValue());
+        });
+        task.setOnFailed(event -> {
+            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
+            Throwable error = task.getException();
+            String message = error == null || error.getMessage() == null
+                    ? "Unknown error"
+                    : error.getMessage();
+            statusLabel.setText(taskName + " failed.");
+            LOGGER.error("event=gui_background_task_failed task={} error={}", taskName, message, error);
+            new Alert(Alert.AlertType.ERROR, taskName + " failed: " + message).show();
+        });
+        task.setOnCancelled(event -> {
+            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
+            statusLabel.setText(taskName + " cancelled.");
+        });
+
+        Thread worker = new Thread(task, "gui-" + taskName.toLowerCase(Locale.ROOT).replace(' ', '-'));
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void finishGuiBackgroundTask(
+            Task<?> task,
+            List<? extends Node> disabledNodes,
+            ProgressIndicator busyIndicator,
+            Label statusLabel,
+            Button cancelBtn) {
+        if (activeBackgroundTask == task) {
+            activeBackgroundTask = null;
+        }
+        setControlsDisabled(disabledNodes, false);
+        busyIndicator.progressProperty().unbind();
+        busyIndicator.setVisible(false);
+        statusLabel.textProperty().unbind();
+        cancelBtn.setOnAction(null);
+        cancelBtn.setDisable(true);
+        cancelBtn.setVisible(false);
+    }
+
+    private void setControlsDisabled(List<? extends Node> nodes, boolean disabled) {
+        nodes.forEach(node -> node.setDisable(disabled));
+    }
+
+    private void addStagedInputCard(InputStaging.StagedInput stagedInput) {
+        VBox fileCard = new VBox(5);
+        fileCard.setStyle("-fx-border-color: #ccc; -fx-padding: 5; -fx-background-color: #eee;");
+        Label fileName = new Label(stagedInput.displayName());
+        fileName.setTooltip(new Tooltip(stagedInput.sourcePath().toString()));
+        fileCard.getChildren().add(fileName);
+        gallery.getChildren().add(fileCard);
     }
 
     private void configurePluginComboBox(ComboBox<ClientJobPlugin> jobTypeBox) {
@@ -556,6 +688,9 @@ public class PeerApp extends Application {
     private record NetworkConnection(Socket socket, PrintWriter writer, Thread thread) {
     }
 
+    private record SubmittedJob(String jobId, ClientJobPlugin plugin) {
+    }
+
     private MessageFactory createFactory() {
         MessageFactory factory = new MessageFactory();
         factory.register(MessageType.PING, json -> gson.fromJson(json, PingMessage.class));
@@ -660,6 +795,10 @@ public class PeerApp extends Application {
     @Override
     public void stop() throws Exception {
         stopping = true;
+        Task<?> backgroundTask = activeBackgroundTask;
+        if (backgroundTask != null) {
+            backgroundTask.cancel(true);
+        }
         NetworkConnection connection = networkConnection;
         if (connection != null) {
             clearNetworkState(connection, true);

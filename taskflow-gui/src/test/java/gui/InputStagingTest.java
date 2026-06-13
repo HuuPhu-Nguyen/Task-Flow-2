@@ -7,10 +7,14 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InputStagingTest {
     @TempDir
@@ -63,5 +67,24 @@ class InputStagingTest {
                 stagingRoot.resolve("000001").resolve("first.txt").toAbsolutePath().normalize(),
                 stagingRoot.resolve("000002").resolve("second.txt").toAbsolutePath().normalize()
         ), InputStaging.stagedInputFiles(stagingRoot));
+    }
+
+    @Test
+    void cancelledStagingRemovesAlreadyCopiedInputs() throws Exception {
+        Path firstSource = tempDir.resolve("first.txt");
+        Path secondSource = tempDir.resolve("second.txt");
+        Files.writeString(firstSource, "first", StandardCharsets.UTF_8);
+        Files.writeString(secondSource, "second", StandardCharsets.UTF_8);
+
+        Path stagingRoot = tempDir.resolve("staging");
+        AtomicInteger cancellationChecks = new AtomicInteger();
+
+        assertThrows(CancellationException.class, () -> InputStaging.stageFiles(
+                List.of(firstSource, secondSource),
+                stagingRoot,
+                () -> cancellationChecks.incrementAndGet() > 2
+        ));
+
+        assertTrue(InputStaging.stagedInputFiles(stagingRoot).isEmpty());
     }
 }
