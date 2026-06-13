@@ -36,6 +36,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
@@ -46,7 +47,8 @@ public class PeerApp extends Application {
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     // Shared output stream for thread-safe communication
     private PeerNode backendNode;
-    private PrintWriter socketOut;
+    private volatile NetworkConnection networkConnection;
+    private volatile boolean stopping;
 
     private String currentInPath;
     private String currentOutPath;
@@ -181,7 +183,9 @@ public class PeerApp extends Application {
 
         startBtn.setOnAction(e -> {
             try {
-                if (socketOut == null) {
+                NetworkConnection connection = networkConnection;
+                PrintWriter out = connection == null ? null : connection.writer();
+                if (out == null) {
                     new Alert(Alert.AlertType.ERROR, "Not connected to the coordinator yet.").show();
                     return;
                 }
@@ -201,7 +205,13 @@ public class PeerApp extends Application {
 
                 String targetFormat = plugin.normalizeParameter(selectedFormat);
                 List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
-                String jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, socketOut);
+                String jobId;
+                try {
+                    jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, out);
+                } catch (IllegalStateException sendFailure) {
+                    clearNetworkState(connection, true);
+                    throw sendFailure;
+                }
 
                 if (jobId != null) {
                     myActiveJobIds.add(jobId);
@@ -449,30 +459,38 @@ public class PeerApp extends Application {
     }
 
     /**
-     * Synchronized method to ensure JSON messages don't interleave on the socket.
+     * Sends on the current coordinator socket and clears stale state when the writer fails.
      */
     private boolean sendSafe(Object message) {
-        if (socketOut == null) {
+        NetworkConnection connection = networkConnection;
+        if (connection == null) {
             return false;
         }
-        boolean sent = SafeJsonWriter.send(socketOut, gson, message);
+        PrintWriter writer = connection.writer();
+        boolean sent = SafeJsonWriter.send(writer, gson, message);
         if (!sent) {
             String messageClass = message == null ? "null" : message.getClass().getSimpleName();
             LOGGER.warn("event=gui_message_send_failed message_class={}", messageClass);
-            socketOut = null;
+            clearNetworkState(connection, true);
         }
         return sent;
     }
 
     private void startNetworkThread(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
         backendNode = new PeerNode();
+        stopping = false;
+        AtomicBoolean connected = new AtomicBoolean(false);
         Thread netThread = new Thread(() -> {
-            try (Socket socket = new Socket(host, port)) {
-                socketOut = new PrintWriter(socket.getOutputStream(), true);
-                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+            NetworkConnection connection = null;
+            try (Socket socket = new Socket(host, port);
+                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+                connection = new NetworkConnection(socket, writer, Thread.currentThread());
+                networkConnection = connection;
 
                 MessageFactory factory = createFactory();
-                MessageDispatcher dispatcher = createDispatcher(engine, socketOut);
+                MessageDispatcher dispatcher = createDispatcher(engine, writer);
+                connected.set(true);
                 onConnected.run();
 
                 String line;
@@ -480,20 +498,62 @@ public class PeerApp extends Application {
                     try {
                         if (line.trim().isEmpty()) continue;
                         Message msg = factory.fromJson(line);
-                        dispatcher.dispatch(msg, socketOut);
+                        dispatcher.dispatch(msg, writer);
                     } catch (Exception messageError) {
                         LOGGER.warn("event=gui_message_processing_failed error={}",
                                 messageError.getMessage(), messageError);
                     }
                 }
+                handleCoordinatorDisconnect("Coordinator connection closed.", null, connection);
             } catch (IOException e) {
-                socketOut = null;
-                onFailed.accept(e.getMessage());
-                Platform.runLater(() -> LOGGER.warn("event=gui_connection_lost error={}", e.getMessage(), e));
+                if (connected.get()) {
+                    handleCoordinatorDisconnect("Connection to coordinator was lost: " + e.getMessage(), e, connection);
+                } else {
+                    clearNetworkState(connection, false);
+                    onFailed.accept(e.getMessage());
+                }
+            } finally {
+                clearNetworkState(connection, false);
             }
         });
         netThread.setDaemon(true);
         netThread.start();
+    }
+
+    private void handleCoordinatorDisconnect(String userMessage, IOException error, NetworkConnection connection) {
+        clearNetworkState(connection, false);
+        if (stopping) {
+            return;
+        }
+        if (error == null) {
+            LOGGER.warn("event=gui_connection_closed");
+        } else {
+            LOGGER.warn("event=gui_connection_lost error={}", error.getMessage(), error);
+        }
+        Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, userMessage).show());
+    }
+
+    private void clearNetworkState(NetworkConnection connection, boolean closeSocket) {
+        if (connection == null) {
+            return;
+        }
+        if (networkConnection == connection) {
+            networkConnection = null;
+        }
+        connection.writer().close();
+        if (closeSocket) {
+            closeSocket(connection.socket());
+        }
+    }
+
+    private void closeSocket(Socket socket) {
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private record NetworkConnection(Socket socket, PrintWriter writer, Thread thread) {
     }
 
     private MessageFactory createFactory() {
@@ -599,7 +659,21 @@ public class PeerApp extends Application {
 
     @Override
     public void stop() throws Exception {
-        if (historyDb != null) historyDb.close();
+        stopping = true;
+        NetworkConnection connection = networkConnection;
+        if (connection != null) {
+            clearNetworkState(connection, true);
+            connection.thread().interrupt();
+        }
+        if (engine != null) {
+            engine.shutdown();
+            if (!engine.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                LOGGER.warn("event=gui_engine_shutdown_timeout peer_id={}", sessionId);
+            }
+        }
+        if (historyDb != null) {
+            historyDb.close();
+        }
         super.stop();
     }
 

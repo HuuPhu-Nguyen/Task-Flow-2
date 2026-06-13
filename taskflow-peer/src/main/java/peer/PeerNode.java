@@ -7,6 +7,7 @@ import java.io.PrintWriter;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -40,21 +41,24 @@ public class PeerNode {
         }
         String host = args[0];
         int port = Integer.parseInt(args[1]);
+
+        PeerExecutionEngine engine = new PeerExecutionEngine("PEER");
+        runTcpPeer(host, port, engine);
+    }
+
+    static void runTcpPeer(String host, int port, PeerExecutionEngine engine) {
+        Objects.requireNonNull(engine, "engine");
         Gson gson = new Gson();
 
-        //Initialize the Execution Engine
-        PeerExecutionEngine engine = new PeerExecutionEngine("PEER");
         LOGGER.info("event=peer_processors_registered task_types={}", engine.getRegisteredTaskTypes());
 
         MessageFactory factory = createFactory(gson);
 
         LOGGER.info("event=peer_connecting host={} port={}", host, port);
 
-        try (Socket socket = new Socket(host, port)) {
-            PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-
-            //Create dispatcher with the engine and the shared output stream
+        try (Socket socket = new Socket(host, port);
+             PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
+             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
             MessageDispatcher dispatcher = createDispatcher(engine, out);
 
             LOGGER.info("event=peer_connected local_address={}", socket.getLocalSocketAddress());
@@ -64,12 +68,8 @@ public class PeerNode {
                 try {
                     if (incomingJson.trim().isEmpty()) continue;
 
-                    // Convert raw JSON to protocol Message
                     Message msg = factory.fromJson(incomingJson);
-
-                    // Dispatch to either the PingHandler or the Execution Engine
                     dispatcher.dispatch(msg, out);
-
                 } catch (Exception e) {
                     LOGGER.warn("event=peer_message_processing_failed error={}", e.getMessage(), e);
                 }
@@ -78,6 +78,15 @@ public class PeerNode {
 
         } catch (IOException e) {
             LOGGER.warn("event=server_connection_lost error={}", e.getMessage(), e);
+        } finally {
+            engine.shutdown();
+            try {
+                if (!engine.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                    LOGGER.warn("event=peer_engine_shutdown_timeout");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

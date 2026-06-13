@@ -47,6 +47,16 @@ class PeerExecutionEngineTest {
         }
     }
 
+    @Test
+    void shutdownTerminatesExecutionPool() throws Exception {
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
+
+        engine.shutdown();
+
+        assertTrue(engine.isShutdown());
+        assertTrue(engine.awaitTermination(2, TimeUnit.SECONDS));
+    }
+
     private static TaskAssignMessage testTask() {
         return new TaskAssignMessage(
                 "coordinator",

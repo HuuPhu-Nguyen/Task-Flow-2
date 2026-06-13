@@ -13,7 +13,7 @@ import java.util.Set;
 import java.util.ServiceLoader;
 import java.util.concurrent.*;
 
-public class PeerExecutionEngine {
+public class PeerExecutionEngine implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerExecutionEngine.class);
 
     private final ExecutorService executionPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
@@ -42,6 +42,19 @@ public class PeerExecutionEngine {
 
     public void shutdown() {
         executionPool.shutdownNow();
+    }
+
+    public boolean awaitTermination(long timeout, TimeUnit unit) throws InterruptedException {
+        return executionPool.awaitTermination(timeout, unit);
+    }
+
+    public boolean isShutdown() {
+        return executionPool.isShutdown();
+    }
+
+    @Override
+    public void close() {
+        shutdown();
     }
 
     public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
