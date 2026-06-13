@@ -1,0 +1,141 @@
+package gui;
+
+import client.ClientJobPlugin;
+import org.junit.jupiter.api.Test;
+import peer.PeerNode;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.io.Writer;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class GuiJobSubmitterTest {
+    private final ClientJobPlugin plugin = new FakeClientJobPlugin();
+
+    @Test
+    void successfulSubmitTracksActiveJobImmediately() {
+        Set<String> activeJobs = ConcurrentHashMap.newKeySet();
+        StringWriter writer = new StringWriter();
+        PrintWriter out = new PrintWriter(writer, true);
+
+        GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
+                new PeerNode(),
+                plugin,
+                List.of("payload"),
+                "summary",
+                out,
+                () -> true,
+                () -> {
+                    throw new AssertionError("send failure callback should not run");
+                },
+                activeJobs);
+
+        assertNotNull(submittedJob.jobId());
+        assertSame(plugin, submittedJob.plugin());
+        assertTrue(activeJobs.contains(submittedJob.jobId()));
+        assertTrue(writer.toString().contains("TEXT_ANALYSIS"));
+    }
+
+    @Test
+    void changedConnectionPreventsSubmitWithoutTrackingJob() {
+        Set<String> activeJobs = ConcurrentHashMap.newKeySet();
+        StringWriter writer = new StringWriter();
+        AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
+
+        assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
+                new PeerNode(),
+                plugin,
+                List.of("payload"),
+                "summary",
+                new PrintWriter(writer, true),
+                () -> false,
+                () -> sendFailureCallback.set(true),
+                activeJobs));
+
+        assertTrue(writer.toString().isEmpty());
+        assertTrue(activeJobs.isEmpty());
+        assertFalse(sendFailureCallback.get());
+    }
+
+    @Test
+    void sendFailureRunsCleanupCallbackWithoutTrackingJob() {
+        Set<String> activeJobs = ConcurrentHashMap.newKeySet();
+        AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
+
+        assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
+                new PeerNode(),
+                plugin,
+                List.of("payload"),
+                "summary",
+                new PrintWriter(new FailingWriter(), true),
+                () -> true,
+                () -> sendFailureCallback.set(true),
+                activeJobs));
+
+        assertTrue(activeJobs.isEmpty());
+        assertTrue(sendFailureCallback.get());
+    }
+
+    private static final class FakeClientJobPlugin implements ClientJobPlugin {
+        @Override
+        public String taskType() {
+            return "TEXT_ANALYSIS";
+        }
+
+        @Override
+        public String displayName() {
+            return "Text Analysis";
+        }
+
+        @Override
+        public List<String> supportedInputExtensions() {
+            return List.of("txt");
+        }
+
+        @Override
+        public List<String> parameterOptions() {
+            return List.of("summary");
+        }
+
+        @Override
+        public String defaultParameter() {
+            return "summary";
+        }
+
+        @Override
+        public List<Object> buildPayloads(List<Path> inputPaths, String parameter) {
+            return List.copyOf(inputPaths);
+        }
+
+        @Override
+        public void saveResults(List<Object> results, Path outputDir) {
+        }
+    }
+
+    private static final class FailingWriter extends Writer {
+        @Override
+        public void write(char[] cbuf, int off, int len) throws IOException {
+            throw new IOException("closed");
+        }
+
+        @Override
+        public void flush() throws IOException {
+            throw new IOException("closed");
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+}

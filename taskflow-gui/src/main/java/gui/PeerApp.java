@@ -218,7 +218,8 @@ public class PeerApp extends Application {
                 }
 
                 String targetFormat = plugin.normalizeParameter(selectedFormat);
-                Task<SubmittedJob> submitTask = createSubmitJobTask(connection, out, plugin, inputPaths, targetFormat);
+                Task<GuiJobSubmitter.SubmittedJob> submitTask =
+                        createSubmitJobTask(connection, out, plugin, inputPaths, targetFormat);
                 runGuiBackgroundTask(
                         "Submit job",
                         submitTask,
@@ -298,7 +299,7 @@ public class PeerApp extends Application {
         };
     }
 
-    private Task<SubmittedJob> createSubmitJobTask(
+    private Task<GuiJobSubmitter.SubmittedJob> createSubmitJobTask(
             NetworkConnection connection,
             PrintWriter out,
             ClientJobPlugin plugin,
@@ -306,30 +307,28 @@ public class PeerApp extends Application {
             String targetFormat) {
         return new Task<>() {
             @Override
-            protected SubmittedJob call() throws Exception {
+            protected GuiJobSubmitter.SubmittedJob call() throws Exception {
                 updateMessage("Preparing " + inputPaths.size() + " input(s)...");
                 List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
                 if (isCancelled()) {
                     return null;
                 }
-                if (networkConnection != connection) {
-                    throw new IllegalStateException("Connection to coordinator changed before submission.");
-                }
 
                 updateMessage("Submitting job...");
-                String jobId;
-                try {
-                    jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, out);
-                } catch (IllegalStateException sendFailure) {
-                    clearNetworkState(connection, true);
-                    throw sendFailure;
+                GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
+                        backendNode,
+                        plugin,
+                        payloads,
+                        targetFormat,
+                        out,
+                        () -> networkConnection == connection,
+                        () -> clearNetworkState(connection, true),
+                        myActiveJobIds);
+                if (submittedJob.jobId() != null) {
+                    LOGGER.info("event=gui_job_submitted job_id={} task_type={}",
+                            submittedJob.jobId(), plugin.taskType());
                 }
-
-                if (jobId != null) {
-                    myActiveJobIds.add(jobId);
-                    LOGGER.info("event=gui_job_submitted job_id={} task_type={}", jobId, plugin.taskType());
-                }
-                return new SubmittedJob(jobId, plugin);
+                return submittedJob;
             }
         };
     }
@@ -686,9 +685,6 @@ public class PeerApp extends Application {
     }
 
     private record NetworkConnection(Socket socket, PrintWriter writer, Thread thread) {
-    }
-
-    private record SubmittedJob(String jobId, ClientJobPlugin plugin) {
     }
 
     private MessageFactory createFactory() {
