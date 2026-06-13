@@ -81,7 +81,7 @@ Framework core no longer imports concrete image, video, or text job classes. New
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. Broker deliveries are acknowledged only after scheduler handling succeeds; transient failure-result send errors cause the delivery to be requeued.
+Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. The SQLite schema is versioned, validates the runtime-supported schema version at startup, and enforces `tasks.job_id` references to existing `jobs.job_id` rows. Broker deliveries are acknowledged only after scheduler handling succeeds; transient failure-result send errors cause the delivery to be requeued.
 
 The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
@@ -513,7 +513,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
-- SQLite is the current `JobStateStore` implementation. Initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, and abandoned `RUNNING` jobs are marked failed on coordinator startup. PostgreSQL/Flyway and transactional restart resume are still planned for durable production-style state management.
+- SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, and abandoned `RUNNING` jobs are marked failed on coordinator startup. PostgreSQL/Flyway and transactional restart resume are still planned for durable production-style state management.
 
 ---
 

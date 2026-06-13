@@ -42,6 +42,14 @@ Invalid/stale transitions are ignored (for example duplicate success from a peer
 - Final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
 - If final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
 
+## Persistence
+
+- SQLite is the current `JobStateStore` implementation.
+- The SQLite schema is versioned and startup rejects schema versions newer than this runtime supports.
+- SQLite foreign-key checks are enabled per connection, and `tasks.job_id` must reference an existing `jobs.job_id`.
+- Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
+- Coordinator startup marks stale `RUNNING` jobs and non-terminal tasks failed; it does not yet resume in-flight attempts from persisted leases.
+
 ## Heartbeat and Peer Liveness
 
 - Coordinator sends periodic `PING` and expects `PONG`.

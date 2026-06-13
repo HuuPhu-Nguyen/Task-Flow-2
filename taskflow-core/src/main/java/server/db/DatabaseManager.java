@@ -14,6 +14,7 @@ public class DatabaseManager implements JobStateStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
+    public static final int CURRENT_SCHEMA_VERSION = 1;
 
     private final Connection conn;
 
@@ -23,13 +24,75 @@ public class DatabaseManager implements JobStateStore {
 
     public DatabaseManager(String dbPath) throws SQLException {
         conn = DriverManager.getConnection("jdbc:sqlite:" + Objects.requireNonNull(dbPath, "dbPath"));
-        try (Statement stmt = conn.createStatement()) {
-            stmt.execute("PRAGMA journal_mode=WAL");
+        try {
+            configureConnection();
+            initSchema();
+        } catch (SQLException e) {
+            try {
+                conn.close();
+            } catch (SQLException closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
         }
-        initSchema();
+    }
+
+    private void configureConnection() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("PRAGMA foreign_keys=ON");
+            stmt.execute("PRAGMA journal_mode=WAL");
+            try (ResultSet rs = stmt.executeQuery("PRAGMA foreign_keys")) {
+                if (!rs.next() || rs.getInt(1) != 1) {
+                    throw new SQLException("SQLite foreign-key enforcement could not be enabled.");
+                }
+            }
+        }
     }
 
     private void initSchema() throws SQLException {
+        boolean originalAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            createSchemaVersionTable();
+            int version = readSchemaVersion();
+            if (version > CURRENT_SCHEMA_VERSION) {
+                throw new SQLException("Database schema version " + version
+                        + " is newer than supported version " + CURRENT_SCHEMA_VERSION);
+            }
+
+            createJobsTable();
+            if (tableExists("tasks")) {
+                if (!tasksHaveJobForeignKey()) {
+                    migrateTasksTableToForeignKey();
+                }
+            } else {
+                createTasksTable();
+            }
+
+            writeSchemaVersion(CURRENT_SCHEMA_VERSION);
+            validateCurrentSchema();
+            conn.commit();
+        } catch (SQLException e) {
+            conn.rollback();
+            throw e;
+        } finally {
+            conn.setAutoCommit(originalAutoCommit);
+        }
+    }
+
+    private void createSchemaVersionTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    id         INTEGER PRIMARY KEY CHECK (id = 1),
+                    version    INTEGER NOT NULL CHECK (version >= 0),
+                    applied_at INTEGER NOT NULL
+                )
+            """);
+        }
+    }
+
+    private void createJobsTable() throws SQLException {
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -42,8 +105,13 @@ public class DatabaseManager implements JobStateStore {
                     file_count       INTEGER NOT NULL
                 )
             """);
+        }
+    }
+
+    private void createTasksTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
-                CREATE TABLE IF NOT EXISTS tasks (
+                CREATE TABLE tasks (
                     task_id          TEXT    PRIMARY KEY,
                     job_id           TEXT    NOT NULL,
                     assigned_peer_id TEXT,
@@ -51,9 +119,128 @@ public class DatabaseManager implements JobStateStore {
                     started_at       INTEGER,
                     completed_at     INTEGER,
                     duration_ms      INTEGER,
-                    retry_count      INTEGER NOT NULL DEFAULT 0
+                    retry_count      INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 )
             """);
+        }
+    }
+
+    private void migrateTasksTableToForeignKey() throws SQLException {
+        int orphanRows = countOrphanTasks();
+        if (orphanRows > 0) {
+            throw new SQLException("Cannot migrate task schema because " + orphanRows + " orphan task rows exist.");
+        }
+
+        String backupTable = "tasks_without_fk_migration";
+        if (tableExists(backupTable)) {
+            throw new SQLException("Cannot migrate task schema because migration backup table already exists.");
+        }
+
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE tasks RENAME TO " + backupTable);
+        }
+        createTasksTable();
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                INSERT INTO tasks(
+                    task_id,
+                    job_id,
+                    assigned_peer_id,
+                    status,
+                    started_at,
+                    completed_at,
+                    duration_ms,
+                    retry_count
+                )
+                SELECT
+                    task_id,
+                    job_id,
+                    assigned_peer_id,
+                    status,
+                    started_at,
+                    completed_at,
+                    duration_ms,
+                    retry_count
+                FROM tasks_without_fk_migration
+            """);
+            stmt.execute("DROP TABLE " + backupTable);
+        }
+    }
+
+    public synchronized int getSchemaVersion() throws SQLException {
+        return readSchemaVersion();
+    }
+
+    private int readSchemaVersion() throws SQLException {
+        String sql = "SELECT version FROM schema_version WHERE id=1";
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            if (!rs.next()) {
+                return 0;
+            }
+            return rs.getInt("version");
+        }
+    }
+
+    private void writeSchemaVersion(int version) throws SQLException {
+        String sql = """
+                INSERT INTO schema_version(id, version, applied_at)
+                VALUES(1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    version=excluded.version,
+                    applied_at=excluded.applied_at
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, version);
+            ps.setLong(2, System.currentTimeMillis());
+            ps.executeUpdate();
+        }
+    }
+
+    private boolean tableExists(String tableName) throws SQLException {
+        String sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private boolean tasksHaveJobForeignKey() throws SQLException {
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("PRAGMA foreign_key_list(tasks)")) {
+            while (rs.next()) {
+                if ("jobs".equals(rs.getString("table"))
+                        && "job_id".equals(rs.getString("from"))
+                        && "job_id".equals(rs.getString("to"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private int countOrphanTasks() throws SQLException {
+        String sql = """
+                SELECT COUNT(*)
+                FROM tasks
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM jobs WHERE jobs.job_id = tasks.job_id
+                )
+                """;
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            return rs.next() ? rs.getInt(1) : 0;
+        }
+    }
+
+    private void validateCurrentSchema() throws SQLException {
+        int version = readSchemaVersion();
+        if (version != CURRENT_SCHEMA_VERSION) {
+            throw new SQLException("Database schema version " + version
+                    + " does not match supported version " + CURRENT_SCHEMA_VERSION);
+        }
+        if (!tasksHaveJobForeignKey()) {
+            throw new SQLException("Database schema is missing tasks.job_id foreign-key enforcement.");
         }
     }
 

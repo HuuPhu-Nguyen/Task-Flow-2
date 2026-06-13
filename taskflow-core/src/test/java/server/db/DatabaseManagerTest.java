@@ -4,10 +4,16 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.ResultSet;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseManagerTest {
@@ -26,6 +32,8 @@ class DatabaseManagerTest {
             db.markTaskAssigned("task-1", "peer-1", 123L);
             db.markTaskCompleted("task-1", 456L, 333L);
             db.markJobCompleted("job-1");
+
+            assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
 
             List<DatabaseManager.JobRecord> jobs = db.getJobHistory();
             assertEquals(1, jobs.size());
@@ -50,6 +58,46 @@ class DatabaseManagerTest {
         } finally {
             db.close();
         }
+    }
+
+    @Test
+    void rejectsTaskRowsWithoutExistingJob() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-foreign-key-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertFalse(db.insertTask("orphan-task", "missing-job"));
+            assertEquals(0, db.getTasksForJob("missing-job").size());
+            assertTrue(tasksTableReferencesJobs(dbPath));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void migratesLegacyTasksTableToForeignKeySchema() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-legacy-migration-test.db");
+        createLegacyDatabaseWithoutTaskForeignKey(dbPath);
+
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
+            assertTrue(tasksTableReferencesJobs(dbPath));
+            assertEquals(1, db.getTasksForJob("legacy-job").size());
+            assertFalse(db.insertTask("orphan-task", "missing-job"));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void rejectsDatabaseSchemaNewerThanRuntimeSupports() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-future-schema-test.db");
+        createFutureSchemaVersionDatabase(dbPath);
+
+        SQLException failure = assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
+        assertTrue(failure.getMessage().contains("newer than supported version"));
     }
 
     @Test
@@ -128,5 +176,71 @@ class DatabaseManagerTest {
         } finally {
             db.close();
         }
+    }
+
+    private static void createLegacyDatabaseWithoutTaskForeignKey(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE jobs (
+                    job_id           TEXT    PRIMARY KEY,
+                    task_type        TEXT    NOT NULL,
+                    requester_node_id TEXT   NOT NULL,
+                    status           TEXT    NOT NULL DEFAULT 'RUNNING',
+                    submitted_at     INTEGER NOT NULL,
+                    completed_at     INTEGER,
+                    file_count       INTEGER NOT NULL
+                )
+            """);
+            stmt.execute("""
+                CREATE TABLE tasks (
+                    task_id          TEXT    PRIMARY KEY,
+                    job_id           TEXT    NOT NULL,
+                    assigned_peer_id TEXT,
+                    status           TEXT    NOT NULL DEFAULT 'PENDING',
+                    started_at       INTEGER,
+                    completed_at     INTEGER,
+                    duration_ms      INTEGER,
+                    retry_count      INTEGER NOT NULL DEFAULT 0
+                )
+            """);
+            stmt.execute("""
+                INSERT INTO jobs(job_id, task_type, requester_node_id, status, submitted_at, file_count)
+                VALUES('legacy-job', 'TEST_TASK', 'requester-1', 'RUNNING', 100, 1)
+            """);
+            stmt.execute("""
+                INSERT INTO tasks(task_id, job_id, status)
+                VALUES('legacy-task', 'legacy-job', 'PENDING')
+            """);
+        }
+    }
+
+    private static void createFutureSchemaVersionDatabase(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE schema_version (
+                    id         INTEGER PRIMARY KEY CHECK (id = 1),
+                    version    INTEGER NOT NULL CHECK (version >= 0),
+                    applied_at INTEGER NOT NULL
+                )
+            """);
+            stmt.execute("INSERT INTO schema_version(id, version, applied_at) VALUES(1, 999, 100)");
+        }
+    }
+
+    private static boolean tasksTableReferencesJobs(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA foreign_key_list(tasks)")) {
+            while (rs.next()) {
+                if ("jobs".equals(rs.getString("table"))
+                        && "job_id".equals(rs.getString("from"))
+                        && "job_id".equals(rs.getString("to"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }
