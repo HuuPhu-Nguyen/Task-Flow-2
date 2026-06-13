@@ -38,6 +38,9 @@ Invalid/stale transitions are ignored (for example duplicate success from a peer
 - A job is **successful** only when all tasks complete.
 - A job is **failed** when any task reaches terminal `FAILED`.
 - On job failure, non-terminal remaining tasks are persisted as failed in DB for consistent historical state.
+- Final `JOB_RESULT` delivery is retried when the requester cannot be reached or the output transport reports failure.
+- Final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
+- If final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
 
 ## Heartbeat and Peer Liveness
 

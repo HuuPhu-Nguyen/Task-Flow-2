@@ -60,7 +60,7 @@ flowchart LR
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode is still transitional until it has a live broker integration test, broker backpressure, live dead-letter validation, and GUI support.
+TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, but remains transitional until broker failure paths, backpressure, durable resume, and GUI support are complete.
 
 ---
 
@@ -81,9 +81,9 @@ Framework core no longer imports concrete image, video, or text job classes. New
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`.
+Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. Broker deliveries are acknowledged only after scheduler handling succeeds; transient failure-result send errors cause the delivery to be requeued.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, and dead-letter exchange/queue configuration. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
 ---
 
@@ -122,6 +122,7 @@ The `TaskScheduler` is the core of the system.
 - Default task timeout: **60 seconds**, configurable with `TASKFLOW_TASK_TIMEOUT_MS`
 - Automatic retries on failure, configurable with `TASKFLOW_MAX_TASK_RETRIES`
 - Failed tasks are returned to the pending queue and retried by available peers
+- Final `JOB_RESULT` delivery retries are bounded by `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`; exhausted delivery is logged and persisted as a failed job so completed work does not remain active forever
 
 ---
 
@@ -308,6 +309,7 @@ scheduler:
   taskTimeoutMs: 60000
   maxTasksPerPeer: 3
   maxTaskRetries: 20
+  jobResultMaxDeliveryAttempts: 300
   metricsLogIntervalMs: 10000
   scoring:
     loadWeight: 6.0
@@ -325,6 +327,7 @@ Environment overrides:
 - `TASKFLOW_TASK_TIMEOUT_MS`
 - `TASKFLOW_MAX_TASKS_PER_PEER`
 - `TASKFLOW_MAX_TASK_RETRIES`
+- `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`
 - `TASKFLOW_METRICS_LOG_INTERVAL_MS`
 - `TASKFLOW_SCORE_LOAD_WEIGHT`
 - `TASKFLOW_SCORE_LATENCY_WEIGHT`
@@ -333,6 +336,7 @@ Environment overrides:
 - `TASKFLOW_SCORE_LATENCY_BASELINE_MS`
 - `TASKFLOW_SCORE_DURATION_BASELINE_MS`
 - `TASKFLOW_SCORE_EWMA_ALPHA`
+- `TASKFLOW_MAX_INPUT_BYTES` - maximum per-file client payload input size for conversion/text plugins, default `268435456` bytes
 
 PowerShell override example:
 
@@ -341,6 +345,7 @@ $env:TASKFLOW_CONFIG = "config\taskflow.yml"
 $env:TASKFLOW_TASK_TIMEOUT_MS = "120000"
 $env:TASKFLOW_MAX_TASKS_PER_PEER = "5"
 $env:TASKFLOW_MAX_TASK_RETRIES = "8"
+$env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
@@ -416,19 +421,24 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
-### Live RabbitMQ Integration Test
+RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. Peer-targeted coordinator publishes use RabbitMQ mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered.
 
-The RabbitMQ transport module includes an opt-in live broker test. It is skipped by default so normal builds do not require RabbitMQ.
+### Live RabbitMQ Integration Tests
+
+RabbitMQ live broker tests are opt-in and skipped by default so normal builds do not require RabbitMQ.
 
 Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables at an existing broker. Then run:
 
 ```powershell
 .\mvnw.cmd -pl taskflow-transport-rabbitmq -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest test
+.\mvnw.cmd -pl taskflow-coordinator -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqCoordinatorLiveIntegrationTest test
 ```
 
-Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same test.
+Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same tests.
 
-The test creates unique non-durable exchanges and queues, validates shared-route delivery, validates peer-specific delivery, verifies shared-route acknowledgement drains the queue, and cleans up its broker resources.
+The transport live tests create unique non-durable exchanges and queues, validate shared-route delivery, validate peer-specific delivery, verify shared-route acknowledgement drains the queue, verify handler-failure requeue behavior, verify reject-to-dead-letter behavior, and clean up their broker resources.
+
+The coordinator live test submits a test job through the broker, heartbeat-registers a capable peer, verifies peer-specific task assignment, publishes a peer task result, receives a peer-specific `JOB_RESULT`, and verifies the shared job/result queues drain.
 
 ---
 
@@ -498,19 +508,19 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 ## Known Limitations
 
-- RabbitMQ integration tests against a live broker are not implemented yet.
-- RabbitMQ mode is functional but transitional; peer-specific routing and dead-letter topology configuration are implemented, but broker backpressure, live dead-letter validation, and restart recovery are not complete.
+- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, and coordinator end-to-end job completion, but broker outage behavior, broker backpressure, and durable restart resume are not complete.
+- RabbitMQ mode is functional but transitional; peer-specific routing and dead-letter topology configuration are implemented, but the failure-path and recovery guarantees are not production-grade yet.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
-- SQLite is the current `JobStateStore` implementation; PostgreSQL/Flyway support is planned for durable production-style state management.
+- SQLite is the current `JobStateStore` implementation. Initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, and abandoned `RUNNING` jobs are marked failed on coordinator startup. PostgreSQL/Flyway and transactional restart resume are still planned for durable production-style state management.
 
 ---
 
 ## Future Improvements
 
 - PostgreSQL/Flyway state-store implementation
-- Add live RabbitMQ integration tests and JavaFX RabbitMQ submit support
+- Add RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit support
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard

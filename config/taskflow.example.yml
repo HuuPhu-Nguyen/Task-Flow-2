@@ -1,10 +1,12 @@
 # Copy this file to config/taskflow.yml for local runtime tuning.
 # Environment variables override values in this file.
+# TASKFLOW_MAX_INPUT_BYTES controls per-file client payload size for plugin inputs.
 
 scheduler:
   taskTimeoutMs: 60000
   maxTasksPerPeer: 3
   maxTaskRetries: 20
+  jobResultMaxDeliveryAttempts: 300
   metricsLogIntervalMs: 10000
   scoring:
     loadWeight: 6.0
