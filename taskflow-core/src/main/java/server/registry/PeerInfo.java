@@ -59,12 +59,12 @@ public class PeerInfo {
         this.lastHeartbeatReceivedAtMillis = new AtomicLong(System.currentTimeMillis());
     }
 
-    public void send(protocol.Message message) {
+    public boolean send(protocol.Message message) {
         if (connection != null && connection.isOpen()) {
-            connection.send(message);
-        } else {
-            LOGGER.warn("event=peer_send_skipped peer_id={} reason=no_open_sender", nodeId);
+            return connection.send(message);
         }
+        LOGGER.warn("event=peer_send_skipped peer_id={} reason=no_open_sender", nodeId);
+        return false;
     }
 
     public String getNodeId() {
@@ -194,7 +194,8 @@ public class PeerInfo {
         }
 
         @Override
-        public void send(protocol.Message message) {
+        public boolean send(protocol.Message message) {
+            return true;
         }
 
         @Override

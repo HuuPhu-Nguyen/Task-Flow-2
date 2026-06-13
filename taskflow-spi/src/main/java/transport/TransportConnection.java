@@ -7,7 +7,7 @@ public interface TransportConnection extends AutoCloseable {
 
     boolean isOpen();
 
-    void send(Message message);
+    boolean send(Message message);
 
     @Override
     void close();

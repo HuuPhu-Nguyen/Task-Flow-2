@@ -1,6 +1,9 @@
 package peer.engine;
 
 import com.google.gson.Gson;
+import messaging.SafeJsonWriter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import protocol.TaskResultMessage;
 import protocol.TaskAssignMessage;
 import java.io.PrintWriter;
@@ -11,6 +14,8 @@ import java.util.ServiceLoader;
 import java.util.concurrent.*;
 
 public class PeerExecutionEngine {
+    private static final Logger LOGGER = LoggerFactory.getLogger(PeerExecutionEngine.class);
+
     private final ExecutorService executionPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
     private final Gson gson = new Gson();
     private final String nodeId;
@@ -72,11 +77,18 @@ public class PeerExecutionEngine {
         }, executionPool);
     }
 
-    public void submitTask(TaskAssignMessage task, PrintWriter out) {
-        executeTask(task).thenAccept(response -> {
-            synchronized (out) {
-                out.println(gson.toJson(response));
+    public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
+        return executeTask(task).thenApply(response -> {
+            boolean sent = SafeJsonWriter.send(out, gson, response);
+            if (!sent) {
+                LOGGER.warn("event=task_result_send_failed node_id={} job_id={} task_id={}",
+                        nodeId, response.getJobId(), response.getTaskId());
             }
+            return sent;
+        }).exceptionally(error -> {
+            LOGGER.warn("event=task_result_send_failed node_id={} job_id={} task_id={} error={}",
+                    nodeId, task.getJobId(), task.getTaskId(), error.getMessage(), error);
+            return false;
         });
     }
 

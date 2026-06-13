@@ -5,6 +5,7 @@ import com.rabbitmq.client.BuiltinExchangeType;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.Return;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import transport.BrokerTransport;
@@ -18,15 +19,22 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Date;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class RabbitMqTransport implements BrokerTransport {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTransport.class);
+    private static final long MANDATORY_RETURN_WAIT_MILLIS = 250L;
 
     private final RabbitMqTransportConfig config;
     private final RabbitMqTopology topology;
     private final RabbitMqMessageCodec codec;
     private final Connection connection;
     private final Channel channel;
+    private final Map<String, CompletableFuture<Return>> mandatoryReturns = new ConcurrentHashMap<>();
 
     public RabbitMqTransport(RabbitMqTransportConfig config) throws Exception {
         this(config, new RabbitMqMessageCodec());
@@ -46,6 +54,7 @@ public class RabbitMqTransport implements BrokerTransport {
         this.connection = factory.newConnection("taskflow-rabbitmq-transport");
         this.channel = connection.createChannel();
         this.channel.basicQos(config.prefetchCount());
+        this.channel.addReturnListener(this::handleReturnedMessage);
         LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} dead_letter_enabled={} requeue_on_handler_failure={}",
                 config.host(),
                 config.port(),
@@ -86,28 +95,64 @@ public class RabbitMqTransport implements BrokerTransport {
     }
 
     @Override
-    public void publish(OutboundTransportMessage message) throws Exception {
-        publish(message, message.route().routingKey());
+    public boolean publish(OutboundTransportMessage message) throws Exception {
+        return publish(message, message.route().routingKey(), false);
     }
 
     @Override
-    public void publishToPeer(TransportRoute route,
-                              String peerNodeId,
-                              OutboundTransportMessage message) throws Exception {
-        publish(message, topology.peerRoutingKey(route, peerNodeId));
+    public boolean publishToPeer(TransportRoute route,
+                                 String peerNodeId,
+                                 OutboundTransportMessage message) throws Exception {
+        return publish(message, topology.peerRoutingKey(route, peerNodeId), true);
     }
 
-    private void publish(OutboundTransportMessage message, String routingKey) throws Exception {
+    private boolean publish(OutboundTransportMessage message, String routingKey, boolean mandatory) throws Exception {
         byte[] body = codec.encode(message);
+        String messageId = UUID.randomUUID().toString();
         AMQP.BasicProperties properties = new AMQP.BasicProperties.Builder()
+                .messageId(messageId)
                 .contentType("application/json")
                 .contentEncoding(StandardCharsets.UTF_8.name())
                 .deliveryMode(config.durable() ? 2 : 1)
                 .timestamp(Date.from(Instant.now()))
                 .build();
-        synchronized (channel) {
-            channel.basicPublish(topology.exchangeName(), routingKey, properties, body);
+        CompletableFuture<Return> returned = mandatory ? new CompletableFuture<>() : null;
+        if (mandatory) {
+            mandatoryReturns.put(messageId, returned);
         }
+        synchronized (channel) {
+            channel.basicPublish(topology.exchangeName(), routingKey, mandatory, properties, body);
+        }
+        if (!mandatory) {
+            return true;
+        }
+        try {
+            Return returnedMessage = returned.get(MANDATORY_RETURN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+            LOGGER.warn("event=rabbitmq_publish_unroutable route={} routing_key={} reply_code={} reply_text={}",
+                    message.route().name(),
+                    returnedMessage.getRoutingKey(),
+                    returnedMessage.getReplyCode(),
+                    returnedMessage.getReplyText());
+            return false;
+        } catch (TimeoutException expectedWhenRouted) {
+            mandatoryReturns.remove(messageId);
+            return true;
+        }
+    }
+
+    private void handleReturnedMessage(Return returned) {
+        String messageId = returned.getProperties() == null ? null : returned.getProperties().getMessageId();
+        if (messageId != null) {
+            CompletableFuture<Return> pending = mandatoryReturns.remove(messageId);
+            if (pending != null) {
+                pending.complete(returned);
+                return;
+            }
+        }
+        LOGGER.warn("event=rabbitmq_publish_returned_unmatched routing_key={} reply_code={} reply_text={}",
+                returned.getRoutingKey(),
+                returned.getReplyCode(),
+                returned.getReplyText());
     }
 
     @Override

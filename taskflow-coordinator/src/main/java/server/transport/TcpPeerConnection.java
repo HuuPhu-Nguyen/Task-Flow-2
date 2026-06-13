@@ -1,6 +1,7 @@
 package server.transport;
 
 import com.google.gson.Gson;
+import messaging.SafeJsonWriter;
 import protocol.Message;
 import transport.TransportConnection;
 
@@ -32,10 +33,11 @@ public class TcpPeerConnection implements TransportConnection {
     }
 
     @Override
-    public void send(Message message) {
-        synchronized (out) {
-            out.println(gson.toJson(message));
+    public boolean send(Message message) {
+        if (!isOpen()) {
+            return false;
         }
+        return SafeJsonWriter.send(out, gson, message);
     }
 
     @Override

@@ -27,7 +27,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
@@ -44,7 +43,7 @@ public class RabbitMqPeerNode {
         RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
         transport.declareTopology();
 
-        BlockingQueue<JobResultMessage> jobResults = new LinkedBlockingQueue<>();
+        BlockingQueue<ReceivedJobResult> jobResults = new LinkedBlockingQueue<>();
         PeerExecutionEngine engine = new PeerExecutionEngine(nodeId);
         LOGGER.info("event=peer_processors_registered transport=rabbitmq peer_id={} task_types={}",
                 nodeId, engine.getRegisteredTaskTypes());
@@ -100,28 +99,46 @@ public class RabbitMqPeerNode {
         }
 
         try {
-            TaskResultMessage result = engine.executeTask(task).get();
-            transport.publish(new OutboundTransportMessage(
-                    TransportRoute.TASK_RESULT,
-                    result.getNodeId(),
-                    result
-            ));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            if (delivery.acknowledgement() != null) {
+                delivery.acknowledgement().defer();
+            }
+            engine.executeTask(task).whenComplete((result, failure) -> {
+                if (failure != null) {
+                    LOGGER.warn("event=task_execution_future_failed peer_id={} task_id={} error={}",
+                            nodeId, task.getTaskId(), failure.getMessage(), failure);
+                    requeueQuietly(delivery.acknowledgement());
+                    return;
+                }
+                try {
+                    transport.publish(new OutboundTransportMessage(
+                            TransportRoute.TASK_RESULT,
+                            result.getNodeId(),
+                            result
+                    ));
+                    ack(delivery.acknowledgement());
+                } catch (Exception publishError) {
+                    LOGGER.warn("event=task_result_publish_failed peer_id={} task_id={} error={}",
+                            nodeId, task.getTaskId(), publishError.getMessage(), publishError);
+                    requeueQuietly(delivery.acknowledgement());
+                }
+            });
+        } catch (Exception e) {
+            requeueQuietly(delivery.acknowledgement());
             throw e;
-        } catch (ExecutionException e) {
-            throw new RuntimeException("Peer execution failed before result publication.", e);
         }
     }
 
-    private static void handleJobResult(BlockingQueue<JobResultMessage> jobResults,
+    private static void handleJobResult(BlockingQueue<ReceivedJobResult> jobResults,
                                         InboundTransportMessage delivery) throws Exception {
         Message message = delivery.message();
         if (!(message instanceof JobResultMessage result)) {
             reject(delivery.acknowledgement());
             return;
         }
-        jobResults.offer(result);
+        if (delivery.acknowledgement() != null) {
+            delivery.acknowledgement().defer();
+        }
+        jobResults.offer(new ReceivedJobResult(result, delivery.acknowledgement()));
         LOGGER.info("event=job_result_received job_id={} success={}",
                 result.getJobId(), result.isSuccessful());
     }
@@ -191,25 +208,34 @@ public class RabbitMqPeerNode {
     }
 
     private static void waitForJobResult(String jobId,
-                                         BlockingQueue<JobResultMessage> jobResults,
+                                         BlockingQueue<ReceivedJobResult> jobResults,
                                          Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(JOB_RESULT_TIMEOUT_MINUTES);
         while (System.nanoTime() < deadline) {
             long remaining = deadline - System.nanoTime();
-            JobResultMessage result = jobResults.poll(remaining, TimeUnit.NANOSECONDS);
-            if (result == null) {
+            ReceivedJobResult received = jobResults.poll(remaining, TimeUnit.NANOSECONDS);
+            if (received == null) {
                 break;
             }
+            JobResultMessage result = received.result();
             if (!jobId.equals(result.getJobId())) {
+                ack(received.acknowledgement());
                 continue;
             }
             if (!result.isSuccessful()) {
                 LOGGER.error("event=job_failed job_id={} error={}", jobId, result.getErrorMessage());
+                ack(received.acknowledgement());
                 return;
             }
-            Path outputDir = writeJobResults(result, clientPlugins);
-            LOGGER.info("event=job_completed job_id={} output_dir={}", jobId, outputDir);
-            return;
+            try {
+                Path outputDir = writeJobResults(result, clientPlugins);
+                ack(received.acknowledgement());
+                LOGGER.info("event=job_completed job_id={} output_dir={}", jobId, outputDir);
+                return;
+            } catch (Exception saveError) {
+                requeue(received.acknowledgement());
+                throw saveError;
+            }
         }
         throw new IllegalStateException("Timed out waiting for JOB_RESULT for " + jobId);
     }
@@ -266,5 +292,23 @@ public class RabbitMqPeerNode {
         if (acknowledgement != null) {
             acknowledgement.reject();
         }
+    }
+
+    private static void requeue(TransportAcknowledgement acknowledgement) throws Exception {
+        if (acknowledgement != null) {
+            acknowledgement.requeue();
+        }
+    }
+
+    private static void requeueQuietly(TransportAcknowledgement acknowledgement) {
+        try {
+            requeue(acknowledgement);
+        } catch (Exception requeueError) {
+            LOGGER.warn("event=rabbitmq_delivery_requeue_failed error={}",
+                    requeueError.getMessage(), requeueError);
+        }
+    }
+
+    private record ReceivedJobResult(JobResultMessage result, TransportAcknowledgement acknowledgement) {
     }
 }

@@ -13,8 +13,10 @@ public class PeerRegistrySchedulerOutput implements SchedulerOutput {
     }
 
     @Override
-    public void sendTask(PeerInfo peer, TaskAssignMessage message) {
-        peer.send(message);
+    public void sendTask(PeerInfo peer, TaskAssignMessage message) throws Exception {
+        if (!peer.send(message)) {
+            throw new java.io.IOException("Could not send task assignment to peer " + peer.getNodeId());
+        }
     }
 
     @Override
@@ -23,7 +25,6 @@ public class PeerRegistrySchedulerOutput implements SchedulerOutput {
         if (requester == null) {
             return false;
         }
-        requester.send(message);
-        return true;
+        return requester.send(message);
     }
 }

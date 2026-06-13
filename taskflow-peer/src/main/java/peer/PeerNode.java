@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.google.gson.Gson;
 import messaging.MessageDispatcher;
 import messaging.MessageFactory;
+import messaging.SafeJsonWriter;
 import messaging.handlers.PingHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -83,7 +84,6 @@ public class PeerNode {
     public String submitJob(String taskType, List<?> payloads, String parameter, PrintWriter out) {
         String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
 
-        myActiveJobIds.add(jobId);
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
 
         JobSubmitMessage msg = new JobSubmitMessage(
@@ -95,10 +95,12 @@ public class PeerNode {
                 parameter
         );
 
-        synchronized (out) {
-            String jsonMessage = new Gson().toJson(msg);
-            out.println(jsonMessage);
+        boolean sent = SafeJsonWriter.send(out, new Gson(), msg);
+        if (!sent) {
+            LOGGER.warn("event=peer_job_submit_send_failed job_id={} task_type={}", jobId, taskType);
+            throw new IllegalStateException("Could not send job submit message to coordinator.");
         }
+        myActiveJobIds.add(jobId);
         return jobId;
     }
 

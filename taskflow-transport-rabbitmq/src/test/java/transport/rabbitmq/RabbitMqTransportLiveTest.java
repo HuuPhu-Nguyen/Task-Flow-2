@@ -88,6 +88,85 @@ class RabbitMqTransportLiveTest {
         }
     }
 
+    @Test
+    void rejectsHandlerFailuresToDeadLetterQueueAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+                transport.declareTopology();
+
+                CountDownLatch deliveryAttempted = new CountDownLatch(1);
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    deliveryAttempted.countDown();
+                    throw new IllegalStateException("expected live-test handler failure");
+                });
+                transport.publish(new OutboundTransportMessage(
+                        TransportRoute.HEARTBEAT,
+                        "peer-live",
+                        new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
+                ));
+
+                assertTrue(deliveryAttempted.await(10, TimeUnit.SECONDS),
+                        "Timed out waiting for failed HEARTBEAT delivery");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueCount(config, config.deadLetterQueueName(), 1);
+                transport.cancel(consumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
+    @Test
+    void requeuesHandlerFailuresWhenConfiguredAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, true);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+                transport.declareTopology();
+
+                CountDownLatch redelivered = new CountDownLatch(1);
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    int attempt = attempts.incrementAndGet();
+                    if (attempt == 1) {
+                        throw new IllegalStateException("expected live-test requeue");
+                    }
+                    assertDelivery(redelivered, failure, () -> assertHeartbeatDelivery(delivery));
+                });
+                transport.publish(new OutboundTransportMessage(
+                        TransportRoute.HEARTBEAT,
+                        "peer-live",
+                        new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
+                ));
+
+                awaitDelivery(redelivered, failure, "requeued HEARTBEAT redelivery");
+                assertTrue(attempts.get() >= 2, "Expected at least one failed attempt and one redelivery");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueCount(config, config.deadLetterQueueName(), 0);
+                transport.cancel(consumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
     private static void assertHeartbeatDelivery(InboundTransportMessage delivery) {
         assertEquals(TransportRoute.HEARTBEAT, delivery.route());
         assertEquals("peer-live", delivery.fromNodeId());
@@ -137,14 +216,21 @@ class RabbitMqTransportLiveTest {
     }
 
     private static void waitForQueueToDrain(RabbitMqTransportConfig config, String queueName) throws Exception {
+        waitForQueueCount(config, queueName, 0);
+    }
+
+    private static void waitForQueueCount(RabbitMqTransportConfig config,
+                                          String queueName,
+                                          long expectedCount) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (System.nanoTime() < deadline) {
-            if (messageCount(config, queueName) == 0) {
+            if (messageCount(config, queueName) == expectedCount) {
                 return;
             }
             Thread.sleep(100);
         }
-        assertEquals(0, messageCount(config, queueName), "Expected RabbitMQ queue to be drained: " + queueName);
+        assertEquals(expectedCount, messageCount(config, queueName),
+                "Unexpected RabbitMQ queue count: " + queueName);
     }
 
     private static long messageCount(RabbitMqTransportConfig config, String queueName) throws Exception {
@@ -155,6 +241,10 @@ class RabbitMqTransportLiveTest {
     }
 
     private static RabbitMqTransportConfig liveConfig(String token) {
+        return liveConfig(token, false);
+    }
+
+    private static RabbitMqTransportConfig liveConfig(String token, boolean requeueOnHandlerFailure) {
         RabbitMqTransportConfig base = RabbitMqTransportConfig.fromEnvironment();
         String name = "taskflow.live." + token;
         return new RabbitMqTransportConfig(
@@ -171,7 +261,7 @@ class RabbitMqTransportLiveTest {
                 name + ".dlx",
                 name + ".dlq",
                 "dead-letter",
-                false
+                requeueOnHandlerFailure
         );
     }
 

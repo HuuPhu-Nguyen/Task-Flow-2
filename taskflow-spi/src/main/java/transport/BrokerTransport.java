@@ -3,11 +3,11 @@ package transport;
 public interface BrokerTransport extends AutoCloseable {
     void declareTopology() throws Exception;
 
-    void publish(OutboundTransportMessage message) throws Exception;
+    boolean publish(OutboundTransportMessage message) throws Exception;
 
-    default void publishToPeer(TransportRoute route,
-                               String peerNodeId,
-                               OutboundTransportMessage message) throws Exception {
+    default boolean publishToPeer(TransportRoute route,
+                                  String peerNodeId,
+                                  OutboundTransportMessage message) throws Exception {
         throw new UnsupportedOperationException("Peer-targeted publish is not supported by this transport.");
     }
 

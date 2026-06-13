@@ -2,6 +2,7 @@ package messaging.handlers;
 
 import com.google.gson.Gson;
 import messaging.MessageHandler;
+import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
@@ -40,8 +41,9 @@ public class PingHandler implements MessageHandler {
                 Instant.now().toString(),
                 supportedTaskTypesSupplier.get()
         );
-        synchronized (out) {
-            out.println(gson.toJson(response));
+        if (!SafeJsonWriter.send(out, gson, response)) {
+            LOGGER.warn("event=ping_response_send_failed node_id={}", ping.getNodeId());
+            throw new IllegalStateException("Could not send PONG response.");
         }
         LOGGER.debug("event=ping_handled node_id={}", ping.getNodeId());
     }

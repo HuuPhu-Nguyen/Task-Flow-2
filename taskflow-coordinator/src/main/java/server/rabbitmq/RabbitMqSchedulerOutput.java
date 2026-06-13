@@ -28,7 +28,7 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
                 message.getPayload(),
                 message.getParam()
         );
-        transport.publishToPeer(
+        boolean routed = transport.publishToPeer(
                 TransportRoute.TASK_ASSIGN,
                 peerNodeId,
                 new OutboundTransportMessage(
@@ -37,6 +37,9 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
                         brokerMessage
                 )
         );
+        if (!routed) {
+            throw new IllegalStateException("Task assignment was not routed to peer " + peerNodeId);
+        }
     }
 
     @Override
@@ -44,7 +47,7 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
         if (requesterNodeId == null || requesterNodeId.isBlank()) {
             return false;
         }
-        transport.publishToPeer(
+        return transport.publishToPeer(
                 TransportRoute.JOB_RESULT,
                 requesterNodeId,
                 new OutboundTransportMessage(
@@ -53,6 +56,5 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput {
                         message
                 )
         );
-        return true;
     }
 }
