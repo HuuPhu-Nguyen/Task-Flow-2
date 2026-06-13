@@ -18,6 +18,7 @@ import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import messaging.MessageDispatcher;
 import messaging.MessageFactory;
+import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import peer.PeerNode;
@@ -32,11 +33,9 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.stream.Stream;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
@@ -244,17 +243,21 @@ public class PeerApp extends Application {
 
             List<File> selectedFiles = fileChooser.showOpenMultipleDialog(window);
             if (selectedFiles != null) {
-                for (File file : selectedFiles) {
-                    try {
-                        Files.copy(file.toPath(), Paths.get(currentInPath, file.getName()), StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    List<Path> sources = selectedFiles.stream()
+                            .map(File::toPath)
+                            .toList();
+                    for (InputStaging.StagedInput stagedInput : InputStaging.stageFiles(sources, Paths.get(currentInPath))) {
                         VBox fileCard = new VBox(5);
                         fileCard.setStyle("-fx-border-color: #ccc; -fx-padding: 5; -fx-background-color: #eee;");
-                        fileCard.getChildren().add(new Label(file.getName()));
+                        Label fileName = new Label(stagedInput.displayName());
+                        fileName.setTooltip(new Tooltip(stagedInput.sourcePath().toString()));
+                        fileCard.getChildren().add(fileName);
                         gallery.getChildren().add(fileCard);
-                    } catch (IOException ex) {
-                        LOGGER.warn("event=gui_upload_copy_failed source={} error={}",
-                                file.getAbsolutePath(), ex.getMessage(), ex);
                     }
+                } catch (IOException ex) {
+                    LOGGER.warn("event=gui_upload_copy_failed error={}", ex.getMessage(), ex);
+                    new Alert(Alert.AlertType.ERROR, "Could not stage selected files: " + ex.getMessage()).show();
                 }
             }
         });
@@ -292,22 +295,12 @@ public class PeerApp extends Application {
     }
 
     private List<Path> stagedInputFiles() throws IOException {
-        Path inputDir = Paths.get(currentInPath);
-        if (!Files.isDirectory(inputDir)) {
-            return List.of();
-        }
-        try (Stream<Path> paths = Files.list(inputDir)) {
-            return paths.filter(Files::isRegularFile)
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .toList();
-        }
+        return InputStaging.stagedInputFiles(Paths.get(currentInPath));
     }
 
     private void clearStagedInputs() {
         try {
-            for (Path path : stagedInputFiles()) {
-                Files.deleteIfExists(path);
-            }
+            InputStaging.clear(Paths.get(currentInPath));
         } catch (IOException deleteError) {
             LOGGER.warn("event=temp_inputs_clear_failed error={}", deleteError.getMessage(), deleteError);
         }
@@ -458,12 +451,17 @@ public class PeerApp extends Application {
     /**
      * Synchronized method to ensure JSON messages don't interleave on the socket.
      */
-    private void sendSafe(Object message) {
-        if (socketOut != null) {
-            synchronized (socketOut) {
-                socketOut.println(gson.toJson(message));
-            }
+    private boolean sendSafe(Object message) {
+        if (socketOut == null) {
+            return false;
         }
+        boolean sent = SafeJsonWriter.send(socketOut, gson, message);
+        if (!sent) {
+            String messageClass = message == null ? "null" : message.getClass().getSimpleName();
+            LOGGER.warn("event=gui_message_send_failed message_class={}", messageClass);
+            socketOut = null;
+        }
+        return sent;
     }
 
     private void startNetworkThread(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
