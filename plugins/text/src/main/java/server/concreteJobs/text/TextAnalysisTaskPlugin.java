@@ -24,6 +24,9 @@ public class TextAnalysisTaskPlugin implements TaskPlugin, PeerProcessorPlugin, 
     private static final List<String> INPUT_EXTENSIONS = List.of(".txt", ".md", ".csv", ".log");
     private static final List<String> RESULT_FORMATS = List.of("csv");
     private static final Gson GSON = new Gson();
+    private static final long DEFAULT_MAX_INPUT_BYTES = 256L * 1024L * 1024L;
+    private static final String MAX_INPUT_BYTES_PROPERTY = "taskflow.maxInputBytes";
+    private static final String MAX_INPUT_BYTES_ENV = "TASKFLOW_MAX_INPUT_BYTES";
 
     @Override
     public String taskType() {
@@ -66,6 +69,12 @@ public class TextAnalysisTaskPlugin implements TaskPlugin, PeerProcessorPlugin, 
             if (!hasAllowedExtension(input)) {
                 throw new IOException("Unsupported input file type for " + input.getFileName()
                         + ". Supported extensions: " + INPUT_EXTENSIONS);
+            }
+            long size = Files.size(input);
+            long maxInputBytes = maxInputBytes();
+            if (size > maxInputBytes) {
+                throw new IOException("Input file exceeds TASKFLOW_MAX_INPUT_BYTES (" + maxInputBytes
+                        + " bytes): " + input.getFileName());
             }
             payloads.add(new TextAnalysisPayload(
                     input.getFileName().toString(),
@@ -148,5 +157,20 @@ public class TextAnalysisTaskPlugin implements TaskPlugin, PeerProcessorPlugin, 
             return safeValue;
         }
         return "\"" + safeValue.replace("\"", "\"\"") + "\"";
+    }
+
+    private static long maxInputBytes() {
+        String configured = System.getProperty(MAX_INPUT_BYTES_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(MAX_INPUT_BYTES_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_MAX_INPUT_BYTES;
+        }
+        long parsed = Long.parseLong(configured.trim());
+        if (parsed <= 0) {
+            throw new IllegalArgumentException(MAX_INPUT_BYTES_ENV + " must be positive.");
+        }
+        return parsed;
     }
 }

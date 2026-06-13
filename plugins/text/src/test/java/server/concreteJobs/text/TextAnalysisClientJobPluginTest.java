@@ -41,6 +41,20 @@ class TextAnalysisClientJobPluginTest {
     }
 
     @Test
+    void rejectsInputLargerThanConfiguredLimit() throws Exception {
+        Path input = tempDir.resolve("large.txt");
+        Files.writeString(input, "abcd");
+        System.setProperty("taskflow.maxInputBytes", "3");
+        try {
+            java.io.IOException error = assertThrows(java.io.IOException.class,
+                    () -> new TextAnalysisTaskPlugin().buildPayloads(List.of(input), "csv"));
+            assertTrue(error.getMessage().contains("TASKFLOW_MAX_INPUT_BYTES"));
+        } finally {
+            System.clearProperty("taskflow.maxInputBytes");
+        }
+    }
+
+    @Test
     void writesCsvResultsWithEscapedDocumentNames() throws Exception {
         Path outputDir = tempDir.resolve("out");
         TextAnalysisResult result = new TextAnalysisResult("a,b.txt", 2, 4, 20, 3);

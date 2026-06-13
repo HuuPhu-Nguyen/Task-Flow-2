@@ -57,6 +57,20 @@ class ConversionClientJobPluginTest {
     }
 
     @Test
+    void rejectsInputLargerThanConfiguredLimit() throws Exception {
+        Path input = tempDir.resolve("large.png");
+        Files.write(input, new byte[]{1, 2, 3, 4});
+        System.setProperty("taskflow.maxInputBytes", "3");
+        try {
+            java.io.IOException error = assertThrows(java.io.IOException.class,
+                    () -> new ImageConversionTaskPlugin().buildPayloads(List.of(input), "png"));
+            assertTrue(error.getMessage().contains("TASKFLOW_MAX_INPUT_BYTES"));
+        } finally {
+            System.clearProperty("taskflow.maxInputBytes");
+        }
+    }
+
+    @Test
     void savesResultsInsideSelectedFolderWithSafeNames() throws Exception {
         byte[] outputBytes = new byte[]{9, 8, 7};
         Path outputDir = tempDir.resolve("out");

@@ -13,6 +13,9 @@ import java.util.List;
 
 final class ConversionClientPayloads {
     private static final Gson GSON = new Gson();
+    private static final long DEFAULT_MAX_INPUT_BYTES = 256L * 1024L * 1024L;
+    private static final String MAX_INPUT_BYTES_PROPERTY = "taskflow.maxInputBytes";
+    private static final String MAX_INPUT_BYTES_ENV = "TASKFLOW_MAX_INPUT_BYTES";
 
     private ConversionClientPayloads() {
     }
@@ -31,6 +34,12 @@ final class ConversionClientPayloads {
             if (!hasAllowedExtension(input, allowedExtensions)) {
                 throw new IOException("Unsupported input file type for " + input.getFileName()
                         + ". Supported extensions: " + allowedExtensions);
+            }
+            long size = Files.size(input);
+            long maxInputBytes = maxInputBytes();
+            if (size > maxInputBytes) {
+                throw new IOException("Input file exceeds TASKFLOW_MAX_INPUT_BYTES (" + maxInputBytes
+                        + " bytes): " + input.getFileName());
             }
             String base64 = Base64.getEncoder().encodeToString(Files.readAllBytes(input));
             payloads.add(new FilePayload(input.getFileName().toString(), base64));
@@ -107,5 +116,20 @@ final class ConversionClientPayloads {
             }
         }
         return false;
+    }
+
+    private static long maxInputBytes() {
+        String configured = System.getProperty(MAX_INPUT_BYTES_PROPERTY);
+        if (configured == null || configured.isBlank()) {
+            configured = System.getenv(MAX_INPUT_BYTES_ENV);
+        }
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_MAX_INPUT_BYTES;
+        }
+        long parsed = Long.parseLong(configured.trim());
+        if (parsed <= 0) {
+            throw new IllegalArgumentException(MAX_INPUT_BYTES_ENV + " must be positive.");
+        }
+        return parsed;
     }
 }
