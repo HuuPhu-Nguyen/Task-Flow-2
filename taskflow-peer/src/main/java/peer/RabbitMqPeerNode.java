@@ -11,6 +11,7 @@ import protocol.Message;
 import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
+import transport.BrokerTransport;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
@@ -110,11 +111,11 @@ public class RabbitMqPeerNode {
                     return;
                 }
                 try {
-                    transport.publish(new OutboundTransportMessage(
+                    publishConfirmed(transport, new OutboundTransportMessage(
                             TransportRoute.TASK_RESULT,
                             result.getNodeId(),
                             result
-                    ));
+                    ), "Task result publish was not confirmed for task " + task.getTaskId());
                     ack(delivery.acknowledgement());
                 } catch (Exception publishError) {
                     LOGGER.warn("event=task_result_publish_failed peer_id={} task_id={} error={}",
@@ -153,11 +154,11 @@ public class RabbitMqPeerNode {
         });
         Runnable heartbeat = () -> {
             try {
-                transport.publish(new OutboundTransportMessage(
+                publishConfirmed(transport, new OutboundTransportMessage(
                         TransportRoute.HEARTBEAT,
                         nodeId,
                         new PongMessage(nodeId, Instant.now().toString(), supportedTaskTypes)
-                ));
+                ), "Heartbeat publish was not confirmed");
             } catch (Exception e) {
                 LOGGER.warn("event=rabbitmq_heartbeat_failed peer_id={} error={}",
                         nodeId, e.getMessage(), e);
@@ -202,9 +203,21 @@ public class RabbitMqPeerNode {
                 payloads,
                 parameter
         );
-        transport.publish(new OutboundTransportMessage(TransportRoute.JOB_SUBMIT, nodeId, message));
+        publishConfirmed(
+                transport,
+                new OutboundTransportMessage(TransportRoute.JOB_SUBMIT, nodeId, message),
+                "Job submit publish was not confirmed for job " + jobId
+        );
         LOGGER.info("event=job_submitted transport=rabbitmq job_id={} peer_id={}", jobId, nodeId);
         return jobId;
+    }
+
+    static void publishConfirmed(BrokerTransport transport,
+                                 OutboundTransportMessage message,
+                                 String failureMessage) throws Exception {
+        if (!transport.publish(message)) {
+            throw new IllegalStateException(failureMessage);
+        }
     }
 
     private static void waitForJobResult(String jobId,

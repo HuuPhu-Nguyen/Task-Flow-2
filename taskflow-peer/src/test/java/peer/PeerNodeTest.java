@@ -4,6 +4,10 @@ import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import peer.engine.PeerExecutionEngine;
 import protocol.PingMessage;
+import transport.BrokerTransport;
+import transport.OutboundTransportMessage;
+import transport.TransportMessageHandler;
+import transport.TransportRoute;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -17,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -47,6 +52,36 @@ class PeerNodeTest {
 
         assertThrows(IllegalStateException.class,
                 () -> node.submitJob("TEXT_ANALYSIS", List.of("payload"), "summary", out));
+    }
+
+    @Test
+    void rabbitMqPublishConfirmedReturnsWhenBrokerConfirms() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport(true);
+        OutboundTransportMessage message = new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                new PingMessage("peer-1", "now")
+        );
+
+        RabbitMqPeerNode.publishConfirmed(transport, message, "publish failed");
+
+        assertEquals(message, transport.publishedMessage);
+    }
+
+    @Test
+    void rabbitMqPublishConfirmedThrowsWhenBrokerDoesNotConfirm() {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport(false);
+        OutboundTransportMessage message = new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                new PingMessage("peer-1", "now")
+        );
+
+        IllegalStateException error = assertThrows(IllegalStateException.class,
+                () -> RabbitMqPeerNode.publishConfirmed(transport, message, "publish failed"));
+
+        assertEquals("publish failed", error.getMessage());
+        assertEquals(message, transport.publishedMessage);
     }
 
     @Test
@@ -127,6 +162,38 @@ class PeerNodeTest {
         @Override
         public void flush() throws IOException {
             throw new IOException("flush failed");
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static final class RecordingBrokerTransport implements BrokerTransport {
+        private final boolean publishConfirmed;
+        private OutboundTransportMessage publishedMessage;
+
+        private RecordingBrokerTransport(boolean publishConfirmed) {
+            this.publishConfirmed = publishConfirmed;
+        }
+
+        @Override
+        public void declareTopology() {
+        }
+
+        @Override
+        public boolean publish(OutboundTransportMessage message) {
+            this.publishedMessage = message;
+            return publishConfirmed;
+        }
+
+        @Override
+        public String subscribe(TransportRoute route, TransportMessageHandler handler) {
+            return "consumer";
+        }
+
+        @Override
+        public void cancel(String consumerTag) {
         }
 
         @Override
