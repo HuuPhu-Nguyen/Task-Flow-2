@@ -431,13 +431,13 @@ RabbitMQ live broker tests are opt-in and skipped by default so normal builds do
 Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables at an existing broker. Then run:
 
 ```powershell
-.\mvnw.cmd -pl taskflow-transport-rabbitmq -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest test
+.\mvnw.cmd -pl taskflow-transport-rabbitmq -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest -Dsurefire.failIfNoSpecifiedTests=false test
 .\mvnw.cmd -pl taskflow-coordinator -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqCoordinatorLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
 Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same tests.
 
-The transport live tests create unique non-durable exchanges and queues, validate shared-route delivery, validate peer-specific delivery, verify shared-route acknowledgement drains the queue, verify handler-failure requeue behavior, verify reject-to-dead-letter behavior, and clean up their broker resources.
+The transport live tests create unique non-durable exchanges and queues, validate shared-route delivery, validate peer-specific delivery, verify shared-route acknowledgement drains the queue, verify handler-failure requeue behavior, verify reject-to-dead-letter behavior, verify `prefetch=1` limits unacknowledged deliveries, and clean up their broker resources.
 
 The coordinator live test submits a test job through the broker, heartbeat-registers a capable peer, verifies peer-specific task assignment, publishes a peer task result, receives a peer-specific `JOB_RESULT`, and verifies the shared job/result queues drain.
 
@@ -509,7 +509,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 ## Known Limitations
 
-- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, and coordinator end-to-end job completion, but broker outage behavior, broker backpressure, and durable restart resume are not complete.
+- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, and coordinator end-to-end job completion, but broker outage behavior, higher-level scheduler/peer backpressure policy, and durable restart resume are not complete.
 - RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.

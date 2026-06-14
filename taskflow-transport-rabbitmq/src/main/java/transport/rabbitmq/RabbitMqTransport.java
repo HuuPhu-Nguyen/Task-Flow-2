@@ -59,10 +59,15 @@ public class RabbitMqTransport implements BrokerTransport {
         this.codec = codec;
         this.connection = connection;
         this.channel = channel;
-        synchronized (channel) {
-            this.channel.basicQos(config.prefetchCount());
-            this.channel.confirmSelect();
-            this.channel.addReturnListener(this::handleReturnedMessage);
+        try {
+            synchronized (channel) {
+                this.channel.basicQos(config.prefetchCount());
+                this.channel.confirmSelect();
+                this.channel.addReturnListener(this::handleReturnedMessage);
+            }
+        } catch (Exception e) {
+            closeAfterStartupFailure(connection, channel, e);
+            throw e;
         }
         LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} requeue_on_handler_failure={}",
                 config.host(),
@@ -94,6 +99,19 @@ public class RabbitMqTransport implements BrokerTransport {
                 e.addSuppressed(closeFailure);
             }
             throw e;
+        }
+    }
+
+    private static void closeAfterStartupFailure(Connection connection, Channel channel, Exception startupFailure) {
+        try {
+            channel.close();
+        } catch (Exception closeFailure) {
+            startupFailure.addSuppressed(closeFailure);
+        }
+        try {
+            connection.close();
+        } catch (Exception closeFailure) {
+            startupFailure.addSuppressed(closeFailure);
         }
     }
 

@@ -13,12 +13,14 @@ import transport.TransportRoute;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqTransportPublishConfirmTest {
@@ -31,6 +33,25 @@ class RabbitMqTransportPublishConfirmTest {
             assertTrue(fakeChannel.confirmSelected);
             assertEquals(3, fakeChannel.prefetchCount);
         }
+    }
+
+    @Test
+    void startupFailureClosesPartiallyOpenedRabbitMqResources() {
+        FakeChannel fakeChannel = new FakeChannel();
+        fakeChannel.failConfirmSelect = true;
+        Channel channel = fakeChannel.proxy();
+        FakeConnection fakeConnection = new FakeConnection(channel);
+
+        IOException error = assertThrows(IOException.class, () -> new RabbitMqTransport(
+                config(),
+                new RabbitMqMessageCodec(),
+                fakeConnection.proxy(),
+                channel
+        ));
+
+        assertEquals("confirm-select failed", error.getMessage());
+        assertEquals(1, fakeChannel.closeCount);
+        assertEquals(1, fakeConnection.closeCount);
     }
 
     @Test
@@ -65,6 +86,19 @@ class RabbitMqTransportPublishConfirmTest {
 
         try (RabbitMqTransport transport = transport(fakeChannel)) {
             assertFalse(transport.publish(message(TransportRoute.HEARTBEAT)));
+        }
+    }
+
+    @Test
+    void publishThrowsWhenBrokerChannelFailsDuringPublish() throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        fakeChannel.failPublish = true;
+
+        try (RabbitMqTransport transport = transport(fakeChannel)) {
+            IOException error = assertThrows(IOException.class,
+                    () -> transport.publish(message(TransportRoute.HEARTBEAT)));
+
+            assertEquals("broker publish failed", error.getMessage());
         }
     }
 
@@ -117,17 +151,7 @@ class RabbitMqTransportPublishConfirmTest {
     }
 
     private static Connection connection(Channel channel) {
-        InvocationHandler handler = (proxy, method, args) -> switch (method.getName()) {
-            case "createChannel" -> channel;
-            case "close" -> null;
-            case "isOpen" -> true;
-            default -> defaultValue(method.getReturnType());
-        };
-        return (Connection) Proxy.newProxyInstance(
-                Connection.class.getClassLoader(),
-                new Class<?>[] { Connection.class },
-                handler
-        );
+        return new FakeConnection(channel).proxy();
     }
 
     private static OutboundTransportMessage message(TransportRoute route) {
@@ -162,10 +186,13 @@ class RabbitMqTransportPublishConfirmTest {
         private boolean confirmResult = true;
         private boolean confirmTimeout;
         private boolean returnMandatoryPublish;
+        private boolean failConfirmSelect;
+        private boolean failPublish;
         private String routingKey;
         private boolean mandatory;
         private byte[] body;
         private long confirmTimeoutMillis;
+        private int closeCount;
         private ReturnCallback returnCallback;
 
         private Channel proxy() {
@@ -184,6 +211,9 @@ class RabbitMqTransportPublishConfirmTest {
                     yield null;
                 }
                 case "confirmSelect" -> {
+                    if (failConfirmSelect) {
+                        throw new IOException("confirm-select failed");
+                    }
                     confirmSelected = true;
                     yield null;
                 }
@@ -198,6 +228,9 @@ class RabbitMqTransportPublishConfirmTest {
                     mandatory = (Boolean) args[2];
                     AMQP.BasicProperties properties = (AMQP.BasicProperties) args[3];
                     body = (byte[]) args[4];
+                    if (failPublish) {
+                        throw new IOException("broker publish failed");
+                    }
                     if (returnMandatoryPublish && returnCallback != null) {
                         returnCallback.handle(new Return(
                                 312,
@@ -217,7 +250,40 @@ class RabbitMqTransportPublishConfirmTest {
                     }
                     yield confirmResult;
                 }
-                case "close" -> null;
+                case "close" -> {
+                    closeCount++;
+                    yield null;
+                }
+                case "isOpen" -> true;
+                default -> defaultValue(method.getReturnType());
+            };
+        }
+    }
+
+    private static final class FakeConnection implements InvocationHandler {
+        private final Channel channel;
+        private int closeCount;
+
+        private FakeConnection(Channel channel) {
+            this.channel = channel;
+        }
+
+        private Connection proxy() {
+            return (Connection) Proxy.newProxyInstance(
+                    Connection.class.getClassLoader(),
+                    new Class<?>[] { Connection.class },
+                    this
+            );
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) {
+            return switch (method.getName()) {
+                case "createChannel" -> channel;
+                case "close" -> {
+                    closeCount++;
+                    yield null;
+                }
                 case "isOpen" -> true;
                 default -> defaultValue(method.getReturnType());
             };

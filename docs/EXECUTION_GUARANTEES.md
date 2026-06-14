@@ -18,6 +18,14 @@ This document defines the current runtime guarantees of TaskFlow.
 - Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
 - This is not a durable outbox: coordinator crash replay around publication is still not implemented.
 
+## RabbitMQ Consumption and Backpressure
+
+- RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
+- Broker deliveries use manual acknowledgement.
+- Deferred acknowledgements keep deliveries unacknowledged until the scheduler or peer explicitly settles them.
+- Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
+- Higher-level backpressure that coordinates broker prefetch, scheduler assignment limits, peer capacity, and queue-depth policy remains basic.
+
 ## Task State Machine
 
 Each task moves through:

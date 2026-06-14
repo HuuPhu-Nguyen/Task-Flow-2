@@ -10,6 +10,7 @@ import protocol.Message;
 import protocol.PongMessage;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
+import transport.TransportAcknowledgement;
 import transport.TransportRoute;
 
 import java.time.Instant;
@@ -17,9 +18,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -167,6 +170,71 @@ class RabbitMqTransportLiveTest {
         }
     }
 
+    @Test
+    void prefetchLimitsUnacknowledgedDeliveriesAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+                transport.declareTopology();
+
+                CountDownLatch firstDelivered = new CountDownLatch(1);
+                CountDownLatch secondDelivered = new CountDownLatch(1);
+                AtomicInteger deliveries = new AtomicInteger();
+                AtomicReference<TransportAcknowledgement> firstAcknowledgement = new AtomicReference<>();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    try {
+                        assertHeartbeatDelivery(delivery);
+                        int deliveryNumber = deliveries.incrementAndGet();
+                        if (deliveryNumber == 1) {
+                            delivery.acknowledgement().defer();
+                            firstAcknowledgement.set(delivery.acknowledgement());
+                            firstDelivered.countDown();
+                            return;
+                        }
+                        if (deliveryNumber == 2) {
+                            secondDelivered.countDown();
+                            return;
+                        }
+                        failure.compareAndSet(null,
+                                new AssertionError("Unexpected delivery count: " + deliveryNumber));
+                    } catch (Throwable assertionError) {
+                        failure.set(assertionError);
+                        firstDelivered.countDown();
+                        secondDelivered.countDown();
+                    }
+                });
+
+                publishHeartbeat(transport);
+                publishHeartbeat(transport);
+
+                awaitDelivery(firstDelivered, failure, "first prefetch-limited HEARTBEAT");
+                assertEquals(1, deliveries.get(), "Expected only one unacknowledged delivery with prefetch=1");
+                assertFalse(secondDelivered.await(500, TimeUnit.MILLISECONDS),
+                        "Second delivery should wait until the first delivery is acknowledged");
+
+                TransportAcknowledgement acknowledgement = firstAcknowledgement.get();
+                assertTrue(acknowledgement != null, "Expected first delivery acknowledgement");
+                acknowledgement.ack();
+
+                awaitDelivery(secondDelivered, failure, "second HEARTBEAT after acknowledgement");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                transport.cancel(consumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
     private static void assertHeartbeatDelivery(InboundTransportMessage delivery) {
         assertEquals(TransportRoute.HEARTBEAT, delivery.route());
         assertEquals("peer-live", delivery.fromNodeId());
@@ -182,6 +250,14 @@ class RabbitMqTransportLiveTest {
         assertEquals("job-live", message.getJobId());
         assertEquals("TEXT_ANALYSIS", message.getTaskType());
         assertTrue(message.isSuccessful());
+    }
+
+    private static void publishHeartbeat(RabbitMqTransport transport) throws Exception {
+        transport.publish(new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-live",
+                new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
+        ));
     }
 
     private static <T extends Message> T assertMessage(Class<T> type, InboundTransportMessage delivery) {
