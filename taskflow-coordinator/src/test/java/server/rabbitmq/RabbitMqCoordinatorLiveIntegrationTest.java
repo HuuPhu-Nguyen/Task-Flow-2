@@ -15,12 +15,15 @@ import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.scheduler.SchedulerConfig;
+import server.scheduler.SchedulerOutput;
 import server.scheduler.TaskScheduler;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
+import transport.TransportAcknowledgement;
 import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
+import transport.rabbitmq.RabbitMqRuntimeDefaults;
 import transport.rabbitmq.RabbitMqTopology;
 
 import java.time.Instant;
@@ -62,11 +65,17 @@ class RabbitMqCoordinatorLiveIntegrationTest {
 
                 BlockingQueue<MessageEnvelope> schedulerMailbox = new LinkedBlockingQueue<>();
                 InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+                CountDownLatch jobResultSendCompleted = new CountDownLatch(1);
+                AtomicReference<Throwable> jobResultSendFailure = new AtomicReference<>();
                 TaskScheduler scheduler = new TaskScheduler(
                         schedulerMailbox,
                         registry,
                         null,
-                        new RabbitMqSchedulerOutput(coordinatorTransport),
+                        new ObservedSchedulerOutput(
+                                new RabbitMqSchedulerOutput(coordinatorTransport),
+                                jobResultSendCompleted,
+                                jobResultSendFailure
+                        ),
                         SchedulerConfig.defaults()
                 );
                 schedulerThread = new Thread(scheduler, "rabbitmq-coordinator-live-test-scheduler");
@@ -79,9 +88,16 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                             () -> handleHeartbeat(registry, delivery, heartbeatRegistered));
                 });
                 coordinatorTransport.subscribe(TransportRoute.JOB_SUBMIT,
-                        delivery -> enqueueForScheduler(schedulerMailbox, delivery));
+                        delivery -> enqueueForScheduler(schedulerMailbox, delivery, null, null));
+                CountDownLatch taskResultAcknowledged = new CountDownLatch(1);
+                AtomicReference<Throwable> taskResultAckFailure = new AtomicReference<>();
                 coordinatorTransport.subscribe(TransportRoute.TASK_RESULT,
-                        delivery -> enqueueForScheduler(schedulerMailbox, delivery));
+                        delivery -> enqueueForScheduler(
+                                schedulerMailbox,
+                                delivery,
+                                taskResultAcknowledged,
+                                taskResultAckFailure
+                        ));
 
                 CountDownLatch taskAssigned = new CountDownLatch(1);
                 AtomicReference<TaskAssignMessage> assignment = new AtomicReference<>();
@@ -136,6 +152,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 ));
 
                 awaitDelivery(jobCompleted, resultFailure, "peer job result");
+                awaitDelivery(jobResultSendCompleted, jobResultSendFailure, "scheduler job-result send completion");
+                awaitDelivery(taskResultAcknowledged, taskResultAckFailure, "scheduler task-result acknowledgement");
                 assertEquals(List.of("processed-alpha"), jobResult.get().getResultsByTaskId());
                 assertQueueDrained(config, topology.queueName(TransportRoute.JOB_SUBMIT));
                 assertQueueDrained(config, topology.queueName(TransportRoute.TASK_RESULT));
@@ -150,14 +168,25 @@ class RabbitMqCoordinatorLiveIntegrationTest {
     }
 
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> schedulerMailbox,
-                                            InboundTransportMessage delivery) throws InterruptedException {
+                                            InboundTransportMessage delivery,
+                                            CountDownLatch acknowledged,
+                                            AtomicReference<Throwable> acknowledgementFailure)
+            throws InterruptedException {
         if (delivery.acknowledgement() != null) {
             delivery.acknowledgement().defer();
+        }
+        TransportAcknowledgement acknowledgement = delivery.acknowledgement();
+        if (acknowledgement != null && acknowledged != null) {
+            acknowledgement = new ObservedAcknowledgement(
+                    acknowledgement,
+                    acknowledged,
+                    acknowledgementFailure
+            );
         }
         schedulerMailbox.put(new MessageEnvelope(
                 delivery.message(),
                 delivery.fromNodeId(),
-                delivery.acknowledgement()
+                acknowledgement
         ));
     }
 
@@ -201,8 +230,9 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                                          AtomicReference<JobResultMessage> jobResult,
                                          InboundTransportMessage delivery) {
         assertEquals(TransportRoute.JOB_RESULT, delivery.route());
-        assertEquals("COORDINATOR", delivery.fromNodeId());
+        assertEquals(RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID, delivery.fromNodeId());
         JobResultMessage message = assertInstanceOf(JobResultMessage.class, delivery.message());
+        assertEquals("COORDINATOR", message.getNodeId());
         assertEquals(jobId, message.getJobId());
         assertEquals(TestTaskPlugin.TASK_TYPE, message.getTaskType());
         assertTrue(message.isSuccessful());
@@ -320,6 +350,86 @@ class RabbitMqCoordinatorLiveIntegrationTest {
              Channel channel = connection.createChannel()) {
             channel.exchangeDelete(exchangeName);
         } catch (Exception ignored) {
+        }
+    }
+
+    private static class ObservedSchedulerOutput implements SchedulerOutput {
+        private final SchedulerOutput delegate;
+        private final CountDownLatch jobResultSendCompleted;
+        private final AtomicReference<Throwable> jobResultSendFailure;
+
+        private ObservedSchedulerOutput(SchedulerOutput delegate,
+                                        CountDownLatch jobResultSendCompleted,
+                                        AtomicReference<Throwable> jobResultSendFailure) {
+            this.delegate = delegate;
+            this.jobResultSendCompleted = jobResultSendCompleted;
+            this.jobResultSendFailure = jobResultSendFailure;
+        }
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) throws Exception {
+            delegate.sendTask(peer, message);
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) throws Exception {
+            try {
+                boolean sent = delegate.sendJobResult(requesterNodeId, message);
+                if (!sent) {
+                    jobResultSendFailure.set(new AssertionError("RabbitMQ job-result publish returned false."));
+                }
+                return sent;
+            } catch (Exception e) {
+                jobResultSendFailure.set(e);
+                throw e;
+            } finally {
+                jobResultSendCompleted.countDown();
+            }
+        }
+    }
+
+    private static class ObservedAcknowledgement implements TransportAcknowledgement {
+        private final TransportAcknowledgement delegate;
+        private final CountDownLatch settled;
+        private final AtomicReference<Throwable> settlementFailure;
+
+        private ObservedAcknowledgement(TransportAcknowledgement delegate,
+                                        CountDownLatch settled,
+                                        AtomicReference<Throwable> settlementFailure) {
+            this.delegate = delegate;
+            this.settled = settled;
+            this.settlementFailure = settlementFailure;
+        }
+
+        @Override
+        public void ack() throws Exception {
+            settle(delegate::ack);
+        }
+
+        @Override
+        public void requeue() throws Exception {
+            settle(delegate::requeue);
+        }
+
+        @Override
+        public void reject() throws Exception {
+            settle(delegate::reject);
+        }
+
+        @Override
+        public void defer() {
+            delegate.defer();
+        }
+
+        private void settle(CheckedAssertion operation) throws Exception {
+            try {
+                operation.run();
+            } catch (Exception e) {
+                settlementFailure.set(e);
+                throw e;
+            } finally {
+                settled.countDown();
+            }
         }
     }
 }

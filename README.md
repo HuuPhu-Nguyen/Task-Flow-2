@@ -432,7 +432,7 @@ Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables a
 
 ```powershell
 .\mvnw.cmd -pl taskflow-transport-rabbitmq -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest test
-.\mvnw.cmd -pl taskflow-coordinator -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqCoordinatorLiveIntegrationTest test
+.\mvnw.cmd -pl taskflow-coordinator -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqCoordinatorLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test
 ```
 
 Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same tests.

@@ -8,6 +8,7 @@ import transport.BrokerTransport;
 import transport.OutboundTransportMessage;
 import transport.TransportMessageHandler;
 import transport.TransportRoute;
+import transport.rabbitmq.RabbitMqRuntimeDefaults;
 
 import java.util.List;
 
@@ -39,6 +40,7 @@ class RabbitMqSchedulerOutputTest {
 
         assertEquals(TransportRoute.TASK_ASSIGN, transport.peerRoute);
         assertEquals("peer-1", transport.peerNodeId);
+        assertEquals(RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID, transport.peerMessage.fromNodeId());
         TaskAssignMessage routed = assertInstanceOf(TaskAssignMessage.class, transport.peerMessage.message());
         assertEquals("peer-1", routed.getNodeId());
         assertEquals("task-1", routed.getTaskId());
@@ -64,7 +66,9 @@ class RabbitMqSchedulerOutputTest {
         assertTrue(sent);
         assertEquals(TransportRoute.JOB_RESULT, transport.peerRoute);
         assertEquals("requester-1", transport.peerNodeId);
-        assertInstanceOf(JobResultMessage.class, transport.peerMessage.message());
+        assertEquals(RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID, transport.peerMessage.fromNodeId());
+        JobResultMessage routed = assertInstanceOf(JobResultMessage.class, transport.peerMessage.message());
+        assertEquals("COORDINATOR", routed.getNodeId());
     }
 
     @Test
