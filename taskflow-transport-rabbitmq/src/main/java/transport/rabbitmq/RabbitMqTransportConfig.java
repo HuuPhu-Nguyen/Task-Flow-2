@@ -12,6 +12,7 @@ public record RabbitMqTransportConfig(
         String queuePrefix,
         boolean durable,
         int prefetchCount,
+        long publisherConfirmTimeoutMillis,
         boolean deadLetterEnabled,
         String deadLetterExchangeName,
         String deadLetterQueueName,
@@ -45,6 +46,9 @@ public record RabbitMqTransportConfig(
         if (prefetchCount <= 0) {
             throw new IllegalArgumentException("prefetchCount must be positive");
         }
+        if (publisherConfirmTimeoutMillis <= 0) {
+            throw new IllegalArgumentException("publisherConfirmTimeoutMillis must be positive");
+        }
         if (deadLetterEnabled) {
             if (deadLetterExchangeName == null || deadLetterExchangeName.isBlank()) {
                 throw new IllegalArgumentException("deadLetterExchangeName is required when dead lettering is enabled");
@@ -69,6 +73,7 @@ public record RabbitMqTransportConfig(
                 "taskflow",
                 true,
                 3,
+                5000L,
                 true,
                 "taskflow.dead-letter.exchange",
                 "taskflow.dead-letter",
@@ -93,6 +98,7 @@ public record RabbitMqTransportConfig(
                 value(env, "TASKFLOW_RABBITMQ_QUEUE_PREFIX", defaults.queuePrefix()),
                 booleanValue(env, "TASKFLOW_RABBITMQ_DURABLE", defaults.durable()),
                 intValue(env, "TASKFLOW_RABBITMQ_PREFETCH", defaults.prefetchCount()),
+                longValue(env, "TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS", defaults.publisherConfirmTimeoutMillis()),
                 booleanValue(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", defaults.deadLetterEnabled()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", defaults.deadLetterExchangeName()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", defaults.deadLetterQueueName()),
@@ -109,6 +115,11 @@ public record RabbitMqTransportConfig(
     private static int intValue(Map<String, String> env, String key, int fallback) {
         String value = env.get(key);
         return value == null || value.isBlank() ? fallback : Integer.parseInt(value);
+    }
+
+    private static long longValue(Map<String, String> env, String key, long fallback) {
+        String value = env.get(key);
+        return value == null || value.isBlank() ? fallback : Long.parseLong(value);
     }
 
     private static boolean booleanValue(Map<String, String> env, String key, boolean fallback) {

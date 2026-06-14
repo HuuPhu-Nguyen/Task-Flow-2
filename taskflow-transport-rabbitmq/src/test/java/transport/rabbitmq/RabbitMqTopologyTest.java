@@ -69,6 +69,7 @@ class RabbitMqTopologyTest {
                 defaults.queuePrefix(),
                 defaults.durable(),
                 defaults.prefetchCount(),
+                defaults.publisherConfirmTimeoutMillis(),
                 false,
                 "",
                 "",

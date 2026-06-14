@@ -83,7 +83,7 @@ The core peer registry uses a `transport.TransportConnection` abstraction instea
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. The SQLite schema is versioned, validates the runtime-supported schema version at startup, and enforces `tasks.job_id` references to existing `jobs.job_id` rows. Broker deliveries are acknowledged only after scheduler handling succeeds; transient failure-result send errors cause the delivery to be requeued.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
 ---
 
@@ -379,6 +379,7 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_QUEUE_PREFIX`
 - `TASKFLOW_RABBITMQ_DURABLE`
 - `TASKFLOW_RABBITMQ_PREFETCH`
+- `TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS`
 - `TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED`
 - `TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE`
 - `TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE`
@@ -386,7 +387,7 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE`
 - `TASKFLOW_PEER_ID`
 
-Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
 
 Run the RabbitMQ coordinator on Windows PowerShell:
 
@@ -421,7 +422,7 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
-RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. Peer-targeted coordinator publishes use RabbitMQ mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered.
+RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered.
 
 ### Live RabbitMQ Integration Tests
 
@@ -509,7 +510,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 ## Known Limitations
 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, and coordinator end-to-end job completion, but broker outage behavior, broker backpressure, and durable restart resume are not complete.
-- RabbitMQ mode is functional but transitional; peer-specific routing and dead-letter topology configuration are implemented, but the failure-path and recovery guarantees are not production-grade yet.
+- RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.

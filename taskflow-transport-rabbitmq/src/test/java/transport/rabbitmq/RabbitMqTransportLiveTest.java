@@ -257,6 +257,7 @@ class RabbitMqTransportLiveTest {
                 name,
                 false,
                 1,
+                base.publisherConfirmTimeoutMillis(),
                 true,
                 name + ".dlx",
                 name + ".dlq",

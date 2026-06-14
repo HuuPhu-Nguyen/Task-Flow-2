@@ -41,9 +41,42 @@ public class RabbitMqTransport implements BrokerTransport {
     }
 
     public RabbitMqTransport(RabbitMqTransportConfig config, RabbitMqMessageCodec codec) throws Exception {
+        this(config, codec, openResources(config));
+    }
+
+    private RabbitMqTransport(RabbitMqTransportConfig config,
+                              RabbitMqMessageCodec codec,
+                              RabbitMqConnectionResources resources) throws Exception {
+        this(config, codec, resources.connection(), resources.channel());
+    }
+
+    RabbitMqTransport(RabbitMqTransportConfig config,
+                      RabbitMqMessageCodec codec,
+                      Connection connection,
+                      Channel channel) throws Exception {
         this.config = config;
         this.topology = new RabbitMqTopology(config);
         this.codec = codec;
+        this.connection = connection;
+        this.channel = channel;
+        synchronized (channel) {
+            this.channel.basicQos(config.prefetchCount());
+            this.channel.confirmSelect();
+            this.channel.addReturnListener(this::handleReturnedMessage);
+        }
+        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} requeue_on_handler_failure={}",
+                config.host(),
+                config.port(),
+                config.virtualHost(),
+                config.exchangeName(),
+                config.durable(),
+                config.prefetchCount(),
+                config.publisherConfirmTimeoutMillis(),
+                config.deadLetterEnabled(),
+                config.requeueOnHandlerFailure());
+    }
+
+    private static RabbitMqConnectionResources openResources(RabbitMqTransportConfig config) throws Exception {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost(config.host());
         factory.setPort(config.port());
@@ -51,19 +84,17 @@ public class RabbitMqTransport implements BrokerTransport {
         factory.setPassword(config.password());
         factory.setVirtualHost(config.virtualHost());
         factory.setAutomaticRecoveryEnabled(true);
-        this.connection = factory.newConnection("taskflow-rabbitmq-transport");
-        this.channel = connection.createChannel();
-        this.channel.basicQos(config.prefetchCount());
-        this.channel.addReturnListener(this::handleReturnedMessage);
-        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} dead_letter_enabled={} requeue_on_handler_failure={}",
-                config.host(),
-                config.port(),
-                config.virtualHost(),
-                config.exchangeName(),
-                config.durable(),
-                config.prefetchCount(),
-                config.deadLetterEnabled(),
-                config.requeueOnHandlerFailure());
+        Connection connection = factory.newConnection("taskflow-rabbitmq-transport");
+        try {
+            return new RabbitMqConnectionResources(connection, connection.createChannel());
+        } catch (Exception e) {
+            try {
+                connection.close();
+            } catch (Exception closeFailure) {
+                e.addSuppressed(closeFailure);
+            }
+            throw e;
+        }
     }
 
     @Override
@@ -120,23 +151,53 @@ public class RabbitMqTransport implements BrokerTransport {
         if (mandatory) {
             mandatoryReturns.put(messageId, returned);
         }
-        synchronized (channel) {
-            channel.basicPublish(topology.exchangeName(), routingKey, mandatory, properties, body);
-        }
-        if (!mandatory) {
-            return true;
-        }
         try {
-            Return returnedMessage = returned.get(MANDATORY_RETURN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
-            LOGGER.warn("event=rabbitmq_publish_unroutable route={} routing_key={} reply_code={} reply_text={}",
+            synchronized (channel) {
+                channel.basicPublish(topology.exchangeName(), routingKey, mandatory, properties, body);
+                if (!waitForPublisherConfirm(message, routingKey)) {
+                    return false;
+                }
+            }
+            if (!mandatory) {
+                return true;
+            }
+            try {
+                Return returnedMessage = returned.get(MANDATORY_RETURN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+                LOGGER.warn("event=rabbitmq_publish_unroutable route={} routing_key={} reply_code={} reply_text={}",
+                        message.route().name(),
+                        returnedMessage.getRoutingKey(),
+                        returnedMessage.getReplyCode(),
+                        returnedMessage.getReplyText());
+                return false;
+            } catch (TimeoutException expectedWhenRouted) {
+                return true;
+            }
+        } finally {
+            if (mandatory) {
+                mandatoryReturns.remove(messageId);
+            }
+        }
+    }
+
+    private boolean waitForPublisherConfirm(OutboundTransportMessage message, String routingKey) throws IOException {
+        try {
+            boolean confirmed = channel.waitForConfirms(config.publisherConfirmTimeoutMillis());
+            if (!confirmed) {
+                LOGGER.warn("event=rabbitmq_publish_not_confirmed route={} routing_key={} timeout_ms={}",
+                        message.route().name(),
+                        routingKey,
+                        config.publisherConfirmTimeoutMillis());
+            }
+            return confirmed;
+        } catch (TimeoutException e) {
+            LOGGER.warn("event=rabbitmq_publish_confirm_timeout route={} routing_key={} timeout_ms={}",
                     message.route().name(),
-                    returnedMessage.getRoutingKey(),
-                    returnedMessage.getReplyCode(),
-                    returnedMessage.getReplyText());
+                    routingKey,
+                    config.publisherConfirmTimeoutMillis());
             return false;
-        } catch (TimeoutException expectedWhenRouted) {
-            mandatoryReturns.remove(messageId);
-            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while waiting for RabbitMQ publisher confirm", e);
         }
     }
 
@@ -256,4 +317,6 @@ public class RabbitMqTransport implements BrokerTransport {
             connection.close();
         }
     }
+
+    private record RabbitMqConnectionResources(Connection connection, Channel channel) {}
 }

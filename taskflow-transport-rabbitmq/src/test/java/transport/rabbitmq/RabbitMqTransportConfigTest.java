@@ -20,6 +20,7 @@ class RabbitMqTransportConfigTest {
         assertEquals("taskflow.exchange", config.exchangeName());
         assertEquals("taskflow", config.queuePrefix());
         assertEquals(3, config.prefetchCount());
+        assertEquals(5000L, config.publisherConfirmTimeoutMillis());
         assertTrue(config.deadLetterEnabled());
         assertEquals("taskflow.dead-letter.exchange", config.deadLetterExchangeName());
         assertEquals("taskflow.dead-letter", config.deadLetterQueueName());
@@ -39,6 +40,7 @@ class RabbitMqTransportConfigTest {
                 Map.entry("TASKFLOW_RABBITMQ_QUEUE_PREFIX", "tf"),
                 Map.entry("TASKFLOW_RABBITMQ_DURABLE", "false"),
                 Map.entry("TASKFLOW_RABBITMQ_PREFETCH", "9"),
+                Map.entry("TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS", "2000"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", "true"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", "tf.dlx"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", "tf.dlq"),
@@ -55,6 +57,7 @@ class RabbitMqTransportConfigTest {
         assertEquals("tf", config.queuePrefix());
         assertEquals(false, config.durable());
         assertEquals(9, config.prefetchCount());
+        assertEquals(2000L, config.publisherConfirmTimeoutMillis());
         assertEquals(true, config.deadLetterEnabled());
         assertEquals("tf.dlx", config.deadLetterExchangeName());
         assertEquals("tf.dlq", config.deadLetterQueueName());
@@ -76,6 +79,7 @@ class RabbitMqTransportConfigTest {
                 defaults.queuePrefix(),
                 defaults.durable(),
                 defaults.prefetchCount(),
+                defaults.publisherConfirmTimeoutMillis(),
                 true,
                 "",
                 defaults.deadLetterQueueName(),
@@ -92,5 +96,30 @@ class RabbitMqTransportConfigTest {
                 )));
 
         assertEquals("TASKFLOW_RABBITMQ_DURABLE must be true or false", error.getMessage());
+    }
+
+    @Test
+    void rejectsNonPositivePublisherConfirmTimeout() {
+        RabbitMqTransportConfig defaults = RabbitMqTransportConfig.localDefaults();
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () -> new RabbitMqTransportConfig(
+                defaults.host(),
+                defaults.port(),
+                defaults.username(),
+                defaults.password(),
+                defaults.virtualHost(),
+                defaults.exchangeName(),
+                defaults.queuePrefix(),
+                defaults.durable(),
+                defaults.prefetchCount(),
+                0L,
+                defaults.deadLetterEnabled(),
+                defaults.deadLetterExchangeName(),
+                defaults.deadLetterQueueName(),
+                defaults.deadLetterRoutingKey(),
+                defaults.requeueOnHandlerFailure()
+        ));
+
+        assertEquals("publisherConfirmTimeoutMillis must be positive", error.getMessage());
     }
 }

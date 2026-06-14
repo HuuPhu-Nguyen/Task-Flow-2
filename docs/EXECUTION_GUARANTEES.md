@@ -8,6 +8,16 @@ This document defines the current runtime guarantees of TaskFlow.
 - **Implication:** a task may run more than once in failure or timeout scenarios.
 - **Idempotency guard:** a task result is accepted only when it comes from the currently assigned peer and the task is in `ASSIGNED` state.
 
+## RabbitMQ Publication
+
+- RabbitMQ transport channels enable publisher-confirm mode during startup.
+- `publish` and `publishToPeer` return success only after RabbitMQ confirms the publish within `TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS`.
+- A broker nack or publisher-confirm timeout is reported as a failed publish.
+- Peer-targeted publishes also use RabbitMQ mandatory-return detection; an unroutable peer-targeted publish is reported as failed.
+- Failed task-assignment publishes are retried by scheduler dispatch logic.
+- Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
+- This is not a durable outbox: coordinator crash replay around publication is still not implemented.
+
 ## Task State Machine
 
 Each task moves through:
