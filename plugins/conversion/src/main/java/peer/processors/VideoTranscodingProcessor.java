@@ -35,19 +35,19 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
         if (input == null || input.base64Data() == null || input.base64Data().isBlank()) {
             throw new IOException("Video task has no input data.");
         }
-        
+
         // Decode input from Base64
         byte[] rawBytes = Base64.getDecoder().decode(input.base64Data());
         if (rawBytes.length == 0) {
             throw new IOException("Video task decoded to an empty file: " + input.fileName());
         }
-        
+
         // Create temp input file
         String inputFileName = SafeFileNames.sanitize(input.fileName());
         String inputExt = getExtension(inputFileName);
         File tempIn = File.createTempFile("video_in_", inputExt);
         File tempOut = File.createTempFile("video_out_", "." + targetFormat);
-        
+
         try {
             // Write input bytes to temp file
             try (FileOutputStream fos = new FileOutputStream(tempIn)) {
@@ -63,7 +63,7 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
 
             String newFileName = stripExtension(inputFileName) + "." + targetFormat;
             return new FilePayload(newFileName, outBase64);
-            
+
         } finally {
             deleteTempFile(tempIn);
             deleteTempFile(tempOut);
@@ -82,10 +82,10 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
     private void transcodeVideo(File input, File output, String targetFormat) throws Exception {
         // Map format names to FFmpeg codec names
         String formatName = getFormatName(targetFormat);
-        
+
         try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(input)) {
             grabber.start();
-            
+
             int width = grabber.getImageWidth();
             int height = grabber.getImageHeight();
             if (width <= 0 || height <= 0) {
@@ -96,10 +96,10 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             if (Double.isNaN(frameRate) || frameRate <= 0) {
                 frameRate = 30.0;
             }
-            
+
             try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(
                     output.getAbsolutePath(), width, height)) {
-                
+
                 recorder.setFormat(formatName);
                 recorder.setVideoCodec(getVideoCodec(targetFormat));
                 recorder.setPixelFormat(AV_PIX_FMT_YUV420P);
@@ -108,15 +108,15 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
                 recorder.setVideoOption("preset", "medium");
                 recorder.setVideoOption("crf", "23");
                 recorder.start();
-                
+
                 Frame frame;
                 while ((frame = grabber.grabImage()) != null) {
                     recorder.record(frame);
                 }
-                
+
                 recorder.stop();
             }
-            
+
             grabber.stop();
         }
     }

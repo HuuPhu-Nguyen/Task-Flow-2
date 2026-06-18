@@ -39,7 +39,7 @@ public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, 
 
         for (int i = 0; i < payloads.size(); i++) {
             String taskId = "task-" + jobId + "-" + i;
-            
+
             // Convert the generic Object back to FilePayload
             Object rawData = payloads.get(i);
             FilePayload filePayload = gson.fromJson(gson.toJson(rawData), FilePayload.class);

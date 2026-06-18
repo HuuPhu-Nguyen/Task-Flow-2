@@ -539,7 +539,7 @@ This project is designed to demonstrate practical distributed systems concepts, 
 - task orchestration
 - concurrency control
 - fault tolerance
-- network-based computation  
+- network-based computation
 
 ## How to Run
 
