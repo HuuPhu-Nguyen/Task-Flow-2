@@ -31,11 +31,8 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Ensure Maven wrapper is executable
-        run: chmod +x ./mvnw
-
       - name: Run full test suite
-        run: ./mvnw --batch-mode --no-transfer-progress test
+        run: bash ./mvnw --batch-mode --no-transfer-progress test
         env:
           TASKFLOW_RABBITMQ_LIVE_TEST: "false"
 
