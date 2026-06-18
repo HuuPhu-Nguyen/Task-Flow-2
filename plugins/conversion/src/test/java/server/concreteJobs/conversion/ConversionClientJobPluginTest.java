@@ -3,7 +3,6 @@ package server.concreteJobs.conversion;
 import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import protocol.FilePayload;
 
 import java.nio.file.Files;
 import java.nio.file.Path;

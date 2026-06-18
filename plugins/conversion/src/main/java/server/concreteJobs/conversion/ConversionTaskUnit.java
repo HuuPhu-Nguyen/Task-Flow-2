@@ -1,6 +1,5 @@
 package server.concreteJobs.conversion;
 
-import protocol.FilePayload;
 import server.job.TaskUnit;
 
 public class ConversionTaskUnit extends TaskUnit<FilePayload> {

@@ -3,6 +3,10 @@ package transport.rabbitmq;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
@@ -13,7 +17,15 @@ import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -30,6 +42,11 @@ import static org.junit.jupiter.api.Assertions.fail;
 class RabbitMqTransportLiveTest {
     private static final String LIVE_TEST_PROPERTY = "taskflow.rabbitmq.live";
     private static final String LIVE_TEST_ENV = "TASKFLOW_RABBITMQ_LIVE_TEST";
+    private static final String MANAGEMENT_URL_ENV = "TASKFLOW_RABBITMQ_MANAGEMENT_URL";
+    private static final String MANAGEMENT_USERNAME_ENV = "TASKFLOW_RABBITMQ_MANAGEMENT_USERNAME";
+    private static final String MANAGEMENT_PASSWORD_ENV = "TASKFLOW_RABBITMQ_MANAGEMENT_PASSWORD";
+    private static final String TRANSPORT_CONNECTION_NAME = "taskflow-rabbitmq-transport";
+    private static final Duration MANAGEMENT_REQUEST_TIMEOUT = Duration.ofSeconds(5);
 
     @Test
     void publishesConsumesAcknowledgesSharedRouteAndConsumesPeerRouteAgainstLiveBroker() throws Exception {
@@ -85,6 +102,66 @@ class RabbitMqTransportLiveTest {
                 );
                 awaitDelivery(jobResultReceived, jobResultFailure, "peer JOB_RESULT");
                 transport.cancel(resultConsumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
+    @Test
+    void recoversConsumerAndPublisherAfterBrokerSideConnectionDropAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+        RabbitMqManagement management = RabbitMqManagement.fromEnvironment(config);
+        Assumptions.assumeTrue(management.isAvailable(),
+                "RabbitMQ management API is required for broker-side connection-drop recovery coverage.");
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+                transport.declareTopology();
+
+                CountDownLatch firstDelivered = new CountDownLatch(1);
+                CountDownLatch recoveredDelivery = new CountDownLatch(1);
+                AtomicInteger deliveries = new AtomicInteger();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    try {
+                        assertHeartbeatDelivery(delivery);
+                        int deliveryNumber = deliveries.incrementAndGet();
+                        if (deliveryNumber == 1) {
+                            firstDelivered.countDown();
+                            return;
+                        }
+                        if (deliveryNumber == 2) {
+                            recoveredDelivery.countDown();
+                            return;
+                        }
+                        failure.compareAndSet(null,
+                                new AssertionError("Unexpected recovered delivery count: " + deliveryNumber));
+                    } catch (Throwable assertionError) {
+                        failure.set(assertionError);
+                        firstDelivered.countDown();
+                        recoveredDelivery.countDown();
+                    }
+                });
+
+                publishHeartbeat(transport);
+                awaitDelivery(firstDelivered, failure, "initial HEARTBEAT before broker-side connection drop");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+
+                management.closeConnectionByClientProvidedName(TRANSPORT_CONNECTION_NAME, config.virtualHost());
+                publishHeartbeatWithRecoveryRetry(transport);
+
+                awaitDelivery(recoveredDelivery, failure, "HEARTBEAT after RabbitMQ client recovery");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                transport.cancel(consumer);
             }
         } finally {
             cleanup(config, topology, "peer-live");
@@ -252,12 +329,33 @@ class RabbitMqTransportLiveTest {
         assertTrue(message.isSuccessful());
     }
 
-    private static void publishHeartbeat(RabbitMqTransport transport) throws Exception {
-        transport.publish(new OutboundTransportMessage(
+    private static boolean publishHeartbeat(RabbitMqTransport transport) throws Exception {
+        return transport.publish(new OutboundTransportMessage(
                 TransportRoute.HEARTBEAT,
                 "peer-live",
                 new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
         ));
+    }
+
+    private static void publishHeartbeatWithRecoveryRetry(RabbitMqTransport transport) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        Throwable lastFailure = null;
+        while (System.nanoTime() < deadline) {
+            try {
+                if (publishHeartbeat(transport)) {
+                    return;
+                }
+                lastFailure = new AssertionError("RabbitMQ publish returned false during recovery");
+            } catch (Throwable failure) {
+                lastFailure = failure;
+            }
+            Thread.sleep(500);
+        }
+        AssertionError error = new AssertionError("RabbitMQ transport did not recover in time to publish again");
+        if (lastFailure != null) {
+            error.addSuppressed(lastFailure);
+        }
+        throw error;
     }
 
     private static <T extends Message> T assertMessage(Class<T> type, InboundTransportMessage delivery) {
@@ -386,6 +484,128 @@ class RabbitMqTransportLiveTest {
              Channel channel = connection.createChannel()) {
             channel.exchangeDelete(exchangeName);
         } catch (Exception ignored) {
+        }
+    }
+
+    private static final class RabbitMqManagement {
+        private final HttpClient client;
+        private final String baseUrl;
+        private final String authorization;
+
+        private RabbitMqManagement(String baseUrl, String username, String password) {
+            this.client = HttpClient.newBuilder()
+                    .connectTimeout(MANAGEMENT_REQUEST_TIMEOUT)
+                    .build();
+            this.baseUrl = trimTrailingSlash(baseUrl);
+            String credentials = username + ":" + password;
+            this.authorization = "Basic " + Base64.getEncoder()
+                    .encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
+        }
+
+        private static RabbitMqManagement fromEnvironment(RabbitMqTransportConfig config) {
+            String baseUrl = value(
+                    MANAGEMENT_URL_ENV,
+                    "http://" + config.host() + ":15672"
+            );
+            String username = value(MANAGEMENT_USERNAME_ENV, config.username());
+            String password = value(MANAGEMENT_PASSWORD_ENV, config.password());
+            return new RabbitMqManagement(baseUrl, username, password);
+        }
+
+        private boolean isAvailable() {
+            try {
+                HttpResponse<String> response = client.send(
+                        request("/api/overview").GET().build(),
+                        HttpResponse.BodyHandlers.ofString()
+                );
+                return response.statusCode() == 200;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private void closeConnectionByClientProvidedName(String clientProvidedName, String virtualHost) throws Exception {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (System.nanoTime() < deadline) {
+                String connectionName = findConnectionName(clientProvidedName, virtualHost);
+                if (connectionName != null) {
+                    closeConnection(connectionName);
+                    return;
+                }
+                Thread.sleep(100);
+            }
+            fail("RabbitMQ management API did not report transport connection: " + clientProvidedName);
+        }
+
+        private String findConnectionName(String clientProvidedName, String virtualHost) throws Exception {
+            HttpResponse<String> response = client.send(
+                    request("/api/connections").GET().build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+            if (response.statusCode() != 200) {
+                throw new IllegalStateException("RabbitMQ management connection list failed with HTTP "
+                        + response.statusCode());
+            }
+
+            JsonArray connections = JsonParser.parseString(response.body()).getAsJsonArray();
+            for (JsonElement element : connections) {
+                JsonObject connection = element.getAsJsonObject();
+                if (!virtualHost.equals(stringField(connection, "vhost"))) {
+                    continue;
+                }
+                JsonObject clientProperties = objectField(connection, "client_properties");
+                if (clientProperties == null
+                        || !clientProvidedName.equals(stringField(clientProperties, "connection_name"))) {
+                    continue;
+                }
+                return stringField(connection, "name");
+            }
+            return null;
+        }
+
+        private void closeConnection(String connectionName) throws Exception {
+            String encodedName = URLEncoder.encode(connectionName, StandardCharsets.UTF_8)
+                    .replace("+", "%20");
+            HttpResponse<String> response = client.send(
+                    request("/api/connections/" + encodedName)
+                            .header("X-Reason", "TaskFlow live recovery test")
+                            .DELETE()
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString()
+            );
+            if (response.statusCode() != 204) {
+                throw new IllegalStateException("RabbitMQ management connection close failed with HTTP "
+                        + response.statusCode());
+            }
+        }
+
+        private HttpRequest.Builder request(String path) {
+            return HttpRequest.newBuilder(URI.create(baseUrl + path))
+                    .timeout(MANAGEMENT_REQUEST_TIMEOUT)
+                    .header("Authorization", authorization);
+        }
+
+        private static JsonObject objectField(JsonObject object, String field) {
+            JsonElement value = object.get(field);
+            return value == null || !value.isJsonObject() ? null : value.getAsJsonObject();
+        }
+
+        private static String stringField(JsonObject object, String field) {
+            JsonElement value = object.get(field);
+            return value == null || value.isJsonNull() ? null : value.getAsString();
+        }
+
+        private static String value(String envKey, String fallback) {
+            String value = System.getenv(envKey);
+            return value == null || value.isBlank() ? fallback : value;
+        }
+
+        private static String trimTrailingSlash(String value) {
+            String trimmed = value.strip();
+            while (trimmed.endsWith("/")) {
+                trimmed = trimmed.substring(0, trimmed.length() - 1);
+            }
+            return trimmed;
         }
     }
 }

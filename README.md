@@ -1,5 +1,7 @@
 # TaskFlow
 
+[![CI](https://github.com/HuuPhu-Nguyen/Task-Flow-2/actions/workflows/ci.yml/badge.svg)](https://github.com/HuuPhu-Nguyen/Task-Flow-2/actions/workflows/ci.yml)
+
 TaskFlow is a Java 21 coordinated peer-to-peer task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
 
 The project is designed to demonstrate production-relevant distributed systems work: task orchestration, peer scheduling, retries, timeout handling, duplicate-result rejection, broker transport design, and plugin-based extensibility.
@@ -70,7 +72,7 @@ TaskFlow is now organized as a Maven reactor:
 
 - `taskflow-spi` - protocol messages, job abstractions, and coordinator, peer, and client plugin contracts
 - `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
-- `plugins/conversion` - image/video client payload, job, and peer-side processor implementations discovered through `ServiceLoader`
+- `plugins/conversion` - image/video client payload, plugin-owned file payload model, job, and peer-side processor implementations discovered through `ServiceLoader`
 - `plugins/text` - text-analysis example plugin using custom non-`FilePayload` payload/result models
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
@@ -192,7 +194,7 @@ Currently implemented job types:
 
 **Text analysis features:**
 - Reads TXT, Markdown, CSV, and log files as UTF-8 text
-- Uses custom `TextAnalysisPayload` and `TextAnalysisResult` models instead of `FilePayload`
+- Uses custom `TextAnalysisPayload` and `TextAnalysisResult` models instead of the conversion plugin's `FilePayload`
 - Counts lines, words, characters, and unique words per document
 - Saves aggregated CSV results through the text client plugin
 
@@ -437,7 +439,9 @@ Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables a
 
 Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same tests.
 
-The transport live tests create unique non-durable exchanges and queues, validate shared-route delivery, validate peer-specific delivery, verify shared-route acknowledgement drains the queue, verify handler-failure requeue behavior, verify reject-to-dead-letter behavior, verify `prefetch=1` limits unacknowledged deliveries, and clean up their broker resources.
+The transport live tests create unique non-durable exchanges and queues, validate shared-route delivery, validate peer-specific delivery, verify shared-route acknowledgement drains the queue, verify handler-failure requeue behavior, verify reject-to-dead-letter behavior, verify `prefetch=1` limits unacknowledged deliveries, verify client recovery after a broker-side connection close, and clean up their broker resources.
+
+The connection-recovery live test uses the RabbitMQ management API to close the test transport connection from the broker side. It defaults to `http://<TASKFLOW_RABBITMQ_HOST>:15672` with the same RabbitMQ username and password. Override it with `TASKFLOW_RABBITMQ_MANAGEMENT_URL`, `TASKFLOW_RABBITMQ_MANAGEMENT_USERNAME`, and `TASKFLOW_RABBITMQ_MANAGEMENT_PASSWORD` when your broker exposes management elsewhere. If the management API is unavailable, that recovery test is skipped while the other live tests can still run.
 
 The coordinator live test submits a test job through the broker, heartbeat-registers a capable peer, verifies peer-specific task assignment, publishes a peer task result, receives a peer-specific `JOB_RESULT`, and verifies the shared job/result queues drain.
 
@@ -509,7 +513,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 ## Known Limitations
 
-- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, and coordinator end-to-end job completion, but broker outage behavior, higher-level scheduler/peer backpressure policy, and durable restart resume are not complete.
+- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion, but full broker outage/restart behavior, higher-level scheduler/peer backpressure policy, and durable restart resume are not complete.
 - RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Video transcoding currently records video frames only; audio preservation is a planned improvement.

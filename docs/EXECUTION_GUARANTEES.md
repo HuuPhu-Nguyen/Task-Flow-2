@@ -18,6 +18,13 @@ This document defines the current runtime guarantees of TaskFlow.
 - Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
 - This is not a durable outbox: coordinator crash replay around publication is still not implemented.
 
+## RabbitMQ Connection Recovery
+
+- RabbitMQ client automatic connection recovery is enabled for transport connections.
+- Opt-in live transport coverage verifies that an existing transport can consume and publish again after the broker closes its connection through the RabbitMQ management API.
+- This does not guarantee durable replay for messages that were not broker-confirmed before an outage.
+- This does not recover coordinator crashes around publication; a durable outbox/replay model is still not implemented.
+
 ## RabbitMQ Consumption and Backpressure
 
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.

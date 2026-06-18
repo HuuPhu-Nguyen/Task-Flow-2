@@ -1,7 +1,6 @@
 package transport.rabbitmq;
 
 import org.junit.jupiter.api.Test;
-import protocol.FilePayload;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
 import protocol.PongMessage;
@@ -23,7 +22,7 @@ class RabbitMqMessageCodecTest {
     @Test
     void roundTripsJobSubmitMessages() {
         List<Object> payloads = new ArrayList<>();
-        payloads.add(new FilePayload("input.png", "abc123"));
+        payloads.add(new TestPayload("input.png", "abc123"));
         JobSubmitMessage message = new JobSubmitMessage(
                 "client-1",
                 "2026-06-02T00:00:00Z",
@@ -56,7 +55,7 @@ class RabbitMqMessageCodecTest {
                 "task-1",
                 "job-1",
                 "IMAGE_CONVERSION",
-                new FilePayload("input.png", "abc123"),
+                new TestPayload("input.png", "abc123"),
                 "png"
         );
 
@@ -93,6 +92,9 @@ class RabbitMqMessageCodecTest {
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {
         return codec.decode(codec.encode(outbound), outbound.route(), new NoopAcknowledgement());
+    }
+
+    private record TestPayload(String fileName, String base64Data) {
     }
 
     private static class NoopAcknowledgement implements TransportAcknowledgement {

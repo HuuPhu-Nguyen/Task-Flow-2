@@ -7,9 +7,9 @@ import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
 import peer.engine.TaskProcessor;
-import protocol.FilePayload;
 import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
+import server.concreteJobs.conversion.FilePayload;
 
 import java.io.*;
 import java.nio.file.Files;

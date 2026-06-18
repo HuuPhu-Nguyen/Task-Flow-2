@@ -5,9 +5,9 @@ import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
 import peer.engine.TaskProcessor;
-import protocol.FilePayload;
 import protocol.SafeFileNames;
 import protocol.TaskAssignMessage;
+import server.concreteJobs.conversion.FilePayload;
 
 import javax.imageio.ImageIO;
 import java.awt.*;

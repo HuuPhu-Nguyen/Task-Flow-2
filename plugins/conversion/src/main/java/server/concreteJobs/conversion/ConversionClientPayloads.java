@@ -1,7 +1,6 @@
 package server.concreteJobs.conversion;
 
 import com.google.gson.Gson;
-import protocol.FilePayload;
 import protocol.SafeFileNames;
 
 import java.io.IOException;
