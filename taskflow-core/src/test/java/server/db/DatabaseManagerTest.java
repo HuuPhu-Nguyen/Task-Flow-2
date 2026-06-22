@@ -102,6 +102,74 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void taskStatusUpdatesRejectInvalidTransitions() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-transition-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-completed", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-completed", "job-completed");
+            assertFalse(db.markTaskCompleted("task-completed", 100L, 10L));
+            assertTrue(db.markTaskAssigned("task-completed", "peer-1", 100L));
+            assertTrue(db.markTaskCompleted("task-completed", 200L, 100L));
+            assertFalse(db.markTaskRetried("task-completed", 1));
+            assertFalse(db.markTaskFailed("task-completed"));
+            assertFalse(db.markTaskAssigned("task-completed", "peer-2", 300L));
+
+            DatabaseManager.TaskRecord completed = db.getTasksForJob("job-completed").getFirst();
+            assertEquals("COMPLETED", completed.status());
+            assertEquals("peer-1", completed.assignedPeerId());
+            assertEquals(200L, completed.completedAt());
+            assertEquals(100L, completed.durationMs());
+            assertEquals(0, completed.retryCount());
+
+            db.insertJob("job-failed", "TEST_TASK", "requester-2", 1);
+            db.insertTask("task-failed", "job-failed");
+            assertTrue(db.markTaskFailed("task-failed"));
+            assertFalse(db.markTaskAssigned("task-failed", "peer-3", 400L));
+            assertFalse(db.markTaskCompleted("task-failed", 500L, 100L));
+            assertFalse(db.markTaskRetried("task-failed", 1));
+
+            DatabaseManager.TaskRecord failed = db.getTasksForJob("job-failed").getFirst();
+            assertEquals("FAILED", failed.status());
+            assertNull(failed.assignedPeerId());
+            assertEquals(0, failed.retryCount());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void jobStatusUpdatesRejectTerminalOverwrites() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-job-transition-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-completed", "TEST_TASK", "requester-1", 1);
+            assertTrue(db.markJobCompleted("job-completed"));
+            assertFalse(db.markJobFailed("job-completed"));
+
+            DatabaseManager.JobRecord completed = db.getJobHistory().stream()
+                    .filter(job -> job.jobId().equals("job-completed"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("COMPLETED", completed.status());
+
+            db.insertJob("job-failed", "TEST_TASK", "requester-2", 1);
+            assertTrue(db.markJobFailed("job-failed"));
+            assertFalse(db.markJobCompleted("job-failed"));
+
+            DatabaseManager.JobRecord failed = db.getJobHistory().stream()
+                    .filter(job -> job.jobId().equals("job-failed"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals("FAILED", failed.status());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void migratesLegacyTasksTableToForeignKeySchema() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-legacy-migration-test.db");
         createLegacyDatabaseWithoutTaskForeignKey(dbPath);
@@ -142,6 +210,7 @@ class DatabaseManagerTest {
 
             db.insertJob("completed-job", "TEST_TASK", "requester-2", 1);
             db.insertTask("completed-job-task", "completed-job");
+            db.markTaskAssigned("completed-job-task", "peer-3", 220L);
             db.markTaskCompleted("completed-job-task", 250L, 50L);
             db.markJobCompleted("completed-job");
 

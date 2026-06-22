@@ -324,7 +324,13 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
-        String sql = "UPDATE tasks SET status='ASSIGNED', assigned_peer_id=?, started_at=? WHERE task_id=?";
+        String sql = """
+                UPDATE tasks
+                SET status='ASSIGNED',
+                    assigned_peer_id=?,
+                    started_at=?
+                WHERE task_id=? AND status='PENDING'
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, peerId);
             ps.setLong(2, startedAt);
@@ -337,7 +343,13 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
-        String sql = "UPDATE tasks SET status='COMPLETED', completed_at=?, duration_ms=? WHERE task_id=?";
+        String sql = """
+                UPDATE tasks
+                SET status='COMPLETED',
+                    completed_at=?,
+                    duration_ms=?
+                WHERE task_id=? AND status='ASSIGNED'
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, completedAt);
             ps.setLong(2, durationMs);
@@ -358,7 +370,7 @@ public class DatabaseManager implements JobStateStore {
                     completed_at=NULL,
                     duration_ms=NULL,
                     retry_count=?
-                WHERE task_id=?
+                WHERE task_id=? AND status='ASSIGNED'
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, retryCount);
@@ -371,7 +383,12 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markTaskFailed(String taskId) {
-        String sql = "UPDATE tasks SET status='FAILED', completed_at=? WHERE task_id=?";
+        String sql = """
+                UPDATE tasks
+                SET status='FAILED',
+                    completed_at=?
+                WHERE task_id=? AND status NOT IN ('COMPLETED', 'FAILED')
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
             ps.setString(2, taskId);
@@ -383,7 +400,7 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markJobCompleted(String jobId) {
-        String sql = "UPDATE jobs SET status='COMPLETED', completed_at=? WHERE job_id=?";
+        String sql = "UPDATE jobs SET status='COMPLETED', completed_at=? WHERE job_id=? AND status='RUNNING'";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
             ps.setString(2, jobId);
@@ -395,7 +412,7 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markJobFailed(String jobId) {
-        String sql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=?";
+        String sql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=? AND status='RUNNING'";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
             ps.setString(2, jobId);

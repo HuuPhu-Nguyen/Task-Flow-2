@@ -42,6 +42,7 @@ Each task moves through:
 - `COMPLETED` or `FAILED` (terminal)
 
 Invalid/stale transitions are ignored (for example duplicate success from a peer that is no longer assigned).
+The SQLite state store also guards these persisted transitions so terminal task/job rows are not overwritten by later updates.
 
 ## Retry and Timeout Policy
 
