@@ -350,7 +350,16 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markTaskRetried(String taskId, int retryCount) {
-        String sql = "UPDATE tasks SET status='PENDING', retry_count=? WHERE task_id=?";
+        String sql = """
+                UPDATE tasks
+                SET status='PENDING',
+                    assigned_peer_id=NULL,
+                    started_at=NULL,
+                    completed_at=NULL,
+                    duration_ms=NULL,
+                    retry_count=?
+                WHERE task_id=?
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setInt(1, retryCount);
             ps.setString(2, taskId);

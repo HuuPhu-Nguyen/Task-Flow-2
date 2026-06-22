@@ -51,6 +51,7 @@ Invalid/stale transitions are ignored (for example duplicate success from a peer
   - the attempt is counted as failed,
   - the task is retried if attempts remain,
   - otherwise the task moves to terminal `FAILED`.
+- When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment/timing fields are cleared, and `retry_count` is incremented.
 
 ## Capability-Aware Assignment
 

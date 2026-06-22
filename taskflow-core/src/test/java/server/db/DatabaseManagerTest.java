@@ -13,6 +13,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -69,6 +70,32 @@ class DatabaseManagerTest {
             assertFalse(db.insertTask("orphan-task", "missing-job"));
             assertEquals(0, db.getTasksForJob("missing-job").size());
             assertTrue(tasksTableReferencesJobs(dbPath));
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void retriedTaskRowsClearPreviousAssignmentState() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-retry-state-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-retry", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-retry", "job-retry");
+            db.markTaskAssigned("task-retry", "peer-1", 123L);
+
+            assertTrue(db.markTaskRetried("task-retry", 1));
+
+            List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-retry");
+            assertEquals(1, tasks.size());
+            DatabaseManager.TaskRecord task = tasks.getFirst();
+            assertEquals("PENDING", task.status());
+            assertEquals(1, task.retryCount());
+            assertNull(task.assignedPeerId());
+            assertEquals(0L, task.startedAt());
+            assertEquals(0L, task.completedAt());
+            assertEquals(0L, task.durationMs());
         } finally {
             db.close();
         }
