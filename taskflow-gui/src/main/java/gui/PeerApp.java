@@ -2,7 +2,6 @@ package gui;
 
 import client.ClientJobPlugin;
 import client.ClientJobPlugins;
-import com.google.gson.Gson;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.beans.property.SimpleIntegerProperty;
@@ -17,39 +16,28 @@ import javafx.scene.layout.*;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
-import messaging.MessageDispatcher;
-import messaging.MessageFactory;
-import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import peer.PeerNode;
-import peer.engine.PeerExecutionEngine;
-import protocol.*;
-import server.db.DatabaseManager;
+import protocol.JobResultMessage;
 
 import java.io.*;
-import java.net.Socket;
 import java.nio.file.*;
-import java.sql.SQLException;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
 
     private Stage window;
-    private PeerExecutionEngine engine;
-    private final Gson gson = new Gson();
+    private GuiWorkerRuntime workerRuntime;
+    private JobSubmissionClient jobSubmissionClient;
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    // Shared output stream for thread-safe communication
-    private PeerNode backendNode;
-    private volatile NetworkConnection networkConnection;
+    private volatile CoordinatorConnection networkConnection;
     private volatile Task<?> activeBackgroundTask;
     private volatile boolean stopping;
 
@@ -57,7 +45,7 @@ public class PeerApp extends Application {
     private String currentOutPath;
     private String sessionId;
     private TilePane gallery;
-    private DatabaseManager historyDb;
+    private GuiHistoryStore historyStore;
     private List<ClientJobPlugin> clientJobPlugins = List.of();
     private Map<String, ClientJobPlugin> clientJobPluginsByType = Map.of();
 
@@ -71,10 +59,10 @@ public class PeerApp extends Application {
 
             FileUtils.prepareDirectories(currentInPath, currentOutPath);
 
-            // Initialize Engine with the same unique ID
-            engine = new PeerExecutionEngine(sessionId);
+            workerRuntime = new PeerEngineWorkerRuntime(sessionId);
+            jobSubmissionClient = new TcpJobSubmissionClient(sessionId);
             LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
-                    sessionId, engine.getRegisteredTaskTypes());
+                    sessionId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
             clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
@@ -197,9 +185,9 @@ public class PeerApp extends Application {
 
         startBtn.setOnAction(e -> {
             try {
-                NetworkConnection connection = networkConnection;
+                CoordinatorConnection connection = networkConnection;
                 PrintWriter out = connection == null ? null : connection.writer();
-                if (out == null) {
+                if (connection == null || out == null || !connection.isOpen()) {
                     new Alert(Alert.AlertType.ERROR, "Not connected to the coordinator yet.").show();
                     return;
                 }
@@ -300,7 +288,7 @@ public class PeerApp extends Application {
     }
 
     private Task<GuiJobSubmitter.SubmittedJob> createSubmitJobTask(
-            NetworkConnection connection,
+            CoordinatorConnection connection,
             PrintWriter out,
             ClientJobPlugin plugin,
             List<Path> inputPaths,
@@ -316,7 +304,7 @@ public class PeerApp extends Application {
 
                 updateMessage("Submitting job...");
                 GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
-                        backendNode,
+                        jobSubmissionClient,
                         plugin,
                         payloads,
                         targetFormat,
@@ -462,11 +450,12 @@ public class PeerApp extends Application {
     }
 
     private Node buildHistoryPane() {
-        // Open (or reuse) a read connection to the shared DB file
         try {
-            if (historyDb == null) historyDb = new DatabaseManager();
-        } catch (SQLException e) {
-            Label err = new Label("Database unavailable: " + e.getMessage());
+            if (historyStore == null) {
+                historyStore = new DatabaseGuiHistoryStore();
+            }
+        } catch (Exception e) {
+            Label err = new Label("Job history unavailable: " + e.getMessage());
             err.setPadding(new Insets(20));
             return err;
         }
@@ -474,26 +463,26 @@ public class PeerApp extends Application {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
 
         // ---- Jobs table ----
-        TableView<DatabaseManager.JobRecord> jobTable = new TableView<>();
+        TableView<GuiHistoryStore.JobRecord> jobTable = new TableView<>();
         jobTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         jobTable.setPlaceholder(new Label("No jobs recorded yet. Run the coordinator and submit a job."));
 
-        TableColumn<DatabaseManager.JobRecord, String> colType = new TableColumn<>("Type");
+        TableColumn<GuiHistoryStore.JobRecord, String> colType = new TableColumn<>("Type");
         colType.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().taskType()));
 
-        TableColumn<DatabaseManager.JobRecord, String> colStatus = new TableColumn<>("Status");
+        TableColumn<GuiHistoryStore.JobRecord, String> colStatus = new TableColumn<>("Status");
         colStatus.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().status()));
 
-        TableColumn<DatabaseManager.JobRecord, Number> colFiles = new TableColumn<>("Files");
+        TableColumn<GuiHistoryStore.JobRecord, Number> colFiles = new TableColumn<>("Files");
         colFiles.setCellValueFactory(d -> new SimpleIntegerProperty(d.getValue().fileCount()));
         colFiles.setMaxWidth(60);
 
-        TableColumn<DatabaseManager.JobRecord, String> colSubmitted = new TableColumn<>("Submitted");
+        TableColumn<GuiHistoryStore.JobRecord, String> colSubmitted = new TableColumn<>("Submitted");
         colSubmitted.setCellValueFactory(d -> new SimpleStringProperty(
             d.getValue().submittedAt() == 0 ? "-" : fmt.format(Instant.ofEpochMilli(d.getValue().submittedAt()))
         ));
 
-        TableColumn<DatabaseManager.JobRecord, String> colDuration = new TableColumn<>("Duration");
+        TableColumn<GuiHistoryStore.JobRecord, String> colDuration = new TableColumn<>("Duration");
         colDuration.setCellValueFactory(d -> {
             long s = d.getValue().submittedAt();
             long c = d.getValue().completedAt();
@@ -501,7 +490,7 @@ public class PeerApp extends Application {
             return new SimpleStringProperty(val);
         });
 
-        TableColumn<DatabaseManager.JobRecord, String> colJobId = new TableColumn<>("Job ID");
+        TableColumn<GuiHistoryStore.JobRecord, String> colJobId = new TableColumn<>("Job ID");
         colJobId.setCellValueFactory(d -> {
             String id = d.getValue().jobId();
             return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
@@ -515,28 +504,28 @@ public class PeerApp extends Application {
         jobTable.getColumns().add(colJobId);
 
         // ---- Tasks table ----
-        TableView<DatabaseManager.TaskRecord> taskTable = new TableView<>();
+        TableView<GuiHistoryStore.TaskRecord> taskTable = new TableView<>();
         taskTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
         taskTable.setPlaceholder(new Label("Select a job above to see its tasks."));
 
-        TableColumn<DatabaseManager.TaskRecord, String> tColPeer = new TableColumn<>("Peer");
+        TableColumn<GuiHistoryStore.TaskRecord, String> tColPeer = new TableColumn<>("Peer");
         tColPeer.setCellValueFactory(d -> new SimpleStringProperty(
             d.getValue().assignedPeerId() != null ? d.getValue().assignedPeerId() : "-"
         ));
 
-        TableColumn<DatabaseManager.TaskRecord, String> tColStatus = new TableColumn<>("Status");
+        TableColumn<GuiHistoryStore.TaskRecord, String> tColStatus = new TableColumn<>("Status");
         tColStatus.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().status()));
 
-        TableColumn<DatabaseManager.TaskRecord, String> tColDuration = new TableColumn<>("Duration");
+        TableColumn<GuiHistoryStore.TaskRecord, String> tColDuration = new TableColumn<>("Duration");
         tColDuration.setCellValueFactory(d -> new SimpleStringProperty(
             d.getValue().durationMs() > 0 ? d.getValue().durationMs() + " ms" : "-"
         ));
 
-        TableColumn<DatabaseManager.TaskRecord, Number> tColRetries = new TableColumn<>("Retries");
+        TableColumn<GuiHistoryStore.TaskRecord, Number> tColRetries = new TableColumn<>("Retries");
         tColRetries.setCellValueFactory(d -> new SimpleIntegerProperty(d.getValue().retryCount()));
         tColRetries.setMaxWidth(70);
 
-        TableColumn<DatabaseManager.TaskRecord, String> tColTaskId = new TableColumn<>("Task ID");
+        TableColumn<GuiHistoryStore.TaskRecord, String> tColTaskId = new TableColumn<>("Task ID");
         tColTaskId.setCellValueFactory(d -> {
             String id = d.getValue().taskId();
             return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
@@ -551,14 +540,14 @@ public class PeerApp extends Application {
         // When a job row is selected, populate the task table
         jobTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
             if (sel != null) {
-                taskTable.getItems().setAll(historyDb.getTasksForJob(sel.jobId()));
+                taskTable.getItems().setAll(historyStore.getTasksForJob(sel.jobId()));
             }
         });
 
         // ---- Layout ----
         Button refreshBtn = new Button("Refresh");
         refreshBtn.setOnAction(e -> {
-            jobTable.getItems().setAll(historyDb.getJobHistory());
+            jobTable.getItems().setAll(historyStore.getJobHistory());
             taskTable.getItems().clear();
         });
 
@@ -584,140 +573,71 @@ public class PeerApp extends Application {
         root.setPadding(new Insets(12));
 
         // Load immediately when the pane is built
-        jobTable.getItems().setAll(historyDb.getJobHistory());
+        jobTable.getItems().setAll(historyStore.getJobHistory());
 
         return root;
     }
 
-    /**
-     * Sends on the current coordinator socket and clears stale state when the writer fails.
-     */
-    private boolean sendSafe(Object message) {
-        NetworkConnection connection = networkConnection;
-        if (connection == null) {
-            return false;
-        }
-        PrintWriter writer = connection.writer();
-        boolean sent = SafeJsonWriter.send(writer, gson, message);
-        if (!sent) {
-            String messageClass = message == null ? "null" : message.getClass().getSimpleName();
-            LOGGER.warn("event=gui_message_send_failed message_class={}", messageClass);
-            clearNetworkState(connection, true);
-        }
-        return sent;
-    }
-
     private void startNetworkThread(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
-        backendNode = new PeerNode();
         stopping = false;
-        AtomicBoolean connected = new AtomicBoolean(false);
-        Thread netThread = new Thread(() -> {
-            NetworkConnection connection = null;
-            try (Socket socket = new Socket(host, port);
-                 BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
-                PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-                connection = new NetworkConnection(socket, writer, Thread.currentThread());
-                networkConnection = connection;
-
-                MessageFactory factory = createFactory();
-                MessageDispatcher dispatcher = createDispatcher(engine, writer);
-                connected.set(true);
+        TcpCoordinatorConnection.Listener listener = new TcpCoordinatorConnection.Listener() {
+            @Override
+            public void onConnected(CoordinatorConnection connection) {
                 onConnected.run();
-
-                String line;
-                while ((line = in.readLine()) != null) {
-                    try {
-                        if (line.trim().isEmpty()) continue;
-                        Message msg = factory.fromJson(line);
-                        dispatcher.dispatch(msg, writer);
-                    } catch (Exception messageError) {
-                        LOGGER.warn("event=gui_message_processing_failed error={}",
-                                messageError.getMessage(), messageError);
-                    }
-                }
-                handleCoordinatorDisconnect("Coordinator connection closed.", null, connection);
-            } catch (IOException e) {
-                if (connected.get()) {
-                    handleCoordinatorDisconnect("Connection to coordinator was lost: " + e.getMessage(), e, connection);
-                } else {
-                    clearNetworkState(connection, false);
-                    onFailed.accept(e.getMessage());
-                }
-            } finally {
-                clearNetworkState(connection, false);
             }
-        });
-        netThread.setDaemon(true);
-        netThread.start();
+
+            @Override
+            public void onConnectionFailed(CoordinatorConnection connection, String error) {
+                clearNetworkState(connection, false);
+                onFailed.accept(error);
+            }
+
+            @Override
+            public void onDisconnected(CoordinatorConnection connection, String message) {
+                clearNetworkState(connection, false);
+                if (stopping) {
+                    return;
+                }
+                LOGGER.warn("event=gui_connection_lost message={}", message);
+                Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, message).show());
+            }
+
+            @Override
+            public void onJobResult(CoordinatorConnection connection, JobResultMessage result) {
+                handleJobResult(result);
+            }
+        };
+
+        TcpCoordinatorConnection connection = new TcpCoordinatorConnection(host, port, workerRuntime, listener);
+        networkConnection = connection;
+        connection.start();
     }
 
-    private void handleCoordinatorDisconnect(String userMessage, IOException error, NetworkConnection connection) {
-        clearNetworkState(connection, false);
-        if (stopping) {
-            return;
-        }
-        if (error == null) {
-            LOGGER.warn("event=gui_connection_closed");
-        } else {
-            LOGGER.warn("event=gui_connection_lost error={}", error.getMessage(), error);
-        }
-        Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, userMessage).show());
-    }
-
-    private void clearNetworkState(NetworkConnection connection, boolean closeSocket) {
+    private void clearNetworkState(CoordinatorConnection connection, boolean closeConnection) {
         if (connection == null) {
             return;
         }
         if (networkConnection == connection) {
             networkConnection = null;
         }
-        connection.writer().close();
-        if (closeSocket) {
-            closeSocket(connection.socket());
+        if (closeConnection) {
+            connection.close();
         }
     }
 
-    private void closeSocket(Socket socket) {
-        try {
-            socket.close();
-        } catch (IOException ignored) {
+    private void handleJobResult(JobResultMessage result) {
+        GuiJobResultRouter.RoutedJobResult routed = GuiJobResultRouter.route(result, myActiveJobIds);
+        if (routed.action() == GuiJobResultRouter.Action.IGNORE) {
+            return;
         }
-    }
 
-    private record NetworkConnection(Socket socket, PrintWriter writer, Thread thread) {
-    }
-
-    private MessageFactory createFactory() {
-        MessageFactory factory = new MessageFactory();
-        factory.register(MessageType.PING, json -> gson.fromJson(json, PingMessage.class));
-        factory.register(MessageType.TASK_ASSIGN, json -> gson.fromJson(json, TaskAssignMessage.class));
-        factory.register(MessageType.JOB_RESULT, json -> gson.fromJson(json, JobResultMessage.class));
-        return factory;
-    }
-
-    private MessageDispatcher createDispatcher(PeerExecutionEngine engine, PrintWriter out) {
-        MessageDispatcher dispatcher = new MessageDispatcher();
-        dispatcher.register(MessageType.PING, new messaging.handlers.PingHandler(() -> engine.getRegisteredTaskTypes()));
-        dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {
-            // Offload execution so the networking thread stays responsive.
-            engine.submitTask((TaskAssignMessage) message, out);
-        });
-        dispatcher.register(MessageType.JOB_RESULT, (message, writer) -> {
-            JobResultMessage result = (JobResultMessage) message;
-            GuiJobResultRouter.RoutedJobResult routed = GuiJobResultRouter.route(result, myActiveJobIds);
-            if (routed.action() == GuiJobResultRouter.Action.IGNORE) {
-                return;
+        Platform.runLater(() -> {
+            if (routed.action() == GuiJobResultRouter.Action.SHOW_DOWNLOAD) {
+                showDownloadWindow(routed.result());
+            } else {
+                showFailureWindow(routed.result());
             }
-
-            Platform.runLater(() -> {
-                if (routed.action() == GuiJobResultRouter.Action.SHOW_DOWNLOAD) {
-                    showDownloadWindow(routed.result());
-                } else {
-                    showFailureWindow(routed.result());
-                }
-            });
         });
-        return dispatcher;
     }
 
     private void showFailureWindow(JobResultMessage result) {
@@ -792,19 +712,18 @@ public class PeerApp extends Application {
         if (backgroundTask != null) {
             backgroundTask.cancel(true);
         }
-        NetworkConnection connection = networkConnection;
+        CoordinatorConnection connection = networkConnection;
         if (connection != null) {
             clearNetworkState(connection, true);
-            connection.thread().interrupt();
         }
-        if (engine != null) {
-            engine.shutdown();
-            if (!engine.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+        if (workerRuntime != null) {
+            workerRuntime.shutdown();
+            if (!workerRuntime.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
                 LOGGER.warn("event=gui_engine_shutdown_timeout peer_id={}", sessionId);
             }
         }
-        if (historyDb != null) {
-            historyDb.close();
+        if (historyStore != null) {
+            historyStore.close();
         }
         super.stop();
     }

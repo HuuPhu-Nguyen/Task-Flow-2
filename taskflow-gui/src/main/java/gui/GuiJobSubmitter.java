@@ -1,7 +1,6 @@
 package gui;
 
 import client.ClientJobPlugin;
-import peer.PeerNode;
 
 import java.io.PrintWriter;
 import java.util.List;
@@ -13,7 +12,7 @@ final class GuiJobSubmitter {
     }
 
     static SubmittedJob submitPreparedPayloads(
-            PeerNode backendNode,
+            JobSubmissionClient jobSubmissionClient,
             ClientJobPlugin plugin,
             List<Object> payloads,
             String targetFormat,
@@ -27,7 +26,7 @@ final class GuiJobSubmitter {
 
         String jobId;
         try {
-            jobId = backendNode.submitJob(plugin.taskType(), payloads, targetFormat, out);
+            jobId = jobSubmissionClient.submitJob(plugin.taskType(), payloads, targetFormat, out);
         } catch (IllegalStateException sendFailure) {
             onSendFailure.run();
             throw sendFailure;

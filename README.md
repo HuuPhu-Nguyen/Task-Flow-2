@@ -23,7 +23,7 @@ Jobs are submitted dynamically by peers and processed in a fully asynchronous, m
 
 ## Why This Project Is Interesting
 
-- Modular Maven reactor with explicit SPI, core, transport, coordinator, peer runtime, and role-split plugin artifacts; the JavaFX GUI boundary is still being narrowed.
+- Modular Maven reactor with explicit SPI, core, transport, coordinator, command-line peer runtime, role-split plugin artifacts, and a JavaFX GUI wired through GUI-facing adapters.
 - `ServiceLoader` plugin architecture for adding new job types without changing scheduler core.
 - Mailbox-driven scheduler that decouples network I/O from task orchestration.
 - Assignment ownership checks that reject duplicate or stale task results.
@@ -71,7 +71,7 @@ TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runt
 TaskFlow is now organized as a Maven reactor:
 
 - `taskflow-spi` - protocol messages, job abstractions, and coordinator, peer, and client plugin contracts
-- `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
+- `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, shared peer execution engine, and metrics
 - `plugins/conversion/model` - conversion-owned shared payload/type metadata
 - `plugins/conversion/server` - coordinator-side image/video job plugins
 - `plugins/conversion/client` - image/video client payload creation and result saving plugins
@@ -83,9 +83,11 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
-- `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
+- `taskflow-gui` - TCP-only JavaFX peer that can submit jobs and execute assigned tasks through GUI-facing adapters
 
 Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`.
+
+The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. The GUI module depends on `taskflow-core` for shared messaging, execution, and SQLite-backed history adapters, but it does not depend on the command-line `taskflow-peer` runtime.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
@@ -249,6 +251,7 @@ The JavaFX GUI (`PeerApp`) acts as both:
 - Submit distributed jobs
 - Receive and save results
 - Uses temporary session folders for input/output
+- Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains planned
 
 ---
 

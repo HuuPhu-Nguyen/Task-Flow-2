@@ -2,7 +2,6 @@ package gui;
 
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
-import peer.PeerNode;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -22,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GuiJobSubmitterTest {
     private final ClientJobPlugin plugin = new FakeClientJobPlugin();
+    private final JobSubmissionClient jobSubmissionClient = new TcpJobSubmissionClient("CLIENT");
 
     @Test
     void successfulSubmitTracksActiveJobImmediately() {
@@ -30,7 +30,7 @@ class GuiJobSubmitterTest {
         PrintWriter out = new PrintWriter(writer, true);
 
         GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
-                new PeerNode(),
+                jobSubmissionClient,
                 plugin,
                 List.of("payload"),
                 "summary",
@@ -54,7 +54,7 @@ class GuiJobSubmitterTest {
         AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
 
         assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
-                new PeerNode(),
+                jobSubmissionClient,
                 plugin,
                 List.of("payload"),
                 "summary",
@@ -74,7 +74,7 @@ class GuiJobSubmitterTest {
         AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
 
         assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
-                new PeerNode(),
+                jobSubmissionClient,
                 plugin,
                 List.of("payload"),
                 "summary",
