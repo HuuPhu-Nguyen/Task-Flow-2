@@ -47,8 +47,17 @@ public class TaskCoordinatorServer {
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
-            reconcileAbandonedJobs(db);
+            if (!CoordinatorStartupRecovery.reconcileAbandonedJobs(db)) {
+                db.close();
+                db = null;
+                LOGGER.warn("event=database_disabled path={} reason=startup_reconciliation_failed",
+                        DatabaseManager.DB_PATH);
+            }
         } catch (Exception e) {
+            if (db != null) {
+                db.close();
+                db = null;
+            }
             LOGGER.warn("event=database_unavailable path={} error={}",
                     DatabaseManager.DB_PATH, e.getMessage(), e);
         }
@@ -111,15 +120,6 @@ public class TaskCoordinatorServer {
 
     private static boolean isRabbitMqTransportSelected() {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
-    }
-
-    private static void reconcileAbandonedJobs(DatabaseManager db) {
-        int failedJobs = db.markRunningJobsFailedOnStartup(System.currentTimeMillis());
-        if (failedJobs > 0) {
-            LOGGER.warn("event=abandoned_jobs_marked_failed count={}", failedJobs);
-        } else if (failedJobs < 0) {
-            LOGGER.error("event=abandoned_job_reconciliation_failed");
-        }
     }
 
     private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,

@@ -75,6 +75,7 @@ Invalid/stale transitions are ignored (for example duplicate success from a peer
 - SQLite foreign-key checks are enabled per connection, and `tasks.job_id` must reference an existing `jobs.job_id`.
 - Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
 - Coordinator startup marks stale `RUNNING` jobs and non-terminal tasks failed; it does not yet resume in-flight attempts from persisted leases.
+- If startup reconciliation fails, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 
 ## Heartbeat and Peer Liveness
 
