@@ -423,7 +423,7 @@ Submit a RabbitMQ job from a command-line peer on Windows PowerShell:
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
 $env:TASKFLOW_PEER_ID = "peer-submit"
-.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit image png path\to\input.jpg"
+.\mvnw.cmd -pl taskflow-peer exec:java "-Dexec.args=submit image png path\to\input.jpg"
 ```
 
 Text analysis uses the same plugin-driven submit path:
@@ -431,7 +431,7 @@ Text analysis uses the same plugin-driven submit path:
 ```powershell
 $env:TASKFLOW_TRANSPORT = "rabbitmq"
 $env:TASKFLOW_PEER_ID = "peer-submit"
-.\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit text csv path\to\notes.txt"
+.\mvnw.cmd -pl taskflow-peer exec:java "-Dexec.args=submit text csv path\to\notes.txt"
 ```
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
@@ -445,8 +445,8 @@ RabbitMQ live broker tests are opt-in and skipped by default so normal builds do
 Start a local broker first, or point the usual `TASKFLOW_RABBITMQ_*` variables at an existing broker. Then run:
 
 ```powershell
-.\mvnw.cmd -pl taskflow-transport-rabbitmq -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqTransportLiveTest -Dsurefire.failIfNoSpecifiedTests=false test
-.\mvnw.cmd -pl taskflow-coordinator -am -Dtaskflow.rabbitmq.live=true -Dtest=RabbitMqCoordinatorLiveIntegrationTest -Dsurefire.failIfNoSpecifiedTests=false test
+.\mvnw.cmd -pl taskflow-transport-rabbitmq -am "-Dtaskflow.rabbitmq.live=true" "-Dtest=RabbitMqTransportLiveTest" "-Dsurefire.failIfNoSpecifiedTests=false" test
+.\mvnw.cmd -pl taskflow-coordinator -am "-Dtaskflow.rabbitmq.live=true" "-Dtest=RabbitMqCoordinatorLiveIntegrationTest" "-Dsurefire.failIfNoSpecifiedTests=false" test
 ```
 
 Alternatively, set `TASKFLOW_RABBITMQ_LIVE_TEST=true` before running the same tests.
