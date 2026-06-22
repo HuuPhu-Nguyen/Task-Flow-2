@@ -10,7 +10,15 @@ COPY config config
 COPY taskflow-spi/pom.xml taskflow-spi/pom.xml
 COPY taskflow-core/pom.xml taskflow-core/pom.xml
 COPY plugins/conversion/pom.xml plugins/conversion/pom.xml
+COPY plugins/conversion/model/pom.xml plugins/conversion/model/pom.xml
+COPY plugins/conversion/server/pom.xml plugins/conversion/server/pom.xml
+COPY plugins/conversion/client/pom.xml plugins/conversion/client/pom.xml
+COPY plugins/conversion/peer/pom.xml plugins/conversion/peer/pom.xml
 COPY plugins/text/pom.xml plugins/text/pom.xml
+COPY plugins/text/model/pom.xml plugins/text/model/pom.xml
+COPY plugins/text/server/pom.xml plugins/text/server/pom.xml
+COPY plugins/text/client/pom.xml plugins/text/client/pom.xml
+COPY plugins/text/peer/pom.xml plugins/text/peer/pom.xml
 COPY taskflow-transport-rabbitmq/pom.xml taskflow-transport-rabbitmq/pom.xml
 COPY taskflow-coordinator/pom.xml taskflow-coordinator/pom.xml
 COPY taskflow-peer/pom.xml taskflow-peer/pom.xml

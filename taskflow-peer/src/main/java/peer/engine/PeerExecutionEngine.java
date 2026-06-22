@@ -27,7 +27,11 @@ public class PeerExecutionEngine implements AutoCloseable {
     }
 
     public void registerProcessor(String type, TaskProcessor<?> processor) {
-        processors.put(normalize(type), processor);
+        String taskType = normalize(type);
+        TaskProcessor<?> existing = processors.putIfAbsent(taskType, processor);
+        if (existing != null) {
+            throw new IllegalStateException("Duplicate peer processor for task type " + taskType);
+        }
     }
 
     public void registerDiscoveredProcessors() {

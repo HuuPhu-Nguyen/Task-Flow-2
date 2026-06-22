@@ -177,6 +177,43 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void brokerDeliveryIsRequeuedWhenJobStartFailureResultIsUnrouted() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        UnroutedResultOutput output = new UnroutedResultOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-start-failure-unrouted-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage emptyJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-06-13T00:00:00Z",
+                    "job-start-result-unrouted",
+                    "TEST_TASK",
+                    List.of(),
+                    ""
+            );
+            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+
+            assertTrue(output.awaitAttempt());
+            assertTrue(acknowledgement.awaitRequeue());
+            assertEquals(0, acknowledgement.ackCount());
+            assertEquals(1, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void duplicateActiveJobIdReturnsFailureWithoutReplacingOriginalJob() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
@@ -784,6 +821,25 @@ class TaskSchedulerFailureTest {
         public boolean sendJobResult(String requesterNodeId, JobResultMessage message) throws Exception {
             attempted.countDown();
             throw new Exception("transient result send failure");
+        }
+
+        boolean awaitAttempt() throws InterruptedException {
+            return attempted.await(2, TimeUnit.SECONDS);
+        }
+    }
+
+    private static class UnroutedResultOutput implements SchedulerOutput {
+        private final CountDownLatch attempted = new CountDownLatch(1);
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            throw new AssertionError("Failed job starts should not dispatch tasks.");
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            attempted.countDown();
+            return false;
         }
 
         boolean awaitAttempt() throws InterruptedException {

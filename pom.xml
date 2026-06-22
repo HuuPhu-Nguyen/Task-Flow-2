@@ -49,12 +49,42 @@
             </dependency>
             <dependency>
                 <groupId>com.dickinson.cs</groupId>
-                <artifactId>taskflow-plugin-conversion</artifactId>
+                <artifactId>taskflow-plugin-conversion-model</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
                 <groupId>com.dickinson.cs</groupId>
-                <artifactId>taskflow-plugin-text</artifactId>
+                <artifactId>taskflow-plugin-conversion-server</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-conversion-client</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-conversion-peer</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-text-model</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-text-server</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-text-client</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-plugin-text-peer</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

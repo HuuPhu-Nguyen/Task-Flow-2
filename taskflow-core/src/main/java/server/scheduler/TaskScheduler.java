@@ -649,6 +649,8 @@ public class TaskScheduler implements Runnable {
                         "job_id", submit.getJobId(),
                         "requester_id", requesterNodeId
                 ));
+                throw new IllegalStateException(
+                        "Job start failure result was not routed to requester " + requesterNodeId);
             }
         } catch (Exception sendError) {
             logErrorEvent("job_start_failure_send_failed", fields(

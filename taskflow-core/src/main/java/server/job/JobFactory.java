@@ -2,10 +2,10 @@ package server.job;
 
 import protocol.JobSubmitMessage;
 
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.ServiceLoader;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Creates jobs from framework plugins discovered on the runtime classpath.
@@ -28,11 +28,21 @@ public class JobFactory {
     }
 
     private static Map<String, TaskPlugin> loadPlugins() {
-        Map<String, TaskPlugin> plugins = new ConcurrentHashMap<>();
-        for (TaskPlugin plugin : ServiceLoader.load(TaskPlugin.class)) {
-            plugins.put(normalize(plugin.taskType()), plugin);
+        return loadPlugins(ServiceLoader.load(TaskPlugin.class));
+    }
+
+    static Map<String, TaskPlugin> loadPlugins(Iterable<TaskPlugin> discoveredPlugins) {
+        Map<String, TaskPlugin> plugins = new LinkedHashMap<>();
+        for (TaskPlugin plugin : discoveredPlugins) {
+            String taskType = normalize(plugin.taskType());
+            TaskPlugin existing = plugins.putIfAbsent(taskType, plugin);
+            if (existing != null) {
+                throw new IllegalStateException("Duplicate task plugin for type " + taskType
+                        + ": " + existing.getClass().getName()
+                        + " and " + plugin.getClass().getName());
+            }
         }
-        return plugins;
+        return Map.copyOf(plugins);
     }
 
     private static String normalize(String taskType) {

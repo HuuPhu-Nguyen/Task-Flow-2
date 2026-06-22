@@ -1,0 +1,7 @@
+package conversion.model;
+
+/**
+ * File payload model owned by the conversion plugin.
+ */
+public record FilePayload(String fileName, String base64Data) {
+}

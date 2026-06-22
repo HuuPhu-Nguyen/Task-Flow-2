@@ -17,12 +17,12 @@
         </dependency>
         <dependency>
             <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-conversion</artifactId>
+            <artifactId>taskflow-plugin-conversion-server</artifactId>
             <scope>runtime</scope>
         </dependency>
         <dependency>
             <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-text</artifactId>
+            <artifactId>taskflow-plugin-text-server</artifactId>
             <scope>runtime</scope>
         </dependency>
         <dependency>

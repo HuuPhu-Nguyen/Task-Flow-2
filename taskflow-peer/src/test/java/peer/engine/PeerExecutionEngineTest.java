@@ -10,6 +10,7 @@ import java.io.Writer;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PeerExecutionEngineTest {
@@ -55,6 +56,21 @@ class PeerExecutionEngineTest {
 
         assertTrue(engine.isShutdown());
         assertTrue(engine.awaitTermination(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void duplicateProcessorTaskTypeIsRejected() {
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
+        try {
+            engine.registerProcessor("test", task -> "first");
+
+            IllegalStateException error = assertThrows(IllegalStateException.class,
+                    () -> engine.registerProcessor(" TEST ", task -> "second"));
+
+            assertTrue(error.getMessage().contains("TEST"));
+        } finally {
+            engine.shutdown();
+        }
     }
 
     private static TaskAssignMessage testTask() {

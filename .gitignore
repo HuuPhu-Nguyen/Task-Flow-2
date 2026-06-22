@@ -40,6 +40,14 @@ LOG.md
 taskflow.db
 taskflow.db-shm
 taskflow.db-wal
+taskflow.db-journal
 config/taskflow.yml
 java/in_PEER_*/
 java/out_PEER_*/
+
+# Local environment/tool state
+.env
+.env.*
+!.env.example
+.agents/
+.codex/

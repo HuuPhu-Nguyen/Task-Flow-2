@@ -9,30 +9,13 @@
         <relativePath>../../pom.xml</relativePath>
     </parent>
 
-    <artifactId>taskflow-plugin-text</artifactId>
+    <artifactId>taskflow-plugin-text-parent</artifactId>
+    <packaging>pom</packaging>
 
-    <dependencies>
-        <dependency>
-            <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-spi</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.google.code.gson</groupId>
-            <artifactId>gson</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
-
-    <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-            </plugin>
-        </plugins>
-    </build>
+    <modules>
+        <module>model</module>
+        <module>server</module>
+        <module>client</module>
+        <module>peer</module>
+    </modules>
 </project>

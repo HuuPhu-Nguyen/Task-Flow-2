@@ -23,7 +23,7 @@ Jobs are submitted dynamically by peers and processed in a fully asynchronous, m
 
 ## Why This Project Is Interesting
 
-- Modular Maven reactor with explicit SPI, core, transport, plugin, coordinator, peer runtime, and GUI boundaries.
+- Modular Maven reactor with explicit SPI, core, transport, coordinator, peer runtime, and role-split plugin artifacts; the JavaFX GUI boundary is still being narrowed.
 - `ServiceLoader` plugin architecture for adding new job types without changing scheduler core.
 - Mailbox-driven scheduler that decouples network I/O from task orchestration.
 - Assignment ownership checks that reject duplicate or stale task results.
@@ -72,14 +72,20 @@ TaskFlow is now organized as a Maven reactor:
 
 - `taskflow-spi` - protocol messages, job abstractions, and coordinator, peer, and client plugin contracts
 - `taskflow-core` - scheduler, task state, persistence, messaging, peer registry, and metrics
-- `plugins/conversion` - image/video client payload, plugin-owned file payload model, job, and peer-side processor implementations discovered through `ServiceLoader`
-- `plugins/text` - text-analysis example plugin using custom non-`FilePayload` payload/result models
+- `plugins/conversion/model` - conversion-owned shared payload/type metadata
+- `plugins/conversion/server` - coordinator-side image/video job plugins
+- `plugins/conversion/client` - image/video client payload creation and result saving plugins
+- `plugins/conversion/peer` - image/video peer processors and media dependencies
+- `plugins/text/model` - text-analysis shared payload/result/type metadata
+- `plugins/text/server` - coordinator-side text-analysis job plugin
+- `plugins/text/client` - text-analysis client payload creation and CSV result saving plugin
+- `plugins/text/peer` - text-analysis peer processor
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
 - `taskflow-gui` - JavaFX peer that can submit jobs and execute assigned tasks
 
-Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>`. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`.
+Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
@@ -266,7 +272,7 @@ The JavaFX GUI (`PeerApp`) acts as both:
 - New job types via `TaskPlugin` and Java `ServiceLoader`
 - New peer-side processors via `PeerProcessorPlugin` and `TaskProcessor`
 - New client payload/result handlers via `ClientJobPlugin`
-- New plugin bundles should live under `plugins/<domain>` while keeping their Maven artifact IDs stable
+- New plugin bundles should live under `plugins/<domain>` and keep coordinator, client, peer, and shared model dependencies separated
 
 ---
 
@@ -338,7 +344,10 @@ Environment overrides:
 - `TASKFLOW_SCORE_LATENCY_BASELINE_MS`
 - `TASKFLOW_SCORE_DURATION_BASELINE_MS`
 - `TASKFLOW_SCORE_EWMA_ALPHA`
-- `TASKFLOW_MAX_INPUT_BYTES` - maximum per-file client payload input size for conversion/text plugins, default `268435456` bytes
+- `TASKFLOW_MAX_INPUT_BYTES` - maximum per-file client payload input size for conversion/text plugins, default `33554432` bytes
+- `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
+- `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
+- `TASKFLOW_MAX_RESULT_BYTES` - maximum single conversion result payload size before saving/sending, default `67108864` bytes
 
 PowerShell override example:
 
