@@ -198,6 +198,7 @@ Currently implemented job types:
 - Converts between MP4, AVI, MKV, MOV, WEBM, FLV, WMV
 - Uses JavaCV with bundled FFmpeg native libraries
 - Uses broadly available FFmpeg encoders for portability across machines
+- Preserves source audio streams when supported by the target format
 - Uses the conversion client plugin to encode local files as Base64 payloads and save decoded results
 
 **Text analysis features:**
@@ -528,7 +529,6 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion, but full broker outage/restart behavior, higher-level scheduler/peer backpressure policy, and durable restart resume are not complete.
 - RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
-- Video transcoding currently records video frames only; audio preservation is a planned improvement.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
 - SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, abandoned `RUNNING` jobs are marked failed on coordinator startup, and reconciliation failure disables persistence for that run instead of writing against unreconciled history. PostgreSQL/Flyway and transactional restart resume are still planned for durable production-style state management.
 
@@ -644,6 +644,8 @@ Inside the GUI:
 4. Choose output format
 5. Click **Start Job**
 6. Select a folder to save results
+
+For a repeatable desktop smoke checklist covering connection refusal, successful TCP job submit/execute/save, job history refresh, and coordinator disconnect behavior, see [docs/GUI_MANUAL_SMOKE.md](docs/GUI_MANUAL_SMOKE.md).
 
 ---
 

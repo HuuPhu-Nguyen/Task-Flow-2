@@ -680,29 +680,22 @@ public class PeerApp extends Application {
     }
 
     private boolean saveFilesToDisk(JobResultMessage result, String folderPath) {
-        Path outputDir = Paths.get(folderPath).toAbsolutePath().normalize();
-
-        ClientJobPlugin plugin = clientJobPluginsByType.get(ClientJobPlugins.normalizeTaskType(result.getTaskType()));
-        if (plugin == null) {
-            new Alert(Alert.AlertType.ERROR,
-                    "No client job plugin can save results for task type: " + result.getTaskType()).show();
+        GuiResultSaver.SaveResult saveResult = GuiResultSaver.save(result, folderPath, clientJobPluginsByType);
+        if (!saveResult.successful()) {
+            if (saveResult.cause() == null) {
+                LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
+                        result.getJobId(), result.getTaskType(), saveResult.errorMessage());
+            } else {
+                LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
+                        result.getJobId(), result.getTaskType(), saveResult.errorMessage(), saveResult.cause());
+            }
+            new Alert(Alert.AlertType.ERROR, saveResult.errorMessage()).show();
             return false;
         }
 
-        List<Object> payloads = result.getResultsByTaskId() == null
-                ? List.of()
-                : result.getResultsByTaskId();
-        try {
-            plugin.saveResults(payloads, outputDir);
-            LOGGER.info("event=gui_results_saved job_id={} task_type={} output_dir={}",
-                    result.getJobId(), result.getTaskType(), outputDir);
-            return true;
-        } catch (Exception ex) {
-            LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
-                    result.getJobId(), result.getTaskType(), ex.getMessage(), ex);
-            new Alert(Alert.AlertType.ERROR, "Could not save files: " + ex.getMessage()).show();
-            return false;
-        }
+        LOGGER.info("event=gui_results_saved job_id={} task_type={} output_dir={}",
+                result.getJobId(), result.getTaskType(), saveResult.outputDir());
+        return true;
     }
 
     @Override

@@ -18,9 +18,13 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Base64;
 
+import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AAC;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_FLV1;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_MPEG4;
+import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_MP3;
+import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_OPUS;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_VP8;
+import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_WMAV2;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_WMV2;
 import static org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_YUV420P;
 
@@ -102,9 +106,12 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             if (Double.isNaN(frameRate) || frameRate <= 0) {
                 frameRate = 30.0;
             }
+            int audioChannels = grabber.getAudioChannels();
+            int sampleRate = grabber.getSampleRate();
+            boolean hasAudio = audioChannels > 0 && sampleRate > 0;
 
             try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(
-                    output.getAbsolutePath(), width, height)) {
+                    output.getAbsolutePath(), width, height, hasAudio ? audioChannels : 0)) {
                 recorder.setFormat(formatName);
                 recorder.setVideoCodec(getVideoCodec(targetFormat));
                 recorder.setPixelFormat(AV_PIX_FMT_YUV420P);
@@ -112,10 +119,24 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
                 recorder.setGopSize((int) Math.round(frameRate * 2));
                 recorder.setVideoOption("preset", "medium");
                 recorder.setVideoOption("crf", "23");
+                if (hasAudio) {
+                    recorder.setAudioChannels(audioChannels);
+                    recorder.setSampleRate(sampleRate);
+                    recorder.setAudioCodec(getAudioCodec(targetFormat));
+                    int audioBitrate = grabber.getAudioBitrate();
+                    recorder.setAudioBitrate(audioBitrate > 0 ? audioBitrate : 128_000);
+                }
                 recorder.start();
 
                 Frame frame;
-                while ((frame = grabber.grabImage()) != null) {
+                while ((frame = grabber.grab()) != null) {
+                    if (!hasAudio && frame.image == null && frame.samples != null) {
+                        continue;
+                    }
+                    if (frame.image == null && frame.samples == null) {
+                        continue;
+                    }
+                    recorder.setTimestamp(grabber.getTimestamp());
                     recorder.record(frame);
                 }
 
@@ -145,6 +166,15 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             case "flv" -> AV_CODEC_ID_FLV1;
             case "wmv" -> AV_CODEC_ID_WMV2;
             default -> AV_CODEC_ID_MPEG4;
+        };
+    }
+
+    private int getAudioCodec(String ext) {
+        return switch (ext) {
+            case "webm" -> AV_CODEC_ID_OPUS;
+            case "wmv" -> AV_CODEC_ID_WMAV2;
+            case "avi" -> AV_CODEC_ID_MP3;
+            default -> AV_CODEC_ID_AAC;
         };
     }
 

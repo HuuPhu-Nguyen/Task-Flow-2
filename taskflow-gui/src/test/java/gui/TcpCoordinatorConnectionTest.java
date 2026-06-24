@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -76,6 +77,82 @@ class TcpCoordinatorConnectionTest {
                  PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
                 assertTrue(listener.awaitConnected());
 
+                out.println(gson.toJson(result));
+
+                assertTrue(listener.awaitJobResult());
+                assertEquals("job-1", listener.jobResult.get().getJobId());
+            } finally {
+                connection.close();
+            }
+        }
+    }
+
+    @Test
+    void reportsInitialConnectionFailure() throws Exception {
+        FakeWorkerRuntime worker = new FakeWorkerRuntime(Set.of("TEXT_ANALYSIS"));
+        RecordingListener listener = new RecordingListener();
+        int closedPort;
+        try (ServerSocket server = new ServerSocket(0)) {
+            closedPort = server.getLocalPort();
+        }
+
+        TcpCoordinatorConnection connection =
+                new TcpCoordinatorConnection("localhost", closedPort, worker, listener);
+        connection.start();
+        try {
+            assertTrue(listener.awaitConnectionFailed());
+            assertNotNull(listener.connectionFailure.get());
+            assertFalse(listener.connected());
+            assertFalse(listener.disconnected());
+        } finally {
+            connection.close();
+        }
+    }
+
+    @Test
+    void reportsDisconnectAfterSuccessfulConnection() throws Exception {
+        FakeWorkerRuntime worker = new FakeWorkerRuntime(Set.of("TEXT_ANALYSIS"));
+        RecordingListener listener = new RecordingListener();
+
+        try (ServerSocket server = new ServerSocket(0)) {
+            TcpCoordinatorConnection connection =
+                    new TcpCoordinatorConnection("localhost", server.getLocalPort(), worker, listener);
+            connection.start();
+
+            try (Socket ignored = server.accept()) {
+                assertTrue(listener.awaitConnected());
+            }
+
+            assertTrue(listener.awaitDisconnected());
+            assertEquals("Coordinator connection closed.", listener.disconnectedMessage.get());
+            assertFalse(listener.connectionFailed());
+            connection.close();
+        }
+    }
+
+    @Test
+    void malformedInboundMessageDoesNotPreventLaterJobResult() throws Exception {
+        FakeWorkerRuntime worker = new FakeWorkerRuntime(Set.of("TEXT_ANALYSIS"));
+        RecordingListener listener = new RecordingListener();
+        JobResultMessage result = new JobResultMessage(
+                "coordinator",
+                Instant.EPOCH.toString(),
+                "job-1",
+                "TEXT_ANALYSIS",
+                true,
+                List.of("done")
+        );
+
+        try (ServerSocket server = new ServerSocket(0)) {
+            TcpCoordinatorConnection connection =
+                    new TcpCoordinatorConnection("localhost", server.getLocalPort(), worker, listener);
+            connection.start();
+
+            try (Socket socket = server.accept();
+                 PrintWriter out = new PrintWriter(socket.getOutputStream(), true)) {
+                assertTrue(listener.awaitConnected());
+
+                out.println("{not-json");
                 out.println(gson.toJson(result));
 
                 assertTrue(listener.awaitJobResult());
@@ -156,7 +233,11 @@ class TcpCoordinatorConnectionTest {
 
     private static final class RecordingListener implements TcpCoordinatorConnection.Listener {
         private final CountDownLatch connected = new CountDownLatch(1);
+        private final CountDownLatch connectionFailed = new CountDownLatch(1);
+        private final CountDownLatch disconnected = new CountDownLatch(1);
         private final CountDownLatch jobResultReceived = new CountDownLatch(1);
+        private final AtomicReference<String> connectionFailure = new AtomicReference<>();
+        private final AtomicReference<String> disconnectedMessage = new AtomicReference<>();
         private final AtomicReference<JobResultMessage> jobResult = new AtomicReference<>();
 
         @Override
@@ -166,10 +247,14 @@ class TcpCoordinatorConnectionTest {
 
         @Override
         public void onConnectionFailed(CoordinatorConnection connection, String error) {
+            connectionFailure.set(error);
+            connectionFailed.countDown();
         }
 
         @Override
         public void onDisconnected(CoordinatorConnection connection, String message) {
+            disconnectedMessage.set(message);
+            disconnected.countDown();
         }
 
         @Override
@@ -182,8 +267,28 @@ class TcpCoordinatorConnectionTest {
             return connected.await(2, TimeUnit.SECONDS);
         }
 
+        private boolean awaitConnectionFailed() throws InterruptedException {
+            return connectionFailed.await(2, TimeUnit.SECONDS);
+        }
+
+        private boolean awaitDisconnected() throws InterruptedException {
+            return disconnected.await(2, TimeUnit.SECONDS);
+        }
+
         private boolean awaitJobResult() throws InterruptedException {
             return jobResultReceived.await(2, TimeUnit.SECONDS);
+        }
+
+        private boolean connected() {
+            return connected.getCount() == 0;
+        }
+
+        private boolean connectionFailed() {
+            return connectionFailed.getCount() == 0;
+        }
+
+        private boolean disconnected() {
+            return disconnected.getCount() == 0;
         }
     }
 }
