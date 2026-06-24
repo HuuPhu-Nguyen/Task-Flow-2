@@ -305,8 +305,10 @@ function Wait-ProcessLogPattern {
 }
 
 function Copy-LatestResults {
-    $resultDirs = Get-ChildItem -Path $ResultRoot -Directory -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending
+    $resultDirs = @(
+        Get-ChildItem -Path $ResultRoot -Directory -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+    )
 
     if (-not $resultDirs -or $resultDirs.Count -eq 0) {
         Write-Warning "No RabbitMQ result directory was found under $ResultRoot."
