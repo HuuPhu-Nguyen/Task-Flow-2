@@ -102,6 +102,77 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void persistsTaskPayloadsAndCompletedResultsForResume() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-resume-state-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.insertJobWithTasks(
+                    "job-resume",
+                    "TEST_TASK",
+                    "requester-1",
+                    "csv",
+                    List.of(
+                            new JobStateStore.TaskStartupState("task-job-resume-0", "payload-alpha"),
+                            new JobStateStore.TaskStartupState("task-job-resume-1", "payload-beta")
+                    )
+            ));
+            db.markTaskAssigned("task-job-resume-0", "peer-1", 123L);
+            assertTrue(db.markTaskCompleted("task-job-resume-0", 456L, 333L, "result-alpha"));
+
+            List<JobStateStore.ResumableJobState> jobs = db.loadRunningJobsForResume();
+            assertEquals(1, jobs.size());
+            JobStateStore.ResumableJobState job = jobs.getFirst();
+            assertEquals("job-resume", job.jobId());
+            assertEquals("TEST_TASK", job.taskType());
+            assertEquals("requester-1", job.requesterId());
+            assertEquals("csv", job.parameter());
+            assertEquals(2, job.tasks().size());
+
+            JobStateStore.ResumableTaskState completed = job.tasks().getFirst();
+            assertEquals("task-job-resume-0", completed.taskId());
+            assertEquals("COMPLETED", completed.status());
+            assertEquals("payload-alpha", completed.payload());
+            assertEquals("result-alpha", completed.resultPayload());
+
+            JobStateStore.ResumableTaskState pending = job.tasks().get(1);
+            assertEquals("task-job-resume-1", pending.taskId());
+            assertEquals("PENDING", pending.status());
+            assertEquals("payload-beta", pending.payload());
+            assertNull(pending.resultPayload());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void resetTaskForResumeClearsStaleAssignmentWithoutIncrementingRetry() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-resume-reset-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJobWithTasks(
+                    "job-reset",
+                    "TEST_TASK",
+                    "requester-1",
+                    "",
+                    List.of(new JobStateStore.TaskStartupState("task-job-reset-0", "payload"))
+            );
+            db.markTaskAssigned("task-job-reset-0", "peer-1", 123L);
+
+            assertTrue(db.resetTaskForResume("task-job-reset-0"));
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-reset").getFirst();
+            assertEquals("PENDING", task.status());
+            assertNull(task.assignedPeerId());
+            assertEquals(0L, task.startedAt());
+            assertEquals(0, task.retryCount());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void taskStatusUpdatesRejectInvalidTransitions() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-task-transition-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
@@ -179,6 +250,9 @@ class DatabaseManagerTest {
         try {
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(tasksTableReferencesJobs(dbPath));
+            assertTrue(columnExists(dbPath, "jobs", "parameter"));
+            assertTrue(columnExists(dbPath, "tasks", "payload_json"));
+            assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());
             assertFalse(db.insertTask("orphan-task", "missing-job"));
         } finally {
@@ -333,6 +407,19 @@ class DatabaseManagerTest {
                 if ("jobs".equals(rs.getString("table"))
                         && "job_id".equals(rs.getString("from"))
                         && "job_id".equals(rs.getString("to"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean columnExists(Path dbPath, String tableName, String columnName) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (rs.next()) {
+                if (columnName.equals(rs.getString("name"))) {
                     return true;
                 }
             }

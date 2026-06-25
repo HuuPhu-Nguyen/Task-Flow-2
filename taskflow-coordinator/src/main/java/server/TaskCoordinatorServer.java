@@ -4,17 +4,18 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Instant;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.LinkedBlockingQueue;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.PeerDisconnectedMessage;
 import server.db.DatabaseManager;
 import server.handler.PeerHandler;
+import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
 import server.registry.InMemoryPeerRegistry;
@@ -22,6 +23,7 @@ import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.scheduler.PeerRegistrySchedulerOutput;
 import server.scheduler.SchedulerConfig;
+import server.scheduler.SchedulerMailbox;
 import server.scheduler.TaskScheduler;
 
 public class TaskCoordinatorServer {
@@ -39,19 +41,23 @@ public class TaskCoordinatorServer {
             return;
         }
 
-        BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
-        PeerRegistry registry = new InMemoryPeerRegistry();
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
+        BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
+        PeerRegistry registry = new InMemoryPeerRegistry();
 
         DatabaseManager db = null;
+        List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
-            if (!CoordinatorStartupRecovery.reconcileAbandonedJobs(db)) {
+            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(db);
+            if (!recovery.successful()) {
                 db.close();
                 db = null;
                 LOGGER.warn("event=database_disabled path={} reason=startup_reconciliation_failed",
                         DatabaseManager.DB_PATH);
+            } else {
+                resumedJobs = recovery.resumedJobs();
             }
         } catch (Exception e) {
             if (db != null) {
@@ -69,6 +75,7 @@ public class TaskCoordinatorServer {
                 new PeerRegistrySchedulerOutput(registry),
                 schedulerConfig
         );
+        schedulerLogic.restoreJobs(resumedJobs);
         Thread schedulerThread = new Thread(schedulerLogic, "task-scheduler");
 
         //Monitoring and Networking
@@ -128,7 +135,7 @@ public class TaskCoordinatorServer {
         if (peer == null) {
             return;
         }
-        boolean queued = inboundMailbox.offer(new MessageEnvelope(
+        boolean queued = SchedulerMailbox.offer(inboundMailbox, new MessageEnvelope(
                 new PeerDisconnectedMessage(peer.getNodeId(), Instant.now().toString(), reason),
                 peer.getNodeId()
         ));

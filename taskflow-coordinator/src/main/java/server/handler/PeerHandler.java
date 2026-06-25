@@ -26,6 +26,7 @@ import server.model.MessageEnvelope;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.scheduler.SchedulerConfig;
+import server.scheduler.SchedulerMailbox;
 import server.transport.TcpPeerConnection;
 import transport.TransportConnection;
 
@@ -124,7 +125,11 @@ public class PeerHandler implements Runnable {
                         continue;
                     }
 
-                    mailbox.put(new MessageEnvelope(message, nodeId));
+                    boolean queued = SchedulerMailbox.offer(mailbox, new MessageEnvelope(message, nodeId));
+                    if (!queued) {
+                        LOGGER.warn("event=scheduler_ingress_dropped reason=mailbox_full peer_id={} message_type={}",
+                                nodeId, message.getType());
+                    }
 
                 } catch (SocketTimeoutException ignored) {
                     // Normal polling timeout
@@ -160,7 +165,7 @@ public class PeerHandler implements Runnable {
     }
 
     private void notifySchedulerPeerDisconnected(String nodeId, String reason) {
-        boolean queued = mailbox.offer(new MessageEnvelope(
+        boolean queued = SchedulerMailbox.offer(mailbox, new MessageEnvelope(
                 new PeerDisconnectedMessage(nodeId, Instant.now().toString(), reason),
                 nodeId
         ));

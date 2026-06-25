@@ -1,0 +1,111 @@
+package server.scheduler;
+
+import org.junit.jupiter.api.Test;
+import protocol.PongMessage;
+import server.model.MessageEnvelope;
+import transport.InboundTransportMessage;
+import transport.TransportAcknowledgement;
+import transport.TransportRoute;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class SchedulerMailboxTest {
+
+    @Test
+    void createsBoundedMailboxFromSchedulerConfig() {
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(
+                java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1")
+        );
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(config);
+
+        assertTrue(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-1")));
+        assertFalse(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-2")));
+    }
+
+    @Test
+    void acceptedBrokerDeliveryIsDeferredAndQueuedForSchedulerAck() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
+        );
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        InboundTransportMessage delivery = new InboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                heartbeat(),
+                acknowledgement
+        );
+
+        assertTrue(SchedulerMailbox.offerBrokerDelivery(mailbox, delivery));
+
+        assertEquals(1, acknowledgement.deferCount());
+        assertEquals(0, acknowledgement.requeueCount());
+        MessageEnvelope queued = mailbox.take();
+        assertSame(delivery.message(), queued.message());
+        assertSame(acknowledgement, queued.acknowledgement());
+    }
+
+    @Test
+    void fullMailboxRequeuesBrokerDeliveryWithoutAcceptingEnvelope() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
+        );
+        assertTrue(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-existing")));
+
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        InboundTransportMessage delivery = new InboundTransportMessage(
+                TransportRoute.TASK_RESULT,
+                "peer-1",
+                heartbeat(),
+                acknowledgement
+        );
+
+        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, delivery));
+
+        assertEquals(1, acknowledgement.deferCount());
+        assertEquals(1, acknowledgement.requeueCount());
+        assertEquals(1, mailbox.size());
+    }
+
+    private static PongMessage heartbeat() {
+        return new PongMessage("peer", Instant.now().toString(), List.of("TEST_TASK"));
+    }
+
+    private static class RecordingAcknowledgement implements TransportAcknowledgement {
+        private final AtomicInteger deferCount = new AtomicInteger();
+        private final AtomicInteger requeueCount = new AtomicInteger();
+
+        @Override
+        public void ack() {
+        }
+
+        @Override
+        public void requeue() {
+            requeueCount.incrementAndGet();
+        }
+
+        @Override
+        public void reject() {
+        }
+
+        @Override
+        public void defer() {
+            deferCount.incrementAndGet();
+        }
+
+        int deferCount() {
+            return deferCount.get();
+        }
+
+        int requeueCount() {
+            return requeueCount.get();
+        }
+    }
+}

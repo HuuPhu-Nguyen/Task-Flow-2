@@ -1,8 +1,10 @@
 package peer;
 
 import com.google.gson.Gson;
+import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
 import peer.engine.PeerExecutionEngine;
+import protocol.JobSubmitMessage;
 import protocol.PingMessage;
 import transport.BrokerTransport;
 import transport.OutboundTransportMessage;
@@ -17,7 +19,9 @@ import java.io.StringWriter;
 import java.io.Writer;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -82,6 +86,46 @@ class PeerNodeTest {
 
         assertEquals("publish failed", error.getMessage());
         assertEquals(message, transport.publishedMessage);
+    }
+
+    @Test
+    void rabbitMqSubmitCommandBuildsPluginPayloadAndPublishesJobSubmit() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport(true);
+        CapturingClientPlugin plugin = new CapturingClientPlugin();
+
+        String jobId = RabbitMqPeerNode.submitJob(
+                "peer-submit",
+                transport,
+                new String[] {"submit", "text", "csv", "notes-one.txt", "notes-two.txt"},
+                Map.of("TEXT_ANALYSIS", plugin)
+        );
+
+        assertFalse(jobId.isBlank());
+        assertEquals(List.of(Path.of("notes-one.txt"), Path.of("notes-two.txt")), plugin.inputPaths);
+        assertEquals("CSV", plugin.parameter);
+        assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());
+        assertEquals("peer-submit", transport.publishedMessage.fromNodeId());
+
+        JobSubmitMessage message = (JobSubmitMessage) transport.publishedMessage.message();
+        assertEquals(jobId, message.getJobId());
+        assertEquals("TEXT_ANALYSIS", message.getTaskType());
+        assertEquals("CSV", message.getParameter());
+        assertEquals(List.of("payload:notes-one.txt:CSV", "payload:notes-two.txt:CSV"), message.getTaskPayloads());
+    }
+
+    @Test
+    void rabbitMqSubmitCommandFailsWhenBrokerDoesNotConfirmJobSubmit() {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport(false);
+
+        IllegalStateException error = assertThrows(IllegalStateException.class, () -> RabbitMqPeerNode.submitJob(
+                "peer-submit",
+                transport,
+                new String[] {"submit", "TEXT_ANALYSIS", "csv", "notes.txt"},
+                Map.of("TEXT_ANALYSIS", new CapturingClientPlugin())
+        ));
+
+        assertTrue(error.getMessage().contains("Job submit publish was not confirmed"));
+        assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());
     }
 
     @Test
@@ -198,6 +242,50 @@ class PeerNodeTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class CapturingClientPlugin implements ClientJobPlugin {
+        private List<Path> inputPaths;
+        private String parameter;
+
+        @Override
+        public String taskType() {
+            return "TEXT_ANALYSIS";
+        }
+
+        @Override
+        public String displayName() {
+            return "Text";
+        }
+
+        @Override
+        public List<String> supportedInputExtensions() {
+            return List.of("txt");
+        }
+
+        @Override
+        public List<String> parameterOptions() {
+            return List.of("CSV", "JSON");
+        }
+
+        @Override
+        public String defaultParameter() {
+            return "CSV";
+        }
+
+        @Override
+        public List<Object> buildPayloads(List<Path> inputPaths, String parameter) {
+            this.inputPaths = List.copyOf(inputPaths);
+            this.parameter = parameter;
+            return inputPaths.stream()
+                    .map(path -> "payload:" + path + ":" + parameter)
+                    .map(Object.class::cast)
+                    .toList();
+        }
+
+        @Override
+        public void saveResults(List<Object> results, Path outputDir) {
         }
     }
 }

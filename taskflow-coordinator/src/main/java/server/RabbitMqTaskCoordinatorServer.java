@@ -6,6 +6,7 @@ import protocol.Message;
 import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
+import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
 import server.rabbitmq.RabbitMqSchedulerOutput;
@@ -13,6 +14,7 @@ import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.scheduler.SchedulerConfig;
+import server.scheduler.SchedulerMailbox;
 import server.scheduler.TaskScheduler;
 import transport.InboundTransportMessage;
 import transport.TransportRoute;
@@ -20,8 +22,8 @@ import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 
 public class RabbitMqTaskCoordinatorServer {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTaskCoordinatorServer.class);
@@ -32,19 +34,23 @@ public class RabbitMqTaskCoordinatorServer {
         RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
         transport.declareTopology();
 
-        BlockingQueue<MessageEnvelope> inboundMailbox = new LinkedBlockingQueue<>();
-        PeerRegistry registry = new InMemoryPeerRegistry();
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
+        BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
+        PeerRegistry registry = new InMemoryPeerRegistry();
 
         DatabaseManager db = null;
+        List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
-            if (!CoordinatorStartupRecovery.reconcileAbandonedJobs(db)) {
+            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(db);
+            if (!recovery.successful()) {
                 db.close();
                 db = null;
                 LOGGER.warn("event=database_disabled path={} reason=startup_reconciliation_failed",
                         DatabaseManager.DB_PATH);
+            } else {
+                resumedJobs = recovery.resumedJobs();
             }
         } catch (Exception e) {
             if (db != null) {
@@ -62,6 +68,7 @@ public class RabbitMqTaskCoordinatorServer {
                 new RabbitMqSchedulerOutput(transport),
                 schedulerConfig
         );
+        schedulerLogic.restoreJobs(resumedJobs);
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,
@@ -97,15 +104,14 @@ public class RabbitMqTaskCoordinatorServer {
     }
 
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> inboundMailbox,
-                                            InboundTransportMessage delivery) throws InterruptedException {
-        if (delivery.acknowledgement() != null) {
-            delivery.acknowledgement().defer();
+                                            InboundTransportMessage delivery) throws Exception {
+        boolean queued = SchedulerMailbox.offerBrokerDelivery(inboundMailbox, delivery);
+        if (!queued) {
+            LOGGER.warn("event=scheduler_ingress_requeued reason=mailbox_full route={} from_node_id={} queue_depth={}",
+                    delivery.route(),
+                    delivery.fromNodeId(),
+                    inboundMailbox.size());
         }
-        inboundMailbox.put(new MessageEnvelope(
-                delivery.message(),
-                delivery.fromNodeId(),
-                delivery.acknowledgement()
-        ));
     }
 
     private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,
@@ -114,7 +120,7 @@ public class RabbitMqTaskCoordinatorServer {
         if (peer == null) {
             return;
         }
-        boolean queued = inboundMailbox.offer(new MessageEnvelope(
+        boolean queued = SchedulerMailbox.offer(inboundMailbox, new MessageEnvelope(
                 new PeerDisconnectedMessage(peer.getNodeId(), Instant.now().toString(), reason),
                 peer.getNodeId()
         ));

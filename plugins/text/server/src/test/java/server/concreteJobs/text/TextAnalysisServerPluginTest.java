@@ -16,7 +16,9 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TextAnalysisServerPluginTest {
@@ -55,5 +57,52 @@ class TextAnalysisServerPluginTest {
         assertEquals(2, aggregated.lineCount());
         assertEquals(3, aggregated.wordCount());
         assertEquals(2, aggregated.uniqueWordCount());
+    }
+
+    @Test
+    void acceptsValidSubmission() {
+        JobSubmitMessage submit = submit(
+                List.<Object>of(new TextAnalysisPayload("notes.txt", "Hello TaskFlow")),
+                "csv"
+        );
+
+        assertDoesNotThrow(() -> new TextAnalysisTaskPlugin().validateSubmission(submit));
+    }
+
+    @Test
+    void rejectsUnsupportedResultFormat() {
+        JobSubmitMessage submit = submit(
+                List.<Object>of(new TextAnalysisPayload("notes.txt", "Hello TaskFlow")),
+                "json"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                new TextAnalysisTaskPlugin().validateSubmission(submit));
+
+        assertTrue(error.getMessage().contains("Unsupported text analysis result format"));
+    }
+
+    @Test
+    void rejectsMissingTextPayload() {
+        JobSubmitMessage submit = submit(
+                List.<Object>of(new TextAnalysisPayload("notes.txt", null)),
+                "csv"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                new TextAnalysisTaskPlugin().validateSubmission(submit));
+
+        assertTrue(error.getMessage().contains("requires text"));
+    }
+
+    private static JobSubmitMessage submit(List<Object> payloads, String parameter) {
+        return new JobSubmitMessage(
+                "CLIENT",
+                Instant.EPOCH.toString(),
+                "job-validation",
+                TextAnalysisTaskTypes.TEXT_ANALYSIS,
+                payloads,
+                parameter
+        );
     }
 }

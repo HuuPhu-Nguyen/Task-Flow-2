@@ -1,6 +1,6 @@
 # TaskFlow Working Rules
 
-Last updated: 2026-06-22 14:10 Asia/Bangkok
+Last updated: 2026-06-25 11:12 Asia/Bangkok
 
 Durable conventions and rules for working on this project. `PLAN.md` is for active flaws and next slices. `LOG.md` is for completed work, verification evidence, historical notes, and handoff records.
 
@@ -78,6 +78,7 @@ PowerShell command rule:
 
 - Keep runtime artifacts out of Git: `taskflow.db*`, `java/in_PEER_*`, `java/out_PEER_*`, `target/`, IDE files, and local env files.
 - `config/taskflow.yml` is local runtime configuration; keep `config/taskflow.example.yml` as the committed template.
+- After finishing and verifying each subtask, commit the completed work and push it to the remote unless the user explicitly asks to hold local changes.
 - Do not run destructive cleanup commands without explicit user approval.
 - If `.\mvnw.cmd clean test` fails while deleting `target`, check for a local Windows file lock before treating it as a source failure.
 - If Docker reports a missing `dockerDesktopLinuxEngine` pipe, restart Docker Desktop before retrying Compose or live RabbitMQ work.

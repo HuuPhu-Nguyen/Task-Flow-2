@@ -6,6 +6,9 @@ import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import server.db.JobStateStore;
+import server.job.EmbarrassinglyParallelJob;
+import server.job.JobFactory;
+import server.job.TaskUnit;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
@@ -167,6 +170,35 @@ class TaskSchedulerPersistenceTest {
         }
     }
 
+    @Test
+    void restoredCompletedJobPublishesFinalResultAndPersistsCompletion() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        EmbarrassinglyParallelJob<?, ?> restoredJob = restoredCompletedJob(
+                "job-restored-complete",
+                "payload",
+                "restored-result"
+        );
+
+        scheduler.restoreJobs(List.of(restoredJob));
+
+        assertTrue(output.awaitResult());
+        assertTrue(store.awaitJobCompleted());
+        JobResultMessage result = output.result();
+        assertTrue(result.isSuccessful());
+        assertEquals("job-restored-complete", result.getJobId());
+        assertEquals(List.of("restored-result"), result.getResultsByTaskId());
+        assertEquals(List.of("markJobCompleted:job-restored-complete"), store.events());
+    }
+
     private static InMemoryPeerRegistry registryWithPeer(String peerId) {
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(peerId, new PeerInfo(
@@ -186,6 +218,21 @@ class TaskSchedulerPersistenceTest {
                 payloads,
                 ""
         );
+    }
+
+    private static EmbarrassinglyParallelJob<?, ?> restoredCompletedJob(String jobId,
+                                                                        Object payload,
+                                                                        Object resultPayload) {
+        JobSubmitMessage submit = testJob(jobId, List.of(payload));
+        EmbarrassinglyParallelJob<?, ?> job = JobFactory.create(submit, "requester-1");
+        job.initializeTasks(submit);
+        assertTrue(job.restoreTaskForResume(
+                "task-" + jobId + "-0",
+                TaskUnit.TaskStatus.COMPLETED,
+                resultPayload,
+                0
+        ));
+        return job;
     }
 
     private static TaskResultMessage successResult(TaskAssignMessage assignment, Object payload) {

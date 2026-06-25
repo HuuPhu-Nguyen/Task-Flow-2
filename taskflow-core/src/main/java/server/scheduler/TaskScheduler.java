@@ -196,7 +196,7 @@ public class TaskScheduler implements Runnable {
                 if (job.getTasks().isEmpty()) {
                     throw new IllegalArgumentException("Job must create at least one task.");
                 }
-                persistJobStartup(job);
+                persistJobStartup(job, submit.getParameter());
                 activeJobs.put(job.getJobId(), job);
                 metrics.setActiveJobs(activeJobs.size());
                 logInfoEvent("job_started", fields(
@@ -293,7 +293,7 @@ public class TaskScheduler implements Runnable {
         }
     }
 
-    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job) {
+    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job, String parameter) {
         if (db == null) {
             return;
         }
@@ -301,8 +301,11 @@ public class TaskScheduler implements Runnable {
                 job.getJobId(),
                 job.getTaskType(),
                 job.getRequesterNodeId(),
-                job.getTasks().size(),
-                job.getTasks().keySet()
+                parameter,
+                job.getTasks().values().stream()
+                        .sorted(Comparator.comparingInt(task -> taskIndex(task.getTaskId())))
+                        .map(task -> new JobStateStore.TaskStartupState(task.getTaskId(), task.getPayload()))
+                        .toList()
         );
         if (!persisted) {
             recordPersistence("insertJobWithTasks", job.getJobId(), "", false);
@@ -362,7 +365,12 @@ public class TaskScheduler implements Runnable {
                     "markTaskCompleted",
                     job.getJobId(),
                     task.getTaskId(),
-                    db.markTaskCompleted(task.getTaskId(), System.currentTimeMillis(), Math.max(0L, completion.durationMs()))
+                    db.markTaskCompleted(
+                            task.getTaskId(),
+                            System.currentTimeMillis(),
+                            Math.max(0L, completion.durationMs()),
+                            result.getResultPayload()
+                    )
             );
         }
         logInfoEvent("task_completed", fields(
@@ -666,6 +674,30 @@ public class TaskScheduler implements Runnable {
         return metrics.snapshot();
     }
 
+    public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs) {
+        for (EmbarrassinglyParallelJob<?, ?> job : jobs) {
+            if (job == null || activeJobs.containsKey(job.getJobId())) {
+                continue;
+            }
+            activeJobs.put(job.getJobId(), job);
+            logInfoEvent("job_resumed", fields(
+                    "job_id", job.getJobId(),
+                    "task_type", job.getTaskType(),
+                    "requester_id", job.getRequesterNodeId(),
+                    "task_count", job.getTasks().size()
+            ));
+        }
+        metrics.setActiveJobs(activeJobs.size());
+
+        for (EmbarrassinglyParallelJob<?, ?> job : List.copyOf(activeJobs.values())) {
+            if (job.isJobComplete()) {
+                completeJob(job, true, null);
+            } else if (job.hasTerminalFailure()) {
+                failJob(job, "Job resumed with one or more terminal failed tasks.");
+            }
+        }
+    }
+
     private void updateMetricsAndMaybeLog() {
         long now = System.currentTimeMillis();
         metrics.setQueueDepth(inboundMailbox.size());
@@ -725,6 +757,18 @@ public class TaskScheduler implements Runnable {
                     .append(String.valueOf(entry.getValue()));
         }
         return builder.toString();
+    }
+
+    private static int taskIndex(String taskId) {
+        int marker = taskId == null ? -1 : taskId.lastIndexOf('-');
+        if (marker < 0 || marker == taskId.length() - 1) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(taskId.substring(marker + 1));
+        } catch (NumberFormatException ignored) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     private static final class PendingJobCompletion {

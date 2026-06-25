@@ -6,6 +6,7 @@ scheduler:
   taskTimeoutMs: 60000
   maxTasksPerPeer: 3
   maxTaskRetries: 20
+  inboundQueueCapacity: 1000
   jobResultMaxDeliveryAttempts: 300
   metricsLogIntervalMs: 10000
   scoring:

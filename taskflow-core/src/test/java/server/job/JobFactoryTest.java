@@ -32,10 +32,45 @@ class JobFactoryTest {
         assertTrue(error.getMessage().contains("TEST_TASK"));
     }
 
+    @Test
+    void createRunsPluginValidationBeforeCreatingJob() {
+        ValidatingPlugin plugin = new ValidatingPlugin();
+        JobSubmitMessage submit = new JobSubmitMessage(
+                "client-1",
+                "2026-06-25T00:00:00Z",
+                "job-1",
+                "VALIDATED_TASK",
+                List.of("payload"),
+                "bad"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                JobFactory.create(submit, "client-1", Map.of("VALIDATED_TASK", plugin)));
+
+        assertTrue(error.getMessage().contains("Rejected by validating plugin"));
+    }
+
     private record StubPlugin(String taskType) implements TaskPlugin {
         @Override
         public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
             throw new UnsupportedOperationException("Test plugin does not create jobs.");
+        }
+    }
+
+    private static final class ValidatingPlugin implements TaskPlugin {
+        @Override
+        public String taskType() {
+            return "VALIDATED_TASK";
+        }
+
+        @Override
+        public void validateSubmission(JobSubmitMessage message) {
+            throw new IllegalArgumentException("Rejected by validating plugin.");
+        }
+
+        @Override
+        public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
+            throw new AssertionError("Invalid submissions should not create jobs.");
         }
     }
 }

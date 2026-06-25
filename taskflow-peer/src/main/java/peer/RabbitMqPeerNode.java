@@ -174,10 +174,10 @@ public class RabbitMqPeerNode {
         return scheduler;
     }
 
-    private static String submitJob(String nodeId,
-                                    RabbitMqTransport transport,
-                                    String[] args,
-                                    Map<String, ClientJobPlugin> clientPlugins) throws Exception {
+    static String submitJob(String nodeId,
+                            BrokerTransport transport,
+                            String[] args,
+                            Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         if (args.length < 4) {
             throw new IllegalArgumentException("""
                     Usage: TASKFLOW_TRANSPORT=rabbitmq peer.PeerNode submit <image|video|task-type> <target-format> <file> [file...]

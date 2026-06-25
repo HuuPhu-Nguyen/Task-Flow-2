@@ -19,6 +19,13 @@ public class TestTaskPlugin implements TaskPlugin {
     }
 
     @Override
+    public void validateSubmission(JobSubmitMessage message) {
+        if ("INVALID_PARAMETER".equals(message.getParameter())) {
+            throw new IllegalArgumentException("Invalid TEST_TASK parameter.");
+        }
+    }
+
+    @Override
     public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
         return new TestJob(message.getJobId(), requesterId);
     }

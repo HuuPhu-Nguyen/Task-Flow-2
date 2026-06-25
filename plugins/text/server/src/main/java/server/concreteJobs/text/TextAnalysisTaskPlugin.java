@@ -12,6 +12,11 @@ public class TextAnalysisTaskPlugin implements TaskPlugin {
     }
 
     @Override
+    public void validateSubmission(JobSubmitMessage message) {
+        TextAnalysisTaskValidation.validate(message);
+    }
+
+    @Override
     public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
         return new TextAnalysisJob(message.getJobId(), requesterId, message.getParameter());
     }

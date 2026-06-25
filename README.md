@@ -62,7 +62,7 @@ flowchart LR
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, but remains transitional until broker failure paths, backpressure, durable resume, and GUI support are complete.
+TCP is the default runtime. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, plus bounded scheduler-ingress backpressure for broker deliveries, but remains transitional until broader broker failure paths, durable outbox/replay, and GUI support are complete.
 
 ---
 
@@ -85,13 +85,13 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
 - `taskflow-gui` - TCP-only JavaFX peer that can submit jobs and execute assigned tasks through GUI-facing adapters
 
-Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`.
+Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned.
 
 The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. The GUI module depends on `taskflow-core` for shared messaging, execution, and SQLite-backed history adapters, but it does not depend on the command-line `taskflow-peer` runtime.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
-Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and disables persistence for the run if startup reconciliation cannot safely mark abandoned jobs failed. Broker deliveries are acknowledged only after scheduler handling succeeds; transient failure-result send errors cause the delivery to be requeued.
+Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery. On startup, resumable `RUNNING` jobs are rebuilt, previously assigned tasks are returned to pending because leases are not implemented, completed tasks with persisted result payloads are restored, and non-resumable legacy running jobs are marked failed. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; broker deliveries are requeued when the scheduler mailbox is full and acknowledged only after scheduler handling succeeds.
 
 The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
 
@@ -321,6 +321,7 @@ scheduler:
   taskTimeoutMs: 60000
   maxTasksPerPeer: 3
   maxTaskRetries: 20
+  inboundQueueCapacity: 1000
   jobResultMaxDeliveryAttempts: 300
   metricsLogIntervalMs: 10000
   scoring:
@@ -339,6 +340,7 @@ Environment overrides:
 - `TASKFLOW_TASK_TIMEOUT_MS`
 - `TASKFLOW_MAX_TASKS_PER_PEER`
 - `TASKFLOW_MAX_TASK_RETRIES`
+- `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`
 - `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`
 - `TASKFLOW_METRICS_LOG_INTERVAL_MS`
 - `TASKFLOW_SCORE_LOAD_WEIGHT`
@@ -360,6 +362,7 @@ $env:TASKFLOW_CONFIG = "config\taskflow.yml"
 $env:TASKFLOW_TASK_TIMEOUT_MS = "120000"
 $env:TASKFLOW_MAX_TASKS_PER_PEER = "5"
 $env:TASKFLOW_MAX_TASK_RETRIES = "8"
+$env:TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY = "2000"
 $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
@@ -437,7 +440,7 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 
 The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
-RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered.
+RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered. If the coordinator scheduler mailbox is full, RabbitMQ job submissions and task results are requeued instead of accepted into process memory.
 
 ### Live RabbitMQ Integration Tests
 
@@ -526,11 +529,11 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 ## Known Limitations
 
-- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion, but full broker outage/restart behavior, higher-level scheduler/peer backpressure policy, and durable restart resume are not complete.
+- RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion. Unit coverage verifies bounded scheduler-ingress requeue when the mailbox is full, but full broker outage/restart behavior, adaptive broker/peer throttling, and durable outbox/replay are not complete.
 - RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
-- SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, abandoned `RUNNING` jobs are marked failed on coordinator startup, and reconciliation failure disables persistence for that run instead of writing against unreconciled history. PostgreSQL/Flyway and transactional restart resume are still planned for durable production-style state management.
+- SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, later write failures are surfaced through scheduler logs, and schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs. Assigned tasks are reset to pending on resume because task leases are not implemented; legacy or otherwise non-resumable running jobs are marked failed. PostgreSQL/Flyway and lease-based recovery are still planned for production-style state management.
 
 ---
 

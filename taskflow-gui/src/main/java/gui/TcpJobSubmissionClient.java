@@ -23,10 +23,17 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
     }
 
     @Override
-    public String submitJob(String taskType, List<?> payloads, String parameter, PrintWriter out) {
-        Objects.requireNonNull(out, "out");
-        String jobId = "JOB_" + System.currentTimeMillis() + "_"
+    public String newJobId() {
+        return "JOB_" + System.currentTimeMillis() + "_"
                 + UUID.randomUUID().toString().substring(0, 8);
+    }
+
+    @Override
+    public void submitJob(String jobId, String taskType, List<?> payloads, String parameter, PrintWriter out) {
+        if (jobId == null || jobId.isBlank()) {
+            throw new IllegalArgumentException("jobId is required.");
+        }
+        Objects.requireNonNull(out, "out");
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
         JobSubmitMessage message = new JobSubmitMessage(
                 nodeId,
@@ -40,6 +47,5 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
         if (!SafeJsonWriter.send(out, gson, message)) {
             throw new IllegalStateException("Could not send job submit message to coordinator.");
         }
-        return jobId;
     }
 }

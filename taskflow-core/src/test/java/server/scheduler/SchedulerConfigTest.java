@@ -21,6 +21,7 @@ class SchedulerConfigTest {
         assertEquals(60_000L, config.taskTimeoutMillis());
         assertEquals(3, config.maxTasksPerPeer());
         assertEquals(20, config.maxTaskRetries());
+        assertEquals(1000, config.inboundQueueCapacity());
         assertEquals(300, config.jobResultMaxDeliveryAttempts());
         assertEquals(10_000L, config.metricsLogIntervalMillis());
         assertEquals(6.0, config.peerScoreLoadWeight());
@@ -38,6 +39,7 @@ class SchedulerConfigTest {
                 Map.entry("TASKFLOW_TASK_TIMEOUT_MS", "120000"),
                 Map.entry("TASKFLOW_MAX_TASKS_PER_PEER", "7"),
                 Map.entry("TASKFLOW_MAX_TASK_RETRIES", "5"),
+                Map.entry("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "77"),
                 Map.entry("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "11"),
                 Map.entry("TASKFLOW_METRICS_LOG_INTERVAL_MS", "3000"),
                 Map.entry("TASKFLOW_SCORE_LOAD_WEIGHT", "4.5"),
@@ -52,6 +54,7 @@ class SchedulerConfigTest {
         assertEquals(120_000L, config.taskTimeoutMillis());
         assertEquals(7, config.maxTasksPerPeer());
         assertEquals(5, config.maxTaskRetries());
+        assertEquals(77, config.inboundQueueCapacity());
         assertEquals(11, config.jobResultMaxDeliveryAttempts());
         assertEquals(3_000L, config.metricsLogIntervalMillis());
         assertEquals(4.5, config.peerScoreLoadWeight());
@@ -68,6 +71,8 @@ class SchedulerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASKS_PER_PEER", "0")));
         assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "0")));
+        assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "0")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCORE_FAILURE_WEIGHT", "-1")));
@@ -83,6 +88,7 @@ class SchedulerConfigTest {
                   taskTimeoutMs: 90000
                   maxTasksPerPeer: 4
                   maxTaskRetries: 6
+                  inboundQueueCapacity: 123
                   jobResultMaxDeliveryAttempts: 12
                   metricsLogIntervalMs: 2500
                   scoring:
@@ -100,6 +106,7 @@ class SchedulerConfigTest {
         assertEquals(90_000L, config.taskTimeoutMillis());
         assertEquals(4, config.maxTasksPerPeer());
         assertEquals(6, config.maxTaskRetries());
+        assertEquals(123, config.inboundQueueCapacity());
         assertEquals(12, config.jobResultMaxDeliveryAttempts());
         assertEquals(2_500L, config.metricsLogIntervalMillis());
         assertEquals(3.5, config.peerScoreLoadWeight());

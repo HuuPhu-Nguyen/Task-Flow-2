@@ -1,11 +1,13 @@
 package server.db;
 
+import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -14,7 +16,8 @@ public class DatabaseManager implements JobStateStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = 2;
+    private static final Gson GSON = new Gson();
 
     private final Connection conn;
 
@@ -61,10 +64,12 @@ public class DatabaseManager implements JobStateStore {
             }
 
             createJobsTable();
+            ensureJobsTableColumns();
             if (tableExists("tasks")) {
                 if (!tasksHaveJobForeignKey()) {
                     migrateTasksTableToForeignKey();
                 }
+                ensureTasksTableColumns();
             } else {
                 createTasksTable();
             }
@@ -102,7 +107,8 @@ public class DatabaseManager implements JobStateStore {
                     status           TEXT    NOT NULL DEFAULT 'RUNNING',
                     submitted_at     INTEGER NOT NULL,
                     completed_at     INTEGER,
-                    file_count       INTEGER NOT NULL
+                    file_count       INTEGER NOT NULL,
+                    parameter        TEXT    NOT NULL DEFAULT ''
                 )
             """);
         }
@@ -120,9 +126,32 @@ public class DatabaseManager implements JobStateStore {
                     completed_at     INTEGER,
                     duration_ms      INTEGER,
                     retry_count      INTEGER NOT NULL DEFAULT 0,
+                    payload_json     TEXT,
+                    result_payload_json TEXT,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 )
             """);
+        }
+    }
+
+    private void ensureJobsTableColumns() throws SQLException {
+        if (!columnExists("jobs", "parameter")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE jobs ADD COLUMN parameter TEXT NOT NULL DEFAULT ''");
+            }
+        }
+    }
+
+    private void ensureTasksTableColumns() throws SQLException {
+        if (!columnExists("tasks", "payload_json")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN payload_json TEXT");
+            }
+        }
+        if (!columnExists("tasks", "result_payload_json")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN result_payload_json TEXT");
+            }
         }
     }
 
@@ -137,10 +166,15 @@ public class DatabaseManager implements JobStateStore {
             throw new SQLException("Cannot migrate task schema because migration backup table already exists.");
         }
 
+        boolean hasPayloadJson = columnExists("tasks", "payload_json");
+        boolean hasResultPayloadJson = columnExists("tasks", "result_payload_json");
+
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("ALTER TABLE tasks RENAME TO " + backupTable);
         }
         createTasksTable();
+        String payloadJsonExpression = hasPayloadJson ? "payload_json" : "NULL";
+        String resultPayloadJsonExpression = hasResultPayloadJson ? "result_payload_json" : "NULL";
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
                 INSERT INTO tasks(
@@ -151,7 +185,9 @@ public class DatabaseManager implements JobStateStore {
                     started_at,
                     completed_at,
                     duration_ms,
-                    retry_count
+                    retry_count,
+                    payload_json,
+                    result_payload_json
                 )
                 SELECT
                     task_id,
@@ -161,9 +197,11 @@ public class DatabaseManager implements JobStateStore {
                     started_at,
                     completed_at,
                     duration_ms,
-                    retry_count
+                    retry_count,
+                    %s,
+                    %s
                 FROM tasks_without_fk_migration
-            """);
+            """.formatted(payloadJsonExpression, resultPayloadJsonExpression));
             stmt.execute("DROP TABLE " + backupTable);
         }
     }
@@ -207,6 +245,18 @@ public class DatabaseManager implements JobStateStore {
         }
     }
 
+    private boolean columnExists(String tableName, String columnName) throws SQLException {
+        try (Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + tableName + ")")) {
+            while (rs.next()) {
+                if (columnName.equals(rs.getString("name"))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     private boolean tasksHaveJobForeignKey() throws SQLException {
         try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery("PRAGMA foreign_key_list(tasks)")) {
             while (rs.next()) {
@@ -242,6 +292,12 @@ public class DatabaseManager implements JobStateStore {
         if (!tasksHaveJobForeignKey()) {
             throw new SQLException("Database schema is missing tasks.job_id foreign-key enforcement.");
         }
+        if (!columnExists("jobs", "parameter")) {
+            throw new SQLException("Database schema is missing jobs.parameter.");
+        }
+        if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
+            throw new SQLException("Database schema is missing persisted task payload columns.");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -253,8 +309,29 @@ public class DatabaseManager implements JobStateStore {
                                                    String requesterId,
                                                    int fileCount,
                                                    Collection<String> taskIds) {
-        String insertJobSql = "INSERT INTO jobs(job_id,task_type,requester_node_id,status,submitted_at,file_count) VALUES(?,?,?,?,?,?)";
-        String insertTaskSql = "INSERT INTO tasks(task_id,job_id,status) VALUES(?,?,?)";
+        return insertJobWithTasks(
+                jobId,
+                taskType,
+                requesterId,
+                "",
+                taskIds.stream()
+                        .map(taskId -> new TaskStartupState(taskId, null))
+                        .toList()
+        );
+    }
+
+    @Override
+    public synchronized boolean insertJobWithTasks(String jobId,
+                                                   String taskType,
+                                                   String requesterId,
+                                                   String parameter,
+                                                   Collection<TaskStartupState> tasks) {
+        List<TaskStartupState> taskStates = List.copyOf(tasks);
+        String insertJobSql = """
+                INSERT INTO jobs(job_id,task_type,requester_node_id,status,submitted_at,file_count,parameter)
+                VALUES(?,?,?,?,?,?,?)
+                """;
+        String insertTaskSql = "INSERT INTO tasks(task_id,job_id,status,payload_json) VALUES(?,?,?,?)";
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
@@ -266,17 +343,19 @@ public class DatabaseManager implements JobStateStore {
                 job.setString(3, requesterId);
                 job.setString(4, "RUNNING");
                 job.setLong(5, System.currentTimeMillis());
-                job.setInt(6, fileCount);
+                job.setInt(6, taskStates.size());
+                job.setString(7, parameter == null ? "" : parameter);
                 if (job.executeUpdate() <= 0) {
                     throw new SQLException("No job row inserted.");
                 }
 
-                for (String taskId : taskIds) {
-                    task.setString(1, taskId);
+                for (TaskStartupState taskState : taskStates) {
+                    task.setString(1, taskState.taskId());
                     task.setString(2, jobId);
                     task.setString(3, "PENDING");
+                    task.setString(4, toJson(taskState.payload()));
                     if (task.executeUpdate() <= 0) {
-                        throw new SQLException("No task row inserted for task " + taskId);
+                        throw new SQLException("No task row inserted for task " + taskState.taskId());
                     }
                 }
 
@@ -295,7 +374,10 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean insertJob(String jobId, String taskType, String requesterId, int fileCount) {
-        String sql = "INSERT INTO jobs(job_id,task_type,requester_node_id,status,submitted_at,file_count) VALUES(?,?,?,?,?,?)";
+        String sql = """
+                INSERT INTO jobs(job_id,task_type,requester_node_id,status,submitted_at,file_count,parameter)
+                VALUES(?,?,?,?,?,?,?)
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, jobId);
             ps.setString(2, taskType);
@@ -303,6 +385,7 @@ public class DatabaseManager implements JobStateStore {
             ps.setString(4, "RUNNING");
             ps.setLong(5, System.currentTimeMillis());
             ps.setInt(6, fileCount);
+            ps.setString(7, "");
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             logSqlFailure("insertJob", e);
@@ -343,17 +426,27 @@ public class DatabaseManager implements JobStateStore {
     }
 
     public synchronized boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
+        return markTaskCompleted(taskId, completedAt, durationMs, null);
+    }
+
+    @Override
+    public synchronized boolean markTaskCompleted(String taskId,
+                                                 long completedAt,
+                                                 long durationMs,
+                                                 Object resultPayload) {
         String sql = """
                 UPDATE tasks
                 SET status='COMPLETED',
                     completed_at=?,
-                    duration_ms=?
+                    duration_ms=?,
+                    result_payload_json=?
                 WHERE task_id=? AND status='ASSIGNED'
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, completedAt);
             ps.setLong(2, durationMs);
-            ps.setString(3, taskId);
+            ps.setString(3, toJson(resultPayload));
+            ps.setString(4, taskId);
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             logSqlFailure("markTaskCompleted", e);
@@ -456,6 +549,109 @@ public class DatabaseManager implements JobStateStore {
         }
     }
 
+    @Override
+    public synchronized boolean markRunningJobFailedOnStartup(String jobId, long completedAt) {
+        String failTasksSql = """
+                UPDATE tasks
+                SET status='FAILED', completed_at=?
+                WHERE status NOT IN ('COMPLETED', 'FAILED')
+                  AND job_id=?
+                """;
+        String failJobSql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=? AND status='RUNNING'";
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement failTasks = conn.prepareStatement(failTasksSql);
+                 PreparedStatement failJob = conn.prepareStatement(failJobSql)) {
+                failTasks.setLong(1, completedAt);
+                failTasks.setString(2, jobId);
+                failTasks.executeUpdate();
+
+                failJob.setLong(1, completedAt);
+                failJob.setString(2, jobId);
+                boolean failed = failJob.executeUpdate() > 0;
+                conn.commit();
+                return failed;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            logSqlFailure("markRunningJobFailedOnStartup", e);
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized boolean resetTaskForResume(String taskId) {
+        String sql = """
+                UPDATE tasks
+                SET status='PENDING',
+                    assigned_peer_id=NULL,
+                    started_at=NULL,
+                    completed_at=NULL,
+                    duration_ms=NULL
+                WHERE task_id=? AND status IN ('PENDING', 'ASSIGNED')
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            logSqlFailure("resetTaskForResume", e);
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized List<ResumableJobState> loadRunningJobsForResume() {
+        List<ResumableJobState> jobs = new ArrayList<>();
+        String sql = "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY submitted_at ASC";
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                String jobId = rs.getString("job_id");
+                jobs.add(new ResumableJobState(
+                        jobId,
+                        rs.getString("task_type"),
+                        rs.getString("requester_node_id"),
+                        rs.getString("parameter"),
+                        loadTasksForResume(jobId)
+                ));
+            }
+        } catch (SQLException e) {
+            logSqlFailure("loadRunningJobsForResume", e);
+        }
+        return jobs;
+    }
+
+    private List<ResumableTaskState> loadTasksForResume(String jobId) throws SQLException {
+        List<ResumableTaskState> tasks = new ArrayList<>();
+        String sql = """
+                SELECT task_id, status, payload_json, result_payload_json, retry_count
+                FROM tasks
+                WHERE job_id=?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    tasks.add(new ResumableTaskState(
+                            rs.getString("task_id"),
+                            rs.getString("status"),
+                            fromJson(rs.getString("payload_json")),
+                            fromJson(rs.getString("result_payload_json")),
+                            rs.getInt("retry_count")
+                    ));
+                }
+            }
+        }
+        return tasks.stream()
+                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                .toList();
+    }
+
     // -------------------------------------------------------------------------
     // Read methods (called from GUI process via its own connection)
     // -------------------------------------------------------------------------
@@ -511,6 +707,29 @@ public class DatabaseManager implements JobStateStore {
 
     private static void logSqlFailure(String operation, SQLException e) {
         LOGGER.warn("event=db_operation_failed operation={} error={}", operation, e.getMessage(), e);
+    }
+
+    private static String toJson(Object payload) {
+        return payload == null ? null : GSON.toJson(payload);
+    }
+
+    private static Object fromJson(String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        return GSON.fromJson(json, Object.class);
+    }
+
+    private static int taskIndex(String taskId) {
+        int marker = taskId == null ? -1 : taskId.lastIndexOf('-');
+        if (marker < 0 || marker == taskId.length() - 1) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(taskId.substring(marker + 1));
+        } catch (NumberFormatException ignored) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     // -------------------------------------------------------------------------

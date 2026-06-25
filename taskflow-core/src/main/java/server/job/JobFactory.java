@@ -14,12 +14,19 @@ public class JobFactory {
     private static final Map<String, TaskPlugin> PLUGINS = loadPlugins();
 
     public static EmbarrassinglyParallelJob<?,?> create(JobSubmitMessage msg, String requesterId) {
+        return create(msg, requesterId, PLUGINS);
+    }
+
+    static EmbarrassinglyParallelJob<?,?> create(JobSubmitMessage msg,
+                                                String requesterId,
+                                                Map<String, TaskPlugin> plugins) {
         String type = normalize(msg.getTaskType());
-        TaskPlugin plugin = PLUGINS.get(type);
+        TaskPlugin plugin = plugins.get(type);
         if (plugin == null) {
             throw new IllegalArgumentException(
-                    "Unsupported job type: " + msg.getTaskType() + ". Available types: " + PLUGINS.keySet());
+                    "Unsupported job type: " + msg.getTaskType() + ". Available types: " + plugins.keySet());
         }
+        plugin.validateSubmission(msg);
         return plugin.createJob(msg, requesterId);
     }
 

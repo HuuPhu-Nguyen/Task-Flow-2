@@ -221,8 +221,11 @@ public class PeerApp extends Application {
                             }
                             gallery.getChildren().clear();
                             clearStagedInputs();
-                            new Alert(Alert.AlertType.CONFIRMATION,
-                                    submittedJob.plugin().displayName() + " started. The gallery will be cleared.").show();
+                            if (submittedJob.activeAfterSend()) {
+                                new Alert(Alert.AlertType.CONFIRMATION,
+                                        submittedJob.plugin().displayName()
+                                                + " started. The gallery will be cleared.").show();
+                            }
                         });
             } catch (Exception ex) {
                 LOGGER.error("event=gui_job_submit_failed error={}", ex.getMessage(), ex);

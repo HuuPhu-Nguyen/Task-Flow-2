@@ -24,20 +24,31 @@ final class GuiJobSubmitter {
             throw new IllegalStateException("Connection to coordinator changed before submission.");
         }
 
-        String jobId;
+        String jobId = jobSubmissionClient.newJobId();
+        if (jobId == null || jobId.isBlank()) {
+            throw new IllegalStateException("Job submission client returned a blank job id.");
+        }
+
+        if (!activeJobIds.add(jobId)) {
+            throw new IllegalStateException("Job id is already active: " + jobId);
+        }
+
+        if (!connectionCurrent.getAsBoolean()) {
+            activeJobIds.remove(jobId);
+            throw new IllegalStateException("Connection to coordinator changed before submission.");
+        }
+
         try {
-            jobId = jobSubmissionClient.submitJob(plugin.taskType(), payloads, targetFormat, out);
-        } catch (IllegalStateException sendFailure) {
+            jobSubmissionClient.submitJob(jobId, plugin.taskType(), payloads, targetFormat, out);
+        } catch (RuntimeException sendFailure) {
+            activeJobIds.remove(jobId);
             onSendFailure.run();
             throw sendFailure;
         }
 
-        if (jobId != null) {
-            activeJobIds.add(jobId);
-        }
-        return new SubmittedJob(jobId, plugin);
+        return new SubmittedJob(jobId, plugin, activeJobIds.contains(jobId));
     }
 
-    record SubmittedJob(String jobId, ClientJobPlugin plugin) {
+    record SubmittedJob(String jobId, ClientJobPlugin plugin, boolean activeAfterSend) {
     }
 }

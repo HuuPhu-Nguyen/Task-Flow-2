@@ -2,8 +2,12 @@ package server;
 
 import org.junit.jupiter.api.Test;
 import server.db.JobStateStore;
+import server.job.EmbarrassinglyParallelJob;
+import server.job.TaskUnit;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -39,6 +43,87 @@ class CoordinatorStartupRecoveryTest {
 
         assertEquals(789L, store.completedAt());
         assertEquals(1, store.reconciliationCalls());
+    }
+
+    @Test
+    void resumesRunningJobsWithPersistedPendingPayloads() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-resume",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-resume-0",
+                        "ASSIGNED",
+                        "payload",
+                        null,
+                        2
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 123L);
+
+        assertTrue(result.successful());
+        assertEquals(1, result.resumedJobs().size());
+        assertEquals(0, result.failedJobs());
+        assertEquals(List.of("task-job-resume-0"), store.resetTasks());
+
+        EmbarrassinglyParallelJob<?, ?> job = result.resumedJobs().getFirst();
+        TaskUnit<?> task = job.getTasks().get("task-job-resume-0");
+        assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
+        assertEquals(2, task.getRetryCount());
+    }
+
+    @Test
+    void restoresCompletedTaskResultsForRunningJobs() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-completed-before-final-result",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-completed-before-final-result-0",
+                        "COMPLETED",
+                        "payload",
+                        "result",
+                        0
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 456L);
+
+        assertTrue(result.successful());
+        EmbarrassinglyParallelJob<?, ?> job = result.resumedJobs().getFirst();
+        assertTrue(job.isJobComplete());
+        assertEquals(List.of("result"), job.aggregateAndSendResult());
+        assertEquals(0, store.failedJobs().size());
+    }
+
+    @Test
+    void marksRunningJobsFailedWhenPayloadsCannotBeRestored() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-missing-payload",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-missing-payload-0",
+                        "PENDING",
+                        null,
+                        null,
+                        0
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 789L);
+
+        assertTrue(result.successful());
+        assertEquals(0, result.resumedJobs().size());
+        assertEquals(1, result.failedJobs());
+        assertEquals(List.of("job-missing-payload:789"), store.failedJobs());
     }
 
     private static class RecordingStore implements JobStateStore {
@@ -112,6 +197,95 @@ class CoordinatorStartupRecoveryTest {
 
         private int reconciliationCalls() {
             return reconciliationCalls;
+        }
+    }
+
+    private static class ResumeStore implements JobStateStore {
+        private final List<ResumableJobState> runningJobs;
+        private final List<String> resetTasks = new ArrayList<>();
+        private final List<String> failedJobs = new ArrayList<>();
+
+        private ResumeStore(List<ResumableJobState> runningJobs) {
+            this.runningJobs = runningJobs;
+        }
+
+        @Override
+        public boolean insertJobWithTasks(String jobId,
+                                          String taskType,
+                                          String requesterId,
+                                          int fileCount,
+                                          Collection<String> taskIds) {
+            return false;
+        }
+
+        @Override
+        public boolean insertJob(String jobId, String taskType, String requesterId, int fileCount) {
+            return false;
+        }
+
+        @Override
+        public boolean insertTask(String taskId, String jobId) {
+            return false;
+        }
+
+        @Override
+        public boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
+            return false;
+        }
+
+        @Override
+        public boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
+            return false;
+        }
+
+        @Override
+        public boolean markTaskRetried(String taskId, int retryCount) {
+            return false;
+        }
+
+        @Override
+        public boolean markTaskFailed(String taskId) {
+            return false;
+        }
+
+        @Override
+        public boolean markJobCompleted(String jobId) {
+            return false;
+        }
+
+        @Override
+        public boolean markJobFailed(String jobId) {
+            return false;
+        }
+
+        @Override
+        public int markRunningJobsFailedOnStartup(long completedAt) {
+            return 0;
+        }
+
+        @Override
+        public List<ResumableJobState> loadRunningJobsForResume() {
+            return runningJobs;
+        }
+
+        @Override
+        public boolean resetTaskForResume(String taskId) {
+            resetTasks.add(taskId);
+            return true;
+        }
+
+        @Override
+        public boolean markRunningJobFailedOnStartup(String jobId, long completedAt) {
+            failedJobs.add(jobId + ":" + completedAt);
+            return true;
+        }
+
+        private List<String> resetTasks() {
+            return List.copyOf(resetTasks);
+        }
+
+        private List<String> failedJobs() {
+            return List.copyOf(failedJobs);
         }
     }
 }

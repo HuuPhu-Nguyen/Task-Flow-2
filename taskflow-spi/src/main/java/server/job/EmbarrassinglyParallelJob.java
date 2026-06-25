@@ -57,6 +57,36 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
         return tasks.values().stream().anyMatch(t -> t.getStatus() == TaskUnit.TaskStatus.FAILED);
     }
 
+    @SuppressWarnings("unchecked")
+    public synchronized boolean restoreTaskForResume(String taskId,
+                                                     TaskUnit.TaskStatus status,
+                                                     Object rawResultData,
+                                                     int retryCount) {
+        TaskUnit<T> task = tasks.get(taskId);
+        if (task == null || status == null) {
+            return false;
+        }
+
+        if (status == TaskUnit.TaskStatus.COMPLETED) {
+            if (rawResultData == null) {
+                return false;
+            }
+            R resultData = parseResult(rawResultData);
+            task.restoreCompletedForResume(retryCount);
+            onTaskSuccess(task, resultData);
+            completedCount.incrementAndGet();
+            return true;
+        }
+
+        if (status == TaskUnit.TaskStatus.FAILED) {
+            task.restoreFailedForResume(retryCount);
+            return true;
+        }
+
+        task.restorePendingForResume(retryCount);
+        return true;
+    }
+
     public int getFailedCount() {
         return (int) tasks.values().stream()
                 .filter(t -> t.getStatus() == TaskUnit.TaskStatus.FAILED)

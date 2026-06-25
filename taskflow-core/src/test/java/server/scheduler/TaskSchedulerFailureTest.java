@@ -103,6 +103,44 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void invalidPluginSubmissionReturnsFailedJobResultWithoutDispatching() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-invalid-plugin-submit-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage invalidJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-06-25T00:00:00Z",
+                    "job-invalid-submit",
+                    "TEST_TASK",
+                    List.of("payload"),
+                    "INVALID_PARAMETER"
+            );
+            mailbox.put(new MessageEnvelope(invalidJob, "requester-1"));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertEquals("job-invalid-submit", result.getJobId());
+            assertEquals("TEST_TASK", result.getTaskType());
+            assertFalse(result.isSuccessful());
+            assertTrue(result.getErrorMessage().contains("Invalid TEST_TASK parameter"));
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void brokerDeliveryIsAcknowledgedAfterJobSubmitHandling() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         CapturingOutput output = new CapturingOutput();

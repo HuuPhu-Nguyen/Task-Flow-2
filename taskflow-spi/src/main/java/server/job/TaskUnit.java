@@ -117,6 +117,31 @@ public abstract class TaskUnit<T> {
     public synchronized int getRetryCount() {
         return retryCount;
     }
+
+    public synchronized void restorePendingForResume(int retryCount) {
+        this.retryCount = Math.max(0, retryCount);
+        this.assignedPeerId = null;
+        this.startTime = 0L;
+        this.pendingSinceMillis = System.currentTimeMillis();
+        this.status = TaskStatus.PENDING;
+    }
+
+    public synchronized void restoreCompletedForResume(int retryCount) {
+        this.retryCount = Math.max(0, retryCount);
+        this.assignedPeerId = null;
+        this.startTime = 0L;
+        this.pendingSinceMillis = -1L;
+        this.status = TaskStatus.COMPLETED;
+    }
+
+    public synchronized void restoreFailedForResume(int retryCount) {
+        this.retryCount = Math.max(0, retryCount);
+        this.assignedPeerId = null;
+        this.startTime = 0L;
+        this.pendingSinceMillis = -1L;
+        this.status = TaskStatus.FAILED;
+    }
+
     public String getJobId(){
         return jobId;
     }

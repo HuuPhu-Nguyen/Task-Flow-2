@@ -2,17 +2,22 @@ package gui;
 
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
+import protocol.JobResultMessage;
 
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -43,8 +48,49 @@ class GuiJobSubmitterTest {
 
         assertNotNull(submittedJob.jobId());
         assertSame(plugin, submittedJob.plugin());
+        assertTrue(submittedJob.activeAfterSend());
         assertTrue(activeJobs.contains(submittedJob.jobId()));
         assertTrue(writer.toString().contains("TEXT_ANALYSIS"));
+    }
+
+    @Test
+    void resultArrivingDuringSendRoutesBecauseJobIsAlreadyTracked() {
+        Set<String> activeJobs = ConcurrentHashMap.newKeySet();
+        AtomicReference<GuiJobResultRouter.Action> routedAction = new AtomicReference<>();
+        JobSubmissionClient immediateResultClient = new JobSubmissionClient() {
+            @Override
+            public String newJobId() {
+                return "job-fast-failure";
+            }
+
+            @Override
+            public void submitJob(String jobId,
+                                  String taskType,
+                                  List<?> payloads,
+                                  String parameter,
+                                  PrintWriter out) {
+                routedAction.set(GuiJobResultRouter.route(
+                        result(jobId, false, "failed immediately"),
+                        activeJobs).action());
+            }
+        };
+
+        GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
+                immediateResultClient,
+                plugin,
+                List.of("payload"),
+                "summary",
+                new PrintWriter(new StringWriter(), true),
+                () -> true,
+                () -> {
+                    throw new AssertionError("send failure callback should not run");
+                },
+                activeJobs);
+
+        assertEquals("job-fast-failure", submittedJob.jobId());
+        assertFalse(submittedJob.activeAfterSend());
+        assertEquals(GuiJobResultRouter.Action.SHOW_FAILURE, routedAction.get());
+        assertFalse(activeJobs.contains("job-fast-failure"));
     }
 
     @Test
@@ -60,6 +106,28 @@ class GuiJobSubmitterTest {
                 "summary",
                 new PrintWriter(writer, true),
                 () -> false,
+                () -> sendFailureCallback.set(true),
+                activeJobs));
+
+        assertTrue(writer.toString().isEmpty());
+        assertTrue(activeJobs.isEmpty());
+        assertFalse(sendFailureCallback.get());
+    }
+
+    @Test
+    void connectionChangeAfterTrackingRemovesReservedJobWithoutSending() {
+        Set<String> activeJobs = ConcurrentHashMap.newKeySet();
+        StringWriter writer = new StringWriter();
+        AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
+        AtomicInteger connectionChecks = new AtomicInteger(0);
+
+        assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
+                jobSubmissionClient,
+                plugin,
+                List.of("payload"),
+                "summary",
+                new PrintWriter(writer, true),
+                () -> connectionChecks.incrementAndGet() == 1,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
 
@@ -85,6 +153,17 @@ class GuiJobSubmitterTest {
 
         assertTrue(activeJobs.isEmpty());
         assertTrue(sendFailureCallback.get());
+    }
+
+    private static JobResultMessage result(String jobId, boolean successful, String errorMessage) {
+        return new JobResultMessage(
+                "coordinator",
+                Instant.EPOCH.toString(),
+                jobId,
+                "TEXT_ANALYSIS",
+                successful,
+                List.of(),
+                errorMessage);
     }
 
     private static final class FakeClientJobPlugin implements ClientJobPlugin {

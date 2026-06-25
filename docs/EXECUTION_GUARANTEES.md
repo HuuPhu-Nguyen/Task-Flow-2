@@ -8,6 +8,12 @@ This document defines the current runtime guarantees of TaskFlow.
 - **Implication:** a task may run more than once in failure or timeout scenarios.
 - **Idempotency guard:** a task result is accepted only when it comes from the currently assigned peer and the task is in `ASSIGNED` state.
 
+## Job Submission Validation
+
+- Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
+- Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, and invalid Base64 file data.
+- Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work.
+
 ## RabbitMQ Publication
 
 - RabbitMQ transport channels enable publisher-confirm mode during startup.
@@ -31,7 +37,9 @@ This document defines the current runtime guarantees of TaskFlow.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or peer explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
-- Higher-level backpressure that coordinates broker prefetch, scheduler assignment limits, peer capacity, and queue-depth policy remains basic.
+- Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
+- RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
+- Adaptive backpressure across broker queue depth, peer capacity, and external autoscaling remains future work.
 
 ## Task State Machine
 
@@ -75,8 +83,10 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - The SQLite schema is versioned and startup rejects schema versions newer than this runtime supports.
 - SQLite foreign-key checks are enabled per connection, and `tasks.job_id` must reference an existing `jobs.job_id`.
 - Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
-- Coordinator startup marks stale `RUNNING` jobs and non-terminal tasks failed; it does not yet resume in-flight attempts from persisted leases.
-- If startup reconciliation fails, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
+- Schema version 2 stores job parameters plus task payload/result snapshots used for startup recovery.
+- Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, and resets assigned tasks to `PENDING` because leases are not implemented.
+- Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
+- If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 
 ## Heartbeat and Peer Liveness
 
