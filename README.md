@@ -82,12 +82,20 @@ TaskFlow is now organized as a Maven reactor:
 - `plugins/text/peer` - text-analysis peer processor
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
-- `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ
-- `taskflow-gui` - TCP-only JavaFX peer that can submit jobs and execute assigned tasks through GUI-facing adapters
+- `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ, with submitter/executor/combined runtime profiles
+- `taskflow-gui` - TCP-only JavaFX peer with GUI-facing adapters and submitter/executor/combined runtime profiles
 
 Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned.
 
 The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. The GUI module depends on `taskflow-core` for shared messaging, execution, and SQLite-backed history adapters, but it does not depend on the command-line `taskflow-peer` runtime.
+
+`taskflow-peer` and `taskflow-gui` define Maven runtime profiles so role classpaths can be narrowed without changing source modules:
+
+- `combined-runtime` is active by default and preserves the current combined peer behavior with client plugins and peer processors.
+- `submitter-runtime` includes client plugins only. It omits peer processor artifacts and their native media dependencies, including the conversion peer's JavaCV/FFmpeg runtime.
+- `executor-runtime` includes peer processors only. Use it for workers that should execute assigned tasks without carrying client payload creation and result-saving plugins.
+
+The coordinator runtime carries server plugin artifacts only. It does not need client plugins or peer processor artifacts.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
 
@@ -242,7 +250,7 @@ TCP communication is done using JSON messages over sockets. RabbitMQ communicati
 
 ## GUI Peer
 
-The JavaFX GUI (`PeerApp`) acts as both:
+The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and acts as both:
 
 - a **job-submitting peer**
 - a **task-executing peer**
@@ -254,6 +262,7 @@ The JavaFX GUI (`PeerApp`) acts as both:
 - Receive and save results
 - Uses temporary session folders for input/output
 - Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains planned
+- Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
 
 ---
 
@@ -431,6 +440,14 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 .\mvnw.cmd -pl taskflow-peer exec:java "-Dexec.args=submit image png path\to\input.jpg"
 ```
 
+Use `-Psubmitter-runtime` for a command-line submitter that should not carry peer processor artifacts:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+$env:TASKFLOW_PEER_ID = "peer-submit"
+.\mvnw.cmd -pl taskflow-peer -Psubmitter-runtime exec:java "-Dexec.args=submit image png path\to\input.jpg"
+```
+
 Text analysis uses the same plugin-driven submit path:
 
 ```powershell
@@ -439,7 +456,7 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 .\mvnw.cmd -pl taskflow-peer exec:java "-Dexec.args=submit text csv path\to\notes.txt"
 ```
 
-The submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
+With the default `combined-runtime` profile, the submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
 RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered. If the coordinator scheduler mailbox is full, RabbitMQ job submissions and task results are requeued instead of accepted into process memory.
 
@@ -656,17 +673,23 @@ For a repeatable desktop smoke checklist covering connection refusal, successful
 
 ### Optional: Start a Command-Line Peer
 
-The GUI also executes assigned tasks, so this is optional. Use this when you want another machine or terminal to contribute compute capacity without opening the GUI:
+The GUI also executes assigned tasks when run with the default `combined-runtime` profile, so this is optional. Use this when you want another machine or terminal to contribute compute capacity without opening the GUI:
 
 ```bash
 ./mvnw -pl taskflow-peer exec:java -Dexec.args="localhost 6789"
+```
+
+Use `-Pexecutor-runtime` for a command-line peer that only needs processor plugins:
+
+```bash
+./mvnw -pl taskflow-peer -Pexecutor-runtime exec:java -Dexec.args="localhost 6789"
 ```
 
 Replace `localhost` with the coordinator machine's IP address when running across computers.
 
 ### Notes
 
-- The GUI also acts as a peer and can execute tasks.
+- The GUI also acts as a peer and can execute tasks when run with the default `combined-runtime` profile.
 - Always start the server before peers or GUI.
 - If connection fails, verify port `6789` is available.
 - If video conversion fails on one machine but not another, rebuild and restart every coordinator/peer process so all machines use the same compiled code.

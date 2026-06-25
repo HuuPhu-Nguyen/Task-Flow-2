@@ -20,26 +20,6 @@
             <artifactId>taskflow-core</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-conversion-client</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-conversion-peer</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-text-client</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.dickinson.cs</groupId>
-            <artifactId>taskflow-plugin-text-peer</artifactId>
-            <scope>runtime</scope>
-        </dependency>
-        <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
         </dependency>
@@ -70,6 +50,67 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <profiles>
+        <profile>
+            <id>combined-runtime</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <dependencies>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-conversion-client</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-conversion-peer</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-text-client</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-text-peer</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>submitter-runtime</id>
+            <dependencies>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-conversion-client</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-text-client</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>executor-runtime</id>
+            <dependencies>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-conversion-peer</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.dickinson.cs</groupId>
+                    <artifactId>taskflow-plugin-text-peer</artifactId>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
 
     <build>
         <plugins>
