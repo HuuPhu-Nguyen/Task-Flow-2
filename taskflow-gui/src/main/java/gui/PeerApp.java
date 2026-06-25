@@ -33,10 +33,9 @@ public class PeerApp extends Application {
     private GuiJobSubmissionService jobSubmissionService;
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private GuiCoordinatorConnectionService connectionService;
+    private GuiInputStagingService inputStagingService;
     private volatile Task<?> activeBackgroundTask;
 
-    private String currentInPath;
-    private String currentOutPath;
     private String sessionId;
     private TilePane gallery;
     private GuiHistoryView historyView;
@@ -48,10 +47,8 @@ public class PeerApp extends Application {
         try {
             // Generate unique folders for this GUI instance
             this.sessionId = "PEER_" + (System.currentTimeMillis() % 100000);
-            this.currentInPath = "java/in_" + sessionId;
-            this.currentOutPath = "java/out_" + sessionId;
-
-            FileUtils.prepareDirectories(currentInPath, currentOutPath);
+            inputStagingService = GuiInputStagingService.forSession(sessionId);
+            inputStagingService.prepareDirectories();
 
             workerRuntime = new PeerEngineWorkerRuntime(sessionId);
             jobSubmissionClient = new TcpJobSubmissionClient(sessionId);
@@ -240,7 +237,7 @@ public class PeerApp extends Application {
             FileChooser fileChooser = new FileChooser();
             fileChooser.setTitle("Select " + plugin.displayName() + " Inputs");
             List<String> extensionPatterns = plugin.supportedInputExtensions().stream()
-                    .map(PeerApp::fileChooserPattern)
+                    .map(GuiInputStagingService::fileChooserPattern)
                     .toList();
             if (extensionPatterns.isEmpty()) {
                 fileChooser.getExtensionFilters().add(
@@ -282,7 +279,7 @@ public class PeerApp extends Application {
             @Override
             protected List<InputStaging.StagedInput> call() throws Exception {
                 updateMessage("Staging " + sources.size() + " file(s)...");
-                return InputStaging.stageFiles(sources, Paths.get(currentInPath), this::isCancelled);
+                return inputStagingService.stageFiles(sources, this::isCancelled);
             }
         };
     }
@@ -421,29 +418,15 @@ public class PeerApp extends Application {
     }
 
     private List<Path> stagedInputFiles() throws IOException {
-        return InputStaging.stagedInputFiles(Paths.get(currentInPath));
+        return inputStagingService.stagedInputFiles();
     }
 
     private void clearStagedInputs() {
         try {
-            InputStaging.clear(Paths.get(currentInPath));
+            inputStagingService.clearStagedInputs();
         } catch (IOException deleteError) {
             LOGGER.warn("event=temp_inputs_clear_failed error={}", deleteError.getMessage(), deleteError);
         }
-    }
-
-    private static String fileChooserPattern(String extension) {
-        if (extension == null || extension.isBlank()) {
-            return "*.*";
-        }
-        String value = extension.trim().toLowerCase(Locale.ROOT);
-        if (value.startsWith("*.")) {
-            return value;
-        }
-        if (value.startsWith(".")) {
-            return "*" + value;
-        }
-        return "*." + value;
     }
 
     private Node buildHistoryPane() {
