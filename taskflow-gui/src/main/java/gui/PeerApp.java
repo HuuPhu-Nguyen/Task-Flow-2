@@ -4,11 +4,8 @@ import client.ClientJobPlugin;
 import client.ClientJobPlugins;
 import javafx.application.Application;
 import javafx.application.Platform;
-import javafx.beans.property.SimpleIntegerProperty;
-import javafx.beans.property.SimpleStringProperty;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
-import javafx.geometry.Orientation;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
@@ -22,9 +19,6 @@ import protocol.JobResultMessage;
 
 import java.io.*;
 import java.nio.file.*;
-import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -45,7 +39,7 @@ public class PeerApp extends Application {
     private String currentOutPath;
     private String sessionId;
     private TilePane gallery;
-    private GuiHistoryStore historyStore;
+    private GuiHistoryView historyView;
     private List<ClientJobPlugin> clientJobPlugins = List.of();
     private Map<String, ClientJobPlugin> clientJobPluginsByType = Map.of();
 
@@ -454,131 +448,15 @@ public class PeerApp extends Application {
 
     private Node buildHistoryPane() {
         try {
-            if (historyStore == null) {
-                historyStore = new DatabaseGuiHistoryStore();
+            if (historyView == null) {
+                historyView = GuiHistoryView.openDefault();
             }
+            return historyView.build();
         } catch (Exception e) {
             Label err = new Label("Job history unavailable: " + e.getMessage());
             err.setPadding(new Insets(20));
             return err;
         }
-
-        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
-
-        // ---- Jobs table ----
-        TableView<GuiHistoryStore.JobRecord> jobTable = new TableView<>();
-        jobTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        jobTable.setPlaceholder(new Label("No jobs recorded yet. Run the coordinator and submit a job."));
-
-        TableColumn<GuiHistoryStore.JobRecord, String> colType = new TableColumn<>("Type");
-        colType.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().taskType()));
-
-        TableColumn<GuiHistoryStore.JobRecord, String> colStatus = new TableColumn<>("Status");
-        colStatus.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().status()));
-
-        TableColumn<GuiHistoryStore.JobRecord, Number> colFiles = new TableColumn<>("Files");
-        colFiles.setCellValueFactory(d -> new SimpleIntegerProperty(d.getValue().fileCount()));
-        colFiles.setMaxWidth(60);
-
-        TableColumn<GuiHistoryStore.JobRecord, String> colSubmitted = new TableColumn<>("Submitted");
-        colSubmitted.setCellValueFactory(d -> new SimpleStringProperty(
-            d.getValue().submittedAt() == 0 ? "-" : fmt.format(Instant.ofEpochMilli(d.getValue().submittedAt()))
-        ));
-
-        TableColumn<GuiHistoryStore.JobRecord, String> colDuration = new TableColumn<>("Duration");
-        colDuration.setCellValueFactory(d -> {
-            long s = d.getValue().submittedAt();
-            long c = d.getValue().completedAt();
-            String val = (s > 0 && c > 0) ? ((c - s) / 1000.0) + " s" : "-";
-            return new SimpleStringProperty(val);
-        });
-
-        TableColumn<GuiHistoryStore.JobRecord, String> colJobId = new TableColumn<>("Job ID");
-        colJobId.setCellValueFactory(d -> {
-            String id = d.getValue().jobId();
-            return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
-        });
-
-        jobTable.getColumns().add(colType);
-        jobTable.getColumns().add(colStatus);
-        jobTable.getColumns().add(colFiles);
-        jobTable.getColumns().add(colSubmitted);
-        jobTable.getColumns().add(colDuration);
-        jobTable.getColumns().add(colJobId);
-
-        // ---- Tasks table ----
-        TableView<GuiHistoryStore.TaskRecord> taskTable = new TableView<>();
-        taskTable.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        taskTable.setPlaceholder(new Label("Select a job above to see its tasks."));
-
-        TableColumn<GuiHistoryStore.TaskRecord, String> tColPeer = new TableColumn<>("Peer");
-        tColPeer.setCellValueFactory(d -> new SimpleStringProperty(
-            d.getValue().assignedPeerId() != null ? d.getValue().assignedPeerId() : "-"
-        ));
-
-        TableColumn<GuiHistoryStore.TaskRecord, String> tColStatus = new TableColumn<>("Status");
-        tColStatus.setCellValueFactory(d -> new SimpleStringProperty(d.getValue().status()));
-
-        TableColumn<GuiHistoryStore.TaskRecord, String> tColDuration = new TableColumn<>("Duration");
-        tColDuration.setCellValueFactory(d -> new SimpleStringProperty(
-            d.getValue().durationMs() > 0 ? d.getValue().durationMs() + " ms" : "-"
-        ));
-
-        TableColumn<GuiHistoryStore.TaskRecord, Number> tColRetries = new TableColumn<>("Retries");
-        tColRetries.setCellValueFactory(d -> new SimpleIntegerProperty(d.getValue().retryCount()));
-        tColRetries.setMaxWidth(70);
-
-        TableColumn<GuiHistoryStore.TaskRecord, String> tColTaskId = new TableColumn<>("Task ID");
-        tColTaskId.setCellValueFactory(d -> {
-            String id = d.getValue().taskId();
-            return new SimpleStringProperty(id.length() > 12 ? id.substring(0, 12) + "..." : id);
-        });
-
-        taskTable.getColumns().add(tColPeer);
-        taskTable.getColumns().add(tColStatus);
-        taskTable.getColumns().add(tColDuration);
-        taskTable.getColumns().add(tColRetries);
-        taskTable.getColumns().add(tColTaskId);
-
-        // When a job row is selected, populate the task table
-        jobTable.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> {
-            if (sel != null) {
-                taskTable.getItems().setAll(historyStore.getTasksForJob(sel.jobId()));
-            }
-        });
-
-        // ---- Layout ----
-        Button refreshBtn = new Button("Refresh");
-        refreshBtn.setOnAction(e -> {
-            jobTable.getItems().setAll(historyStore.getJobHistory());
-            taskTable.getItems().clear();
-        });
-
-        Label title = new Label("Job History");
-        title.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
-        HBox topBar = new HBox(10, title, refreshBtn);
-        topBar.setPadding(new Insets(0, 0, 8, 0));
-
-        Label jobsLabel  = new Label("Jobs");
-        Label tasksLabel = new Label("Tasks for Selected Job");
-
-        VBox jobsSection  = new VBox(4, jobsLabel,  jobTable);
-        VBox tasksSection = new VBox(4, tasksLabel, taskTable);
-        VBox.setVgrow(jobTable,  Priority.ALWAYS);
-        VBox.setVgrow(taskTable, Priority.ALWAYS);
-
-        SplitPane split = new SplitPane(jobsSection, tasksSection);
-        split.setOrientation(Orientation.VERTICAL);
-        split.setDividerPositions(0.55);
-        VBox.setVgrow(split, Priority.ALWAYS);
-
-        VBox root = new VBox(10, topBar, split);
-        root.setPadding(new Insets(12));
-
-        // Load immediately when the pane is built
-        jobTable.getItems().setAll(historyStore.getJobHistory());
-
-        return root;
     }
 
     private void startNetworkThread(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
@@ -718,8 +596,8 @@ public class PeerApp extends Application {
                 LOGGER.warn("event=gui_engine_shutdown_timeout peer_id={}", sessionId);
             }
         }
-        if (historyStore != null) {
-            historyStore.close();
+        if (historyView != null) {
+            historyView.close();
         }
         super.stop();
     }
