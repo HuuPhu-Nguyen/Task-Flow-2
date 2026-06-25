@@ -10,7 +10,6 @@ import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.layout.*;
-import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.slf4j.Logger;
@@ -39,6 +38,8 @@ public class PeerApp extends Application {
     private GuiHistoryView historyView;
     private List<ClientJobPlugin> clientJobPlugins = List.of();
     private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
+    private GuiDownloadWindow downloadWindow =
+            new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
 
     @Override
     public void init() {
@@ -57,6 +58,7 @@ public class PeerApp extends Application {
             clientJobPlugins = ClientJobPlugins.discover();
             Map<String, ClientJobPlugin> clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
+            downloadWindow = new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
             LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
         } catch (Exception e) {
             LOGGER.error("event=gui_init_failed error={}", e.getMessage(), e);
@@ -403,7 +405,7 @@ public class PeerApp extends Application {
 
         Platform.runLater(() -> {
             if (routed.action() == GuiJobResultRouter.Action.SHOW_DOWNLOAD) {
-                showDownloadWindow(routed.result());
+                downloadWindow.show(routed.result());
             } else {
                 showFailureWindow(routed.result());
             }
@@ -417,46 +419,6 @@ public class PeerApp extends Application {
         alert.setHeaderText("Job " + result.getJobId() + " failed");
         alert.setContentText(message);
         alert.show();
-    }
-
-    private void showDownloadWindow(JobResultMessage result) {
-        Stage downloadStage = new Stage();
-        VBox layout = new VBox(15);
-        layout.setPadding(new Insets(20));
-
-        layout.getChildren().add(new Label("Job Complete! Select a location to save your files."));
-
-        Button saveBtn = new Button("Choose Folder & Save");
-        saveBtn.setStyle("-fx-base: #2ecc71; -fx-text-fill: white;");
-
-        saveBtn.setOnAction(e -> {
-            // 1. Let the user pick where to save
-            DirectoryChooser directoryChooser = new DirectoryChooser();
-            directoryChooser.setTitle("Select Save Location");
-            File selectedDirectory = directoryChooser.showDialog(downloadStage);
-
-            if (selectedDirectory != null) {
-                if (saveFilesToDisk(result, selectedDirectory.getAbsolutePath())) {
-                    downloadStage.close();
-                    new Alert(Alert.AlertType.INFORMATION, "Files saved successfully!").show();
-                }
-            }
-        });
-
-        layout.getChildren().addAll(saveBtn);
-        downloadStage.setScene(new Scene(layout, 300, 200));
-        downloadStage.setTitle("Download Converted Files");
-        downloadStage.show();
-    }
-
-    private boolean saveFilesToDisk(JobResultMessage result, String folderPath) {
-        GuiResultSaver.SaveResult saveResult = resultSaveService.save(result, folderPath);
-        if (!saveResult.successful()) {
-            new Alert(Alert.AlertType.ERROR, saveResult.errorMessage()).show();
-            return false;
-        }
-
-        return true;
     }
 
     @Override
