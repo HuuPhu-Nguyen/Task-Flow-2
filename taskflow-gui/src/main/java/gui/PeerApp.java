@@ -32,9 +32,8 @@ public class PeerApp extends Application {
     private JobSubmissionClient jobSubmissionClient;
     private GuiJobSubmissionService jobSubmissionService;
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private volatile CoordinatorConnection networkConnection;
+    private GuiCoordinatorConnectionService connectionService;
     private volatile Task<?> activeBackgroundTask;
-    private volatile boolean stopping;
 
     private String currentInPath;
     private String currentOutPath;
@@ -42,7 +41,6 @@ public class PeerApp extends Application {
     private TilePane gallery;
     private GuiHistoryView historyView;
     private List<ClientJobPlugin> clientJobPlugins = List.of();
-    private Map<String, ClientJobPlugin> clientJobPluginsByType = Map.of();
     private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
 
     @Override
@@ -58,10 +56,11 @@ public class PeerApp extends Application {
             workerRuntime = new PeerEngineWorkerRuntime(sessionId);
             jobSubmissionClient = new TcpJobSubmissionClient(sessionId);
             jobSubmissionService = new GuiJobSubmissionService(jobSubmissionClient, myActiveJobIds);
+            connectionService = new GuiCoordinatorConnectionService(workerRuntime);
             LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
                     sessionId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
-            clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
+            Map<String, ClientJobPlugin> clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
             LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
         } catch (Exception e) {
@@ -93,7 +92,7 @@ public class PeerApp extends Application {
                 new Alert(Alert.AlertType.ERROR, "Port must be a number.").show();
                 return;
             }
-            startNetworkThread(
+            startCoordinatorConnection(
                     hostField.getText(),
                     port,
                     () -> Platform.runLater(this::showMainGallery),
@@ -183,7 +182,7 @@ public class PeerApp extends Application {
 
         startBtn.setOnAction(e -> {
             try {
-                CoordinatorConnection connection = networkConnection;
+                CoordinatorConnection connection = connectionService.currentConnection();
                 PrintWriter out = connection == null ? null : connection.writer();
                 if (connection == null || out == null || !connection.isOpen()) {
                     new Alert(Alert.AlertType.ERROR, "Not connected to the coordinator yet.").show();
@@ -303,8 +302,8 @@ public class PeerApp extends Application {
                         inputPaths,
                         targetFormat,
                         out,
-                        () -> networkConnection == connection,
-                        () -> clearNetworkState(connection, true),
+                        () -> connectionService.isCurrent(connection),
+                        () -> connectionService.clear(connection, true),
                         this::isCancelled,
                         () -> updateMessage("Submitting job..."));
                 if (submittedJob == null) {
@@ -460,51 +459,29 @@ public class PeerApp extends Application {
         }
     }
 
-    private void startNetworkThread(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
-        stopping = false;
-        TcpCoordinatorConnection.Listener listener = new TcpCoordinatorConnection.Listener() {
+    private void startCoordinatorConnection(String host, int port, Runnable onConnected, java.util.function.Consumer<String> onFailed) {
+        connectionService.start(host, port, new GuiCoordinatorConnectionService.Listener() {
             @Override
-            public void onConnected(CoordinatorConnection connection) {
+            public void onConnected() {
                 onConnected.run();
             }
 
             @Override
-            public void onConnectionFailed(CoordinatorConnection connection, String error) {
-                clearNetworkState(connection, false);
+            public void onConnectionFailed(String error) {
                 onFailed.accept(error);
             }
 
             @Override
-            public void onDisconnected(CoordinatorConnection connection, String message) {
-                clearNetworkState(connection, false);
-                if (stopping) {
-                    return;
-                }
+            public void onDisconnected(String message) {
                 LOGGER.warn("event=gui_connection_lost message={}", message);
                 Platform.runLater(() -> new Alert(Alert.AlertType.WARNING, message).show());
             }
 
             @Override
-            public void onJobResult(CoordinatorConnection connection, JobResultMessage result) {
+            public void onJobResult(JobResultMessage result) {
                 handleJobResult(result);
             }
-        };
-
-        TcpCoordinatorConnection connection = new TcpCoordinatorConnection(host, port, workerRuntime, listener);
-        networkConnection = connection;
-        connection.start();
-    }
-
-    private void clearNetworkState(CoordinatorConnection connection, boolean closeConnection) {
-        if (connection == null) {
-            return;
-        }
-        if (networkConnection == connection) {
-            networkConnection = null;
-        }
-        if (closeConnection) {
-            connection.close();
-        }
+        });
     }
 
     private void handleJobResult(JobResultMessage result) {
@@ -573,14 +550,12 @@ public class PeerApp extends Application {
 
     @Override
     public void stop() throws Exception {
-        stopping = true;
         Task<?> backgroundTask = activeBackgroundTask;
         if (backgroundTask != null) {
             backgroundTask.cancel(true);
         }
-        CoordinatorConnection connection = networkConnection;
-        if (connection != null) {
-            clearNetworkState(connection, true);
+        if (connectionService != null) {
+            connectionService.stop();
         }
         if (workerRuntime != null) {
             workerRuntime.shutdown();

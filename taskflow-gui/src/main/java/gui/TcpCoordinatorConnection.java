@@ -20,7 +20,7 @@ import java.net.Socket;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-final class TcpCoordinatorConnection implements CoordinatorConnection {
+final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
     private static final Logger LOGGER = LoggerFactory.getLogger(TcpCoordinatorConnection.class);
 
     interface Listener {
@@ -52,7 +52,8 @@ final class TcpCoordinatorConnection implements CoordinatorConnection {
         this.listener = Objects.requireNonNull(listener, "listener");
     }
 
-    void start() {
+    @Override
+    public void start() {
         Thread networkThread = new Thread(this::run, "gui-tcp-connection");
         networkThread.setDaemon(true);
         this.thread = networkThread;
