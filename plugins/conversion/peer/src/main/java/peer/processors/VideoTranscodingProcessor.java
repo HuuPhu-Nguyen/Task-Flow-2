@@ -1,6 +1,6 @@
 package peer.processors;
 
-import client.PayloadLimits;
+import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.FilePayload;
 import org.bytedeco.javacv.FFmpegFrameGrabber;

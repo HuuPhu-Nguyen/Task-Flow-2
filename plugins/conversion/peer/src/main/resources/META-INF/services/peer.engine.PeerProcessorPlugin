@@ -1,2 +1,2 @@
-peer.concreteJobs.conversion.ImageConversionProcessorPlugin
-peer.concreteJobs.conversion.VideoTranscodingProcessorPlugin
+peer.plugins.conversion.ImageConversionProcessorPlugin
+peer.plugins.conversion.VideoTranscodingProcessorPlugin

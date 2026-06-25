@@ -1,2 +1,2 @@
-client.concreteJobs.conversion.ImageConversionClientPlugin
-client.concreteJobs.conversion.VideoTranscodingClientPlugin
+client.plugins.conversion.ImageConversionClientPlugin
+client.plugins.conversion.VideoTranscodingClientPlugin

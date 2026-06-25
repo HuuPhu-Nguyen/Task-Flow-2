@@ -1,2 +1,2 @@
-server.concreteJobs.conversion.ImageConversionTaskPlugin
-server.concreteJobs.conversion.VideoTranscodingTaskPlugin
+server.plugins.conversion.ImageConversionTaskPlugin
+server.plugins.conversion.VideoTranscodingTaskPlugin
