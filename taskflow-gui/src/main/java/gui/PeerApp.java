@@ -30,6 +30,7 @@ public class PeerApp extends Application {
     private Stage window;
     private GuiWorkerRuntime workerRuntime;
     private JobSubmissionClient jobSubmissionClient;
+    private GuiJobSubmissionService jobSubmissionService;
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile CoordinatorConnection networkConnection;
     private volatile Task<?> activeBackgroundTask;
@@ -55,6 +56,7 @@ public class PeerApp extends Application {
 
             workerRuntime = new PeerEngineWorkerRuntime(sessionId);
             jobSubmissionClient = new TcpJobSubmissionClient(sessionId);
+            jobSubmissionService = new GuiJobSubmissionService(jobSubmissionClient, myActiveJobIds);
             LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
                     sessionId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
@@ -294,21 +296,18 @@ public class PeerApp extends Application {
             @Override
             protected GuiJobSubmitter.SubmittedJob call() throws Exception {
                 updateMessage("Preparing " + inputPaths.size() + " input(s)...");
-                List<Object> payloads = plugin.buildPayloads(inputPaths, targetFormat);
-                if (isCancelled()) {
-                    return null;
-                }
-
-                updateMessage("Submitting job...");
-                GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
-                        jobSubmissionClient,
+                GuiJobSubmitter.SubmittedJob submittedJob = jobSubmissionService.submit(
                         plugin,
-                        payloads,
+                        inputPaths,
                         targetFormat,
                         out,
                         () -> networkConnection == connection,
                         () -> clearNetworkState(connection, true),
-                        myActiveJobIds);
+                        this::isCancelled,
+                        () -> updateMessage("Submitting job..."));
+                if (submittedJob == null) {
+                    return null;
+                }
                 if (submittedJob.jobId() != null) {
                     LOGGER.info("event=gui_job_submitted job_id={} task_type={}",
                             submittedJob.jobId(), plugin.taskType());
