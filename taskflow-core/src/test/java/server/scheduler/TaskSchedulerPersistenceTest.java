@@ -133,6 +133,201 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
+    void assignmentPersistenceFailureReturnsFailureWithoutDispatchingTask() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskAssigned");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-assignment-persistence-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-assignment-persistence-failure", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobFailed());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-assignment-persistence-failure", result.getJobId());
+            assertEquals("Persistence write failed during markTaskAssigned.", result.getErrorMessage());
+            assertNull(output.task());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-assignment-persistence-failure:TEST_TASK:requester-1:1:"
+                            + "task-job-assignment-persistence-failure-0",
+                    "markTaskAssigned:task-job-assignment-persistence-failure-0:peer-1",
+                    "markTaskFailed:task-job-assignment-persistence-failure-0",
+                    "markJobFailed:job-assignment-persistence-failure"
+            ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void retryPersistenceFailureReturnsFailureInsteadOfRedispatching() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskRetried");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "2"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-retry-persistence-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-retry-persistence-failure", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobFailed());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("Persistence write failed during markTaskRetried.", result.getErrorMessage());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-retry-persistence-failure:TEST_TASK:requester-1:1:"
+                            + "task-job-retry-persistence-failure-0",
+                    "markTaskAssigned:task-job-retry-persistence-failure-0:peer-1",
+                    "markTaskRetried:task-job-retry-persistence-failure-0:1",
+                    "markTaskFailed:task-job-retry-persistence-failure-0",
+                    "markJobFailed:job-retry-persistence-failure"
+            ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void taskCompletionPersistenceFailureReturnsFailedJobResult() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskCompleted");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-task-completion-persistence-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-completion-persistence-failure", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobFailed());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("Persistence write failed during markTaskCompleted.", result.getErrorMessage());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-completion-persistence-failure:TEST_TASK:requester-1:1:"
+                            + "task-job-completion-persistence-failure-0",
+                    "markTaskAssigned:task-job-completion-persistence-failure-0:peer-1",
+                    "markTaskCompleted:task-job-completion-persistence-failure-0",
+                    "markTaskFailed:task-job-completion-persistence-failure-0",
+                    "markJobFailed:job-completion-persistence-failure"
+            ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void finalJobCompletionPersistenceFailureDoesNotKeepJobActiveAfterResultDelivery() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markJobCompleted");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-final-persistence-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-final-persistence-failure", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertTrue(result.isSuccessful());
+            assertEquals("job-final-persistence-failure", result.getJobId());
+            assertTrue(store.awaitEvent("markJobCompleted:job-final-persistence-failure"));
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-final-persistence-failure:TEST_TASK:requester-1:1:"
+                            + "task-job-final-persistence-failure-0",
+                    "markTaskAssigned:task-job-final-persistence-failure-0:peer-1",
+                    "markTaskCompleted:task-job-final-persistence-failure-0",
+                    "markJobCompleted:job-final-persistence-failure"
+            ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void finalJobFailurePersistenceFailureDoesNotKeepJobActiveAfterResultDelivery() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markJobFailed");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-final-failure-persistence-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-final-failure-persistence-failure", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-final-failure-persistence-failure", result.getJobId());
+            assertTrue(store.awaitEvent("markJobFailed:job-final-failure-persistence-failure"));
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-final-failure-persistence-failure:TEST_TASK:requester-1:1:"
+                            + "task-job-final-failure-persistence-failure-0",
+                    "markTaskAssigned:task-job-final-failure-persistence-failure-0:peer-1",
+                    "markTaskFailed:task-job-final-failure-persistence-failure-0",
+                    "markJobFailed:job-final-failure-persistence-failure"
+            ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void undeliverableFinalJobResultIsAbandonedAndPersistedFailed() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
@@ -348,13 +543,19 @@ class TaskSchedulerPersistenceTest {
         private final CountDownLatch jobCompleted = new CountDownLatch(1);
         private final CountDownLatch jobFailed = new CountDownLatch(1);
         private final boolean jobStartupPersists;
+        private final String failingOperation;
 
         private RecordingJobStateStore() {
             this(true);
         }
 
         private RecordingJobStateStore(boolean jobStartupPersists) {
+            this(jobStartupPersists, "");
+        }
+
+        private RecordingJobStateStore(boolean jobStartupPersists, String failingOperation) {
             this.jobStartupPersists = jobStartupPersists;
+            this.failingOperation = failingOperation == null ? "" : failingOperation;
         }
 
         @Override
@@ -384,39 +585,45 @@ class TaskSchedulerPersistenceTest {
         public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
             events.add("markTaskAssigned:" + taskId + ":" + peerId);
             taskAssigned.countDown();
-            return true;
+            return succeeds("markTaskAssigned");
         }
 
         @Override
         public synchronized boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
             events.add("markTaskCompleted:" + taskId);
-            return true;
+            return succeeds("markTaskCompleted");
         }
 
         @Override
         public synchronized boolean markTaskRetried(String taskId, int retryCount) {
             events.add("markTaskRetried:" + taskId + ":" + retryCount);
-            return true;
+            return succeeds("markTaskRetried");
         }
 
         @Override
         public synchronized boolean markTaskFailed(String taskId) {
             events.add("markTaskFailed:" + taskId);
-            return true;
+            return succeeds("markTaskFailed");
         }
 
         @Override
         public synchronized boolean markJobCompleted(String jobId) {
             events.add("markJobCompleted:" + jobId);
-            jobCompleted.countDown();
-            return true;
+            if (succeeds("markJobCompleted")) {
+                jobCompleted.countDown();
+                return true;
+            }
+            return false;
         }
 
         @Override
         public synchronized boolean markJobFailed(String jobId) {
             events.add("markJobFailed:" + jobId);
-            jobFailed.countDown();
-            return true;
+            if (succeeds("markJobFailed")) {
+                jobFailed.countDown();
+                return true;
+            }
+            return false;
         }
 
         @Override
@@ -438,6 +645,25 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<String> events() {
             return List.copyOf(events);
+        }
+
+        private boolean succeeds(String operation) {
+            return !operation.equals(failingOperation);
+        }
+
+        private boolean awaitEvent(String expected) throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (System.nanoTime() < deadline) {
+                synchronized (this) {
+                    if (events.contains(expected)) {
+                        return true;
+                    }
+                }
+                Thread.sleep(10);
+            }
+            synchronized (this) {
+                return events.contains(expected);
+            }
         }
     }
 }

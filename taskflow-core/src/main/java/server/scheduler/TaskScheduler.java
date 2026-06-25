@@ -154,7 +154,7 @@ public class TaskScheduler implements Runnable {
                     metrics.recordRetry();
                 }
                 onAttemptFailure(assignedPeerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-                persistTaskFailure(task, outcome);
+                boolean persisted = persistTaskFailure(task, outcome);
                 logErrorEvent("task_timeout", fields(
                         "job_id", job.getJobId(),
                         "task_id", task.getTaskId(),
@@ -163,7 +163,10 @@ public class TaskScheduler implements Runnable {
                         "terminal_failure", outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE
                 ));
 
-                if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+                if (!persisted) {
+                    jobsToFail.putIfAbsent(job.getJobId(),
+                            persistenceFailureReason(taskFailurePersistenceOperation(outcome)));
+                } else if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
                     jobsToFail.putIfAbsent(job.getJobId(),
                             "Task " + task.getTaskId() + " exceeded max retries after timeout.");
                 }
@@ -259,7 +262,7 @@ public class TaskScheduler implements Runnable {
                 }
 
                 onAttemptFailure(peerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-                persistTaskFailure(task, outcome);
+                boolean persisted = persistTaskFailure(task, outcome);
                 logErrorEvent("task_peer_unavailable", fields(
                         "job_id", job.getJobId(),
                         "task_id", task.getTaskId(),
@@ -269,7 +272,10 @@ public class TaskScheduler implements Runnable {
                         "reason", normalizedReason
                 ));
 
-                if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+                if (!persisted) {
+                    jobsToFail.putIfAbsent(job.getJobId(),
+                            persistenceFailureReason(taskFailurePersistenceOperation(outcome)));
+                } else if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
                     jobsToFail.putIfAbsent(job.getJobId(),
                             "Task " + task.getTaskId() + " exceeded max retries after peer became unavailable.");
                 }
@@ -334,7 +340,7 @@ public class TaskScheduler implements Runnable {
                 metrics.recordRetry();
             }
             onAttemptFailure(envelope.fromNodeId(), outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-            persistTaskFailure(task, outcome);
+            boolean persisted = persistTaskFailure(task, outcome);
             logErrorEvent("task_failed", fields(
                     "job_id", job.getJobId(),
                     "task_id", task.getTaskId(),
@@ -344,7 +350,9 @@ public class TaskScheduler implements Runnable {
                     "error", result.getErrorMessage()
             ));
 
-            if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+            if (!persisted) {
+                failJob(job, persistenceFailureReason(taskFailurePersistenceOperation(outcome)));
+            } else if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
                 failJob(job, "Task " + task.getTaskId() + " reached max retries.");
             }
             return;
@@ -361,7 +369,7 @@ public class TaskScheduler implements Runnable {
 
         onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
         if (db != null) {
-            recordPersistence(
+            boolean persisted = recordPersistence(
                     "markTaskCompleted",
                     job.getJobId(),
                     task.getTaskId(),
@@ -372,6 +380,16 @@ public class TaskScheduler implements Runnable {
                             result.getResultPayload()
                     )
             );
+            if (!persisted) {
+                recordPersistence(
+                        "markTaskFailed",
+                        job.getJobId(),
+                        task.getTaskId(),
+                        db.markTaskFailed(task.getTaskId())
+                );
+                failJob(job, persistenceFailureReason("markTaskCompleted"));
+                return;
+            }
         }
         logInfoEvent("task_completed", fields(
                 "job_id", job.getJobId(),
@@ -389,7 +407,10 @@ public class TaskScheduler implements Runnable {
 
     private void dispatchPendingTasks() {
         //Process jobs in order
-        for (EmbarrassinglyParallelJob<?,?> job : activeJobs.values()) {
+        for (EmbarrassinglyParallelJob<?,?> job : List.copyOf(activeJobs.values())) {
+            if (!activeJobs.containsKey(job.getJobId()) || pendingJobCompletions.containsKey(job.getJobId())) {
+                continue;
+            }
             // Capabilities are evaluated per job type before score/load selection.
             List<PeerInfo> candidates = getAvailablePeers(job.getTaskType());
             if (candidates.isEmpty()) {
@@ -410,6 +431,10 @@ public class TaskScheduler implements Runnable {
 
                 if (bestPeer != null) {
                     assign(job, task, bestPeer);
+                    if (!activeJobs.containsKey(job.getJobId())
+                            || pendingJobCompletions.containsKey(job.getJobId())) {
+                        break;
+                    }
                 } else {
                     break; // Compatible peers for this job have hit the configured concurrency limit.
                 }
@@ -424,14 +449,36 @@ public class TaskScheduler implements Runnable {
             return;
         }
         long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
+        TaskAssignMessage message = job.createTaskAssignMessage(task);
+        if (db != null) {
+            boolean persisted = recordPersistence(
+                    "markTaskAssigned",
+                    job.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt)
+            );
+            if (!persisted) {
+                task.resetToPending();
+                failJob(job, persistenceFailureReason("markTaskAssigned"));
+                return;
+            }
+        }
         metrics.recordDispatch(dispatchLatencyMs);
         peer.incrementTasks();
-        TaskAssignMessage message = job.createTaskAssignMessage(task);
         try {
             output.sendTask(peer, message);
         } catch (Exception e) {
             task.resetToPending();
             peer.decrementTasks();
+            if (db != null && !recordPersistence(
+                    "markTaskRetried",
+                    job.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskRetried(task.getTaskId(), task.getRetryCount())
+            )) {
+                failJob(job, persistenceFailureReason("markTaskRetried"));
+                return;
+            }
             logErrorEvent("task_dispatch_failed", fields(
                     "job_id", job.getJobId(),
                     "task_id", task.getTaskId(),
@@ -439,14 +486,6 @@ public class TaskScheduler implements Runnable {
                     "error", e.getMessage()
             ));
             return;
-        }
-        if (db != null) {
-            recordPersistence(
-                    "markTaskAssigned",
-                    job.getJobId(),
-                    task.getTaskId(),
-                    db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt)
-            );
         }
         logInfoEvent("task_assigned", fields(
                 "job_id", job.getJobId(),
@@ -488,20 +527,26 @@ public class TaskScheduler implements Runnable {
         peer.decrementTasks();
     }
 
-    private void persistTaskFailure(TaskUnit<?> task, TaskUnit.FailureOutcome outcome) {
+    private boolean persistTaskFailure(TaskUnit<?> task, TaskUnit.FailureOutcome outcome) {
         if (db == null) {
-            return;
+            return true;
         }
         if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
-            recordPersistence("markTaskFailed", task.getJobId(), task.getTaskId(), db.markTaskFailed(task.getTaskId()));
+            return recordPersistence(
+                    "markTaskFailed",
+                    task.getJobId(),
+                    task.getTaskId(),
+                    db.markTaskFailed(task.getTaskId())
+            );
         } else if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
-            recordPersistence(
+            return recordPersistence(
                     "markTaskRetried",
                     task.getJobId(),
                     task.getTaskId(),
                     db.markTaskRetried(task.getTaskId(), task.getRetryCount())
             );
         }
+        return true;
     }
 
     private void failJob(EmbarrassinglyParallelJob<?, ?> job, String reason) {
@@ -573,11 +618,12 @@ public class TaskScheduler implements Runnable {
         }
 
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
+        boolean persisted = true;
         if (db != null) {
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
-                    recordPersistence(
+                    persisted &= recordPersistence(
                             "markTaskFailed",
                             job.getJobId(),
                             task.getTaskId(),
@@ -585,12 +631,15 @@ public class TaskScheduler implements Runnable {
                     );
                 }
             }
-            recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
+            persisted &= recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
         }
 
         activeJobs.remove(job.getJobId());
         pendingJobCompletions.remove(job.getJobId());
         metrics.setActiveJobs(activeJobs.size());
+        if (!persisted) {
+            logTerminalPersistenceDegraded(job, "markJobFailed", "result_delivery_abandoned");
+        }
 
         logErrorEvent("job_result_delivery_abandoned", fields(
                 "job_id", job.getJobId(),
@@ -603,11 +652,17 @@ public class TaskScheduler implements Runnable {
 
     private void finalizeJobCompletion(PendingJobCompletion completion) {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
+        boolean persisted = true;
         if (!completion.success && db != null) {
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
-                    recordPersistence("markTaskFailed", job.getJobId(), task.getTaskId(), db.markTaskFailed(task.getTaskId()));
+                    persisted &= recordPersistence(
+                            "markTaskFailed",
+                            job.getJobId(),
+                            task.getTaskId(),
+                            db.markTaskFailed(task.getTaskId())
+                    );
                 }
             }
         }
@@ -617,10 +672,22 @@ public class TaskScheduler implements Runnable {
         metrics.setActiveJobs(activeJobs.size());
         if (db != null) {
             if (completion.success) {
-                recordPersistence("markJobCompleted", job.getJobId(), "", db.markJobCompleted(job.getJobId()));
+                persisted &= recordPersistence(
+                        "markJobCompleted",
+                        job.getJobId(),
+                        "",
+                        db.markJobCompleted(job.getJobId())
+                );
             } else {
-                recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
+                persisted &= recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
             }
+        }
+        if (!persisted) {
+            logTerminalPersistenceDegraded(
+                    job,
+                    completion.success ? "markJobCompleted" : "markJobFailed",
+                    "result_delivered"
+            );
         }
 
         logInfoEvent("job_completed", fields(
@@ -737,14 +804,33 @@ public class TaskScheduler implements Runnable {
         LOGGER.error("event={}{}", event, formatFields(fields));
     }
 
-    private void recordPersistence(String operation, String jobId, String taskId, boolean success) {
+    private boolean recordPersistence(String operation, String jobId, String taskId, boolean success) {
         if (success) {
-            return;
+            return true;
         }
         logErrorEvent("scheduler_persistence_failed", fields(
                 "operation", operation,
                 "job_id", jobId,
                 "task_id", taskId
+        ));
+        return false;
+    }
+
+    private String taskFailurePersistenceOperation(TaskUnit.FailureOutcome outcome) {
+        return outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE ? "markTaskFailed" : "markTaskRetried";
+    }
+
+    private String persistenceFailureReason(String operation) {
+        return "Persistence write failed during " + operation + ".";
+    }
+
+    private void logTerminalPersistenceDegraded(EmbarrassinglyParallelJob<?, ?> job,
+                                                String operation,
+                                                String policy) {
+        logErrorEvent("job_terminal_persistence_degraded", fields(
+                "operation", operation,
+                "job_id", job.getJobId(),
+                "policy", policy
         ));
     }
 
