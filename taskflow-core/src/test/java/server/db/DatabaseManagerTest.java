@@ -146,6 +146,65 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void loadsCompletedJobResultFromPersistedTaskResults() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-completed-result-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.insertJobWithTasks(
+                    "job-completed-result",
+                    "TEST_TASK",
+                    "requester-1",
+                    "csv",
+                    List.of(
+                            new JobStateStore.TaskStartupState("task-job-completed-result-1", "payload-beta"),
+                            new JobStateStore.TaskStartupState("task-job-completed-result-0", "payload-alpha")
+                    )
+            ));
+            assertTrue(db.markTaskAssigned("task-job-completed-result-0", "peer-1", 123L));
+            assertTrue(db.markTaskCompleted("task-job-completed-result-0", 456L, 333L, "result-alpha"));
+            assertTrue(db.markTaskAssigned("task-job-completed-result-1", "peer-2", 789L));
+            assertTrue(db.markTaskCompleted("task-job-completed-result-1", 987L, 198L, "result-beta"));
+            assertTrue(db.markJobCompleted("job-completed-result"));
+
+            var result = db.loadCompletedJobResult("job-completed-result");
+
+            assertTrue(result.isPresent());
+            assertEquals("job-completed-result", result.get().jobId());
+            assertEquals("TEST_TASK", result.get().taskType());
+            assertEquals(List.of("result-alpha", "result-beta"), result.get().resultsByTaskId());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void completedJobResultLookupRejectsMissingTaskResults() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-incomplete-result-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.insertJobWithTasks(
+                    "job-incomplete-result",
+                    "TEST_TASK",
+                    "requester-1",
+                    "csv",
+                    List.of(
+                            new JobStateStore.TaskStartupState("task-job-incomplete-result-0", "payload-alpha"),
+                            new JobStateStore.TaskStartupState("task-job-incomplete-result-1", "payload-beta")
+                    )
+            ));
+            assertTrue(db.markTaskAssigned("task-job-incomplete-result-0", "peer-1", 123L));
+            assertTrue(db.markTaskCompleted("task-job-incomplete-result-0", 456L, 333L, "result-alpha"));
+            assertTrue(db.markJobCompleted("job-incomplete-result"));
+
+            assertTrue(db.loadCompletedJobResult("job-incomplete-result").isEmpty());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void resetTaskForResumeClearsStaleAssignmentWithoutIncrementingRetry() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-resume-reset-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());

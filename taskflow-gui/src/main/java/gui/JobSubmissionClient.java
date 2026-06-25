@@ -7,4 +7,6 @@ interface JobSubmissionClient {
     String newJobId();
 
     void submitJob(String jobId, String taskType, List<?> payloads, String parameter, PrintWriter out);
+
+    void requestJobResult(String jobId, PrintWriter out);
 }

@@ -73,6 +73,11 @@ class GuiJobSubmitterTest {
                         result(jobId, false, "failed immediately"),
                         activeJobs).action());
             }
+
+            @Override
+            public void requestJobResult(String jobId, PrintWriter out) {
+                throw new AssertionError("result request should not be used during submit");
+            }
         };
 
         GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
@@ -153,6 +158,18 @@ class GuiJobSubmitterTest {
 
         assertTrue(activeJobs.isEmpty());
         assertTrue(sendFailureCallback.get());
+    }
+
+    @Test
+    void tcpClientWritesJobResultRequest() {
+        StringWriter writer = new StringWriter();
+        PrintWriter out = new PrintWriter(writer, true);
+
+        jobSubmissionClient.requestJobResult("job-completed", out);
+
+        String json = writer.toString();
+        assertTrue(json.contains("\"type\":\"JOB_RESULT_REQUEST\""));
+        assertTrue(json.contains("\"jobId\":\"job-completed\""));
     }
 
     private static JobResultMessage result(String jobId, boolean successful, String errorMessage) {

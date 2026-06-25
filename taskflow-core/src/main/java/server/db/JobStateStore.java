@@ -2,6 +2,7 @@ package server.db;
 
 import java.util.List;
 import java.util.Collection;
+import java.util.Optional;
 
 public interface JobStateStore {
     record TaskStartupState(String taskId, Object payload) {
@@ -19,6 +20,11 @@ public interface JobStateStore {
                              String requesterId,
                              String parameter,
                              List<ResumableTaskState> tasks) {
+    }
+
+    record CompletedJobResultState(String jobId,
+                                   String taskType,
+                                   List<Object> resultsByTaskId) {
     }
 
     boolean insertJobWithTasks(String jobId,
@@ -68,6 +74,10 @@ public interface JobStateStore {
 
     default List<ResumableJobState> loadRunningJobsForResume() {
         return List.of();
+    }
+
+    default Optional<CompletedJobResultState> loadCompletedJobResult(String jobId) {
+        return Optional.empty();
     }
 
     default boolean resetTaskForResume(String taskId) {

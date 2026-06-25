@@ -2,6 +2,7 @@ package gui;
 
 import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
+import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 
 import java.io.PrintWriter;
@@ -46,6 +47,23 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
 
         if (!SafeJsonWriter.send(out, gson, message)) {
             throw new IllegalStateException("Could not send job submit message to coordinator.");
+        }
+    }
+
+    @Override
+    public void requestJobResult(String jobId, PrintWriter out) {
+        if (jobId == null || jobId.isBlank()) {
+            throw new IllegalArgumentException("jobId is required.");
+        }
+        Objects.requireNonNull(out, "out");
+        JobResultRequestMessage message = new JobResultRequestMessage(
+                nodeId,
+                Instant.now().toString(),
+                jobId
+        );
+
+        if (!SafeJsonWriter.send(out, gson, message)) {
+            throw new IllegalStateException("Could not send job result request to coordinator.");
         }
     }
 }

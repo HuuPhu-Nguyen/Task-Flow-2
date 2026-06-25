@@ -91,6 +91,9 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - After startup, task assignment must be persisted before dispatching work to a peer.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
+- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when every task result snapshot exists.
+- Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
+- TCP requester identity remains connection-scoped; full durable requester identity across reconnects is still future work.
 
 ## Heartbeat and Peer Liveness
 

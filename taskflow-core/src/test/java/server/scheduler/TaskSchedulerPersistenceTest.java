@@ -2,6 +2,7 @@ package server.scheduler;
 
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
+import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
@@ -17,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -394,6 +396,84 @@ class TaskSchedulerPersistenceTest {
         assertEquals(List.of("markJobCompleted:job-restored-complete"), store.events());
     }
 
+    @Test
+    void completedResultRequestLoadsPersistedJobResult() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.setCompletedResult(new JobStateStore.CompletedJobResultState(
+                "job-completed-result",
+                "TEST_TASK",
+                List.of("result-alpha", "result-beta")
+        ));
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-completed-result-request-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    new JobResultRequestMessage("requester-1", "2026-06-25T00:00:00Z", "job-completed-result"),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertTrue(result.isSuccessful());
+            assertEquals("job-completed-result", result.getJobId());
+            assertEquals("TEST_TASK", result.getTaskType());
+            assertEquals(List.of("result-alpha", "result-beta"), result.getResultsByTaskId());
+            assertEquals(List.of("loadCompletedJobResult:job-completed-result"), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void completedResultRequestReportsRunningJobWithoutRemovingIt() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-running-result-request-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-running-result-request", List.of("payload")),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            mailbox.put(new MessageEnvelope(
+                    new JobResultRequestMessage("requester-1", "2026-06-25T00:00:00Z",
+                            "job-running-result-request"),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-running-result-request", result.getJobId());
+            assertEquals("Job is still running.", result.getErrorMessage());
+            assertTrue(awaitActiveJobs(scheduler, 1));
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
     private static InMemoryPeerRegistry registryWithPeer(String peerId) {
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(peerId, new PeerInfo(
@@ -544,6 +624,7 @@ class TaskSchedulerPersistenceTest {
         private final CountDownLatch jobFailed = new CountDownLatch(1);
         private final boolean jobStartupPersists;
         private final String failingOperation;
+        private JobStateStore.CompletedJobResultState completedResult;
 
         private RecordingJobStateStore() {
             this(true);
@@ -631,6 +712,15 @@ class TaskSchedulerPersistenceTest {
             return 0;
         }
 
+        @Override
+        public synchronized Optional<JobStateStore.CompletedJobResultState> loadCompletedJobResult(String jobId) {
+            events.add("loadCompletedJobResult:" + jobId);
+            if (completedResult != null && completedResult.jobId().equals(jobId)) {
+                return Optional.of(completedResult);
+            }
+            return Optional.empty();
+        }
+
         boolean awaitTaskAssigned() throws InterruptedException {
             return taskAssigned.await(2, TimeUnit.SECONDS);
         }
@@ -645,6 +735,10 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<String> events() {
             return List.copyOf(events);
+        }
+
+        synchronized void setCompletedResult(JobStateStore.CompletedJobResultState completedResult) {
+            this.completedResult = completedResult;
         }
 
         private boolean succeeds(String operation) {

@@ -1,6 +1,7 @@
 package transport.rabbitmq;
 
 import org.junit.jupiter.api.Test;
+import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
 import protocol.PongMessage;
@@ -88,6 +89,27 @@ class RabbitMqMessageCodecTest {
         PongMessage decodedMessage = assertInstanceOf(PongMessage.class, decoded.message());
         assertEquals(MessageType.PONG, decodedMessage.getType());
         assertEquals("peer-1", decodedMessage.getNodeId());
+    }
+
+    @Test
+    void roundTripsJobResultRequests() {
+        JobResultRequestMessage message = new JobResultRequestMessage(
+                "requester-1",
+                "2026-06-25T00:00:00Z",
+                "job-123"
+        );
+
+        InboundTransportMessage decoded = decode(new OutboundTransportMessage(
+                TransportRoute.JOB_SUBMIT,
+                "requester-1",
+                message
+        ));
+
+        assertEquals(TransportRoute.JOB_SUBMIT, decoded.route());
+        assertEquals("requester-1", decoded.fromNodeId());
+        JobResultRequestMessage decodedMessage = assertInstanceOf(JobResultRequestMessage.class, decoded.message());
+        assertEquals(MessageType.JOB_RESULT_REQUEST, decodedMessage.getType());
+        assertEquals("job-123", decodedMessage.getJobId());
     }
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import protocol.JobResultMessage;
+import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.MessageType;
@@ -54,6 +55,7 @@ public class RabbitMqMessageCodec {
         String json = gson.toJson(messageJson);
         return switch (type) {
             case MessageType.JOB_SUBMIT -> gson.fromJson(json, JobSubmitMessage.class);
+            case MessageType.JOB_RESULT_REQUEST -> gson.fromJson(json, JobResultRequestMessage.class);
             case MessageType.TASK_ASSIGN -> gson.fromJson(json, TaskAssignMessage.class);
             case MessageType.TASK_RESULT -> gson.fromJson(json, TaskResultMessage.class);
             case MessageType.JOB_RESULT -> gson.fromJson(json, JobResultMessage.class);

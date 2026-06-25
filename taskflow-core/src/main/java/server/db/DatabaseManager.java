@@ -10,6 +10,7 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 public class DatabaseManager implements JobStateStore {
 
@@ -652,6 +653,72 @@ public class DatabaseManager implements JobStateStore {
                 .toList();
     }
 
+    @Override
+    public synchronized Optional<CompletedJobResultState> loadCompletedJobResult(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return Optional.empty();
+        }
+
+        String jobSql = "SELECT task_type, file_count FROM jobs WHERE job_id=? AND status='COMPLETED'";
+        try (PreparedStatement jobStatement = conn.prepareStatement(jobSql)) {
+            jobStatement.setString(1, jobId);
+            try (ResultSet jobResult = jobStatement.executeQuery()) {
+                if (!jobResult.next()) {
+                    return Optional.empty();
+                }
+
+                String taskType = jobResult.getString("task_type");
+                int expectedTasks = jobResult.getInt("file_count");
+                if (expectedTasks <= 0) {
+                    return Optional.empty();
+                }
+
+                List<TaskResultSnapshot> taskResults = loadCompletedTaskResults(jobId);
+                if (taskResults.size() != expectedTasks) {
+                    return Optional.empty();
+                }
+
+                return Optional.of(new CompletedJobResultState(
+                        jobId,
+                        taskType,
+                        taskResults.stream()
+                                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                                .map(TaskResultSnapshot::resultPayload)
+                                .toList()
+                ));
+            }
+        } catch (SQLException e) {
+            logSqlFailure("loadCompletedJobResult", e);
+            return Optional.empty();
+        }
+    }
+
+    private List<TaskResultSnapshot> loadCompletedTaskResults(String jobId) throws SQLException {
+        List<TaskResultSnapshot> tasks = new ArrayList<>();
+        String taskSql = """
+                SELECT task_id, status, result_payload_json
+                FROM tasks
+                WHERE job_id=?
+                """;
+        try (PreparedStatement taskStatement = conn.prepareStatement(taskSql)) {
+            taskStatement.setString(1, jobId);
+            try (ResultSet taskResult = taskStatement.executeQuery()) {
+                while (taskResult.next()) {
+                    String status = taskResult.getString("status");
+                    String resultPayloadJson = taskResult.getString("result_payload_json");
+                    if (!"COMPLETED".equals(status) || resultPayloadJson == null) {
+                        return List.of();
+                    }
+                    tasks.add(new TaskResultSnapshot(
+                            taskResult.getString("task_id"),
+                            fromJson(resultPayloadJson)
+                    ));
+                }
+            }
+        }
+        return tasks;
+    }
+
     // -------------------------------------------------------------------------
     // Read methods (called from GUI process via its own connection)
     // -------------------------------------------------------------------------
@@ -756,4 +823,7 @@ public class DatabaseManager implements JobStateStore {
         long durationMs,
         int retryCount
     ) {}
+
+    private record TaskResultSnapshot(String taskId, Object resultPayload) {
+    }
 }

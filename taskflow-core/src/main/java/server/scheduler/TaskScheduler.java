@@ -221,6 +221,9 @@ public class TaskScheduler implements Runnable {
         else if (msg instanceof TaskResultMessage result) {
             handleTaskResult(envelope, result);
         }
+        else if (msg instanceof JobResultRequestMessage request) {
+            handleJobResultRequest(envelope, request);
+        }
         else if (msg instanceof PeerDisconnectedMessage disconnected) {
             String peerId = disconnected.getNodeId();
             if (peerId == null || peerId.isBlank()) {
@@ -228,6 +231,80 @@ public class TaskScheduler implements Runnable {
             }
             handlePeerUnavailable(peerId, disconnected.getReason());
         }
+    }
+
+    private void handleJobResultRequest(MessageEnvelope envelope, JobResultRequestMessage request) throws Exception {
+        String requesterId = envelope.fromNodeId();
+        String jobId = request.getJobId();
+        if (jobId == null || jobId.isBlank()) {
+            sendRequestedJobResult(requesterId, new JobResultMessage(
+                    "COORDINATOR",
+                    java.time.Instant.now().toString(),
+                    "",
+                    "",
+                    false,
+                    List.of(),
+                    "Job id is required."
+            ));
+            return;
+        }
+
+        PendingJobCompletion pending = pendingJobCompletions.get(jobId);
+        if (pending != null) {
+            sendRequestedJobResult(requesterId, pending.response);
+            return;
+        }
+
+        EmbarrassinglyParallelJob<?, ?> activeJob = activeJobs.get(jobId);
+        if (activeJob != null) {
+            sendRequestedJobResult(requesterId, new JobResultMessage(
+                    "COORDINATOR",
+                    java.time.Instant.now().toString(),
+                    jobId,
+                    activeJob.getTaskType(),
+                    false,
+                    List.of(),
+                    "Job is still running."
+            ));
+            return;
+        }
+
+        if (db == null) {
+            sendRequestedJobResult(requesterId, new JobResultMessage(
+                    "COORDINATOR",
+                    java.time.Instant.now().toString(),
+                    jobId,
+                    "",
+                    false,
+                    List.of(),
+                    "Completed job result is unavailable because persistence is disabled."
+            ));
+            return;
+        }
+
+        Optional<JobStateStore.CompletedJobResultState> result = db.loadCompletedJobResult(jobId);
+        if (result.isPresent()) {
+            JobStateStore.CompletedJobResultState completed = result.get();
+            sendRequestedJobResult(requesterId, new JobResultMessage(
+                    "COORDINATOR",
+                    java.time.Instant.now().toString(),
+                    completed.jobId(),
+                    completed.taskType(),
+                    true,
+                    completed.resultsByTaskId()
+            ));
+            return;
+        }
+
+        sendRequestedJobResult(requesterId, new JobResultMessage(
+                "COORDINATOR",
+                java.time.Instant.now().toString(),
+                jobId,
+                "",
+                false,
+                List.of(),
+                "Completed job result not found."
+        ));
     }
 
     private void handlePeerUnavailable(String peerId, String reason) {
@@ -730,6 +807,26 @@ public class TaskScheduler implements Runnable {
         } catch (Exception sendError) {
             logErrorEvent("job_start_failure_send_failed", fields(
                     "job_id", submit.getJobId(),
+                    "requester_id", requesterNodeId,
+                    "error", sendError.getMessage()
+            ));
+            throw sendError;
+        }
+    }
+
+    private void sendRequestedJobResult(String requesterNodeId, JobResultMessage response) throws Exception {
+        try {
+            if (!output.sendJobResult(requesterNodeId, response)) {
+                logErrorEvent("job_result_requester_missing", fields(
+                        "job_id", response.getJobId(),
+                        "requester_id", requesterNodeId
+                ));
+                throw new IllegalStateException(
+                        "Requested job result was not routed to requester " + requesterNodeId);
+            }
+        } catch (Exception sendError) {
+            logErrorEvent("job_result_request_send_failed", fields(
+                    "job_id", response.getJobId(),
                     "requester_id", requesterNodeId,
                     "error", sendError.getMessage()
             ));

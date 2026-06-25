@@ -185,6 +185,9 @@ public class PeerHandler implements Runnable {
         factory.register(protocol.MessageType.JOB_SUBMIT,
                 json -> gson.fromJson(json, protocol.JobSubmitMessage.class));
 
+        factory.register(protocol.MessageType.JOB_RESULT_REQUEST,
+                json -> gson.fromJson(json, protocol.JobResultRequestMessage.class));
+
         return factory;
     }
 }
