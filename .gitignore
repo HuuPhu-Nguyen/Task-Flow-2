@@ -51,3 +51,4 @@ java/out_PEER_*/
 !.env.example
 .agents/
 .codex/
+WORKING_RULES.md
