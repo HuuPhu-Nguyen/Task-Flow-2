@@ -20,6 +20,11 @@ public final class SchedulerMailbox {
         return mailbox.offer(envelope);
     }
 
+    public static void put(BlockingQueue<MessageEnvelope> mailbox, MessageEnvelope envelope)
+            throws InterruptedException {
+        mailbox.put(envelope);
+    }
+
     public static boolean offerBrokerDelivery(BlockingQueue<MessageEnvelope> mailbox,
                                               InboundTransportMessage delivery) throws Exception {
         TransportAcknowledgement acknowledgement = delivery.acknowledgement();

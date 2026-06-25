@@ -31,14 +31,15 @@ This document defines the current runtime guarantees of TaskFlow.
 - This does not guarantee durable replay for messages that were not broker-confirmed before an outage.
 - This does not recover coordinator crashes around publication; a durable outbox/replay model is still not implemented.
 
-## RabbitMQ Consumption and Backpressure
+## Scheduler Ingress and Backpressure
 
+- Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
+- TCP peer handlers wait for bounded scheduler-mailbox capacity before admitting `JOB_SUBMIT` and `TASK_RESULT` messages, applying socket-level backpressure instead of dropping those messages.
+- RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or peer explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
-- Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
-- RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
 - Adaptive backpressure across broker queue depth, peer capacity, and external autoscaling remains future work.
 
 ## Task State Machine

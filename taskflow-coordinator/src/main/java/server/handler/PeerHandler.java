@@ -125,11 +125,7 @@ public class PeerHandler implements Runnable {
                         continue;
                     }
 
-                    boolean queued = SchedulerMailbox.offer(mailbox, new MessageEnvelope(message, nodeId));
-                    if (!queued) {
-                        LOGGER.warn("event=scheduler_ingress_dropped reason=mailbox_full peer_id={} message_type={}",
-                                nodeId, message.getType());
-                    }
+                    SchedulerMailbox.put(mailbox, new MessageEnvelope(message, nodeId));
 
                 } catch (SocketTimeoutException ignored) {
                     // Normal polling timeout
@@ -138,6 +134,9 @@ public class PeerHandler implements Runnable {
                     break;
                 } catch (IOException e) {
                     LOGGER.warn("event=peer_io_error peer_id={} error={}", nodeId, e.getMessage(), e);
+                    break;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     break;
                 } catch (Exception e) {
                     LOGGER.warn("event=peer_message_processing_failed peer_id={} error={}",
