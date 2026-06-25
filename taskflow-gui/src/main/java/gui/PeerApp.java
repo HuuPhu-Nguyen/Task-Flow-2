@@ -20,9 +20,7 @@ import protocol.JobResultMessage;
 import java.io.*;
 import java.nio.file.*;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.function.Consumer;
 
 public class PeerApp extends Application {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerApp.class);
@@ -34,7 +32,7 @@ public class PeerApp extends Application {
     private final java.util.Set<String> myActiveJobIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private GuiCoordinatorConnectionService connectionService;
     private GuiInputStagingService inputStagingService;
-    private volatile Task<?> activeBackgroundTask;
+    private final GuiBackgroundTaskRunner backgroundTaskRunner = new GuiBackgroundTaskRunner();
 
     private String sessionId;
     private TilePane gallery;
@@ -202,13 +200,10 @@ public class PeerApp extends Application {
                 String targetFormat = plugin.normalizeParameter(selectedFormat);
                 Task<GuiJobSubmitter.SubmittedJob> submitTask =
                         createSubmitJobTask(connection, out, plugin, inputPaths, targetFormat);
-                runGuiBackgroundTask(
+                backgroundTaskRunner.run(
                         "Submit job",
                         submitTask,
-                        busyControls,
-                        busyIndicator,
-                        statusLabel,
-                        cancelBtn,
+                        new GuiBackgroundTaskControls(busyControls, busyIndicator, statusLabel, cancelBtn),
                         submittedJob -> {
                             if (submittedJob == null || submittedJob.jobId() == null) {
                                 return;
@@ -256,13 +251,10 @@ public class PeerApp extends Application {
                             .map(File::toPath)
                             .toList();
                     Task<List<InputStaging.StagedInput>> stageTask = createStageInputsTask(sources);
-                    runGuiBackgroundTask(
+                    backgroundTaskRunner.run(
                             "Stage inputs",
                             stageTask,
-                            busyControls,
-                            busyIndicator,
-                            statusLabel,
-                            cancelBtn,
+                            new GuiBackgroundTaskControls(busyControls, busyIndicator, statusLabel, cancelBtn),
                             stagedInputs -> stagedInputs.forEach(this::addStagedInputCard));
                 } catch (Exception ex) {
                     LOGGER.warn("event=gui_upload_stage_start_failed error={}", ex.getMessage(), ex);
@@ -313,70 +305,6 @@ public class PeerApp extends Application {
                 return submittedJob;
             }
         };
-    }
-
-    private <T> void runGuiBackgroundTask(
-            String taskName,
-            Task<T> task,
-            List<? extends Node> disabledNodes,
-            ProgressIndicator busyIndicator,
-            Label statusLabel,
-            Button cancelBtn,
-            Consumer<T> onSucceeded) {
-        activeBackgroundTask = task;
-        setControlsDisabled(disabledNodes, true);
-        busyIndicator.progressProperty().bind(task.progressProperty());
-        busyIndicator.setVisible(true);
-        statusLabel.textProperty().bind(task.messageProperty());
-        cancelBtn.setVisible(true);
-        cancelBtn.setDisable(false);
-        cancelBtn.setOnAction(event -> task.cancel(true));
-
-        task.setOnSucceeded(event -> {
-            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
-            statusLabel.setText(taskName + " complete.");
-            onSucceeded.accept(task.getValue());
-        });
-        task.setOnFailed(event -> {
-            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
-            Throwable error = task.getException();
-            String message = error == null || error.getMessage() == null
-                    ? "Unknown error"
-                    : error.getMessage();
-            statusLabel.setText(taskName + " failed.");
-            LOGGER.error("event=gui_background_task_failed task={} error={}", taskName, message, error);
-            new Alert(Alert.AlertType.ERROR, taskName + " failed: " + message).show();
-        });
-        task.setOnCancelled(event -> {
-            finishGuiBackgroundTask(task, disabledNodes, busyIndicator, statusLabel, cancelBtn);
-            statusLabel.setText(taskName + " cancelled.");
-        });
-
-        Thread worker = new Thread(task, "gui-" + taskName.toLowerCase(Locale.ROOT).replace(' ', '-'));
-        worker.setDaemon(true);
-        worker.start();
-    }
-
-    private void finishGuiBackgroundTask(
-            Task<?> task,
-            List<? extends Node> disabledNodes,
-            ProgressIndicator busyIndicator,
-            Label statusLabel,
-            Button cancelBtn) {
-        if (activeBackgroundTask == task) {
-            activeBackgroundTask = null;
-        }
-        setControlsDisabled(disabledNodes, false);
-        busyIndicator.progressProperty().unbind();
-        busyIndicator.setVisible(false);
-        statusLabel.textProperty().unbind();
-        cancelBtn.setOnAction(null);
-        cancelBtn.setDisable(true);
-        cancelBtn.setVisible(false);
-    }
-
-    private void setControlsDisabled(List<? extends Node> nodes, boolean disabled) {
-        nodes.forEach(node -> node.setDisable(disabled));
     }
 
     private void addStagedInputCard(InputStaging.StagedInput stagedInput) {
@@ -533,10 +461,7 @@ public class PeerApp extends Application {
 
     @Override
     public void stop() throws Exception {
-        Task<?> backgroundTask = activeBackgroundTask;
-        if (backgroundTask != null) {
-            backgroundTask.cancel(true);
-        }
+        backgroundTaskRunner.cancelActiveTask();
         if (connectionService != null) {
             connectionService.stop();
         }
