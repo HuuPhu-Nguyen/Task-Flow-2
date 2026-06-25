@@ -43,6 +43,7 @@ public class PeerApp extends Application {
     private GuiHistoryView historyView;
     private List<ClientJobPlugin> clientJobPlugins = List.of();
     private Map<String, ClientJobPlugin> clientJobPluginsByType = Map.of();
+    private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
 
     @Override
     public void init() {
@@ -61,6 +62,7 @@ public class PeerApp extends Application {
                     sessionId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
             clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
+            resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
             LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
         } catch (Exception e) {
             LOGGER.error("event=gui_init_failed error={}", e.getMessage(), e);
@@ -560,21 +562,12 @@ public class PeerApp extends Application {
     }
 
     private boolean saveFilesToDisk(JobResultMessage result, String folderPath) {
-        GuiResultSaver.SaveResult saveResult = GuiResultSaver.save(result, folderPath, clientJobPluginsByType);
+        GuiResultSaver.SaveResult saveResult = resultSaveService.save(result, folderPath);
         if (!saveResult.successful()) {
-            if (saveResult.cause() == null) {
-                LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
-                        result.getJobId(), result.getTaskType(), saveResult.errorMessage());
-            } else {
-                LOGGER.warn("event=gui_results_save_failed job_id={} task_type={} error={}",
-                        result.getJobId(), result.getTaskType(), saveResult.errorMessage(), saveResult.cause());
-            }
             new Alert(Alert.AlertType.ERROR, saveResult.errorMessage()).show();
             return false;
         }
 
-        LOGGER.info("event=gui_results_saved job_id={} task_type={} output_dir={}",
-                result.getJobId(), result.getTaskType(), saveResult.outputDir());
         return true;
     }
 
