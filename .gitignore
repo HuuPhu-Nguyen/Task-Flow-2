@@ -37,6 +37,7 @@ target/
 # TaskFlow runtime artifacts
 PLAN.md
 LOG.md
+STATUS.md
 taskflow.db
 taskflow.db-shm
 taskflow.db-wal
@@ -49,6 +50,7 @@ java/out_PEER_*/
 .env
 .env.*
 !.env.example
+agents/
 .agents/
 .codex/
 WORKING_RULES.md

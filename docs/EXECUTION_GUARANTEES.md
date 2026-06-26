@@ -31,6 +31,13 @@ This document defines the current runtime guarantees of TaskFlow.
 - This does not guarantee durable replay for messages that were not broker-confirmed before an outage.
 - This does not recover coordinator crashes around publication; a durable outbox/replay model is still not implemented.
 
+## RabbitMQ Dead Lettering
+
+- RabbitMQ topology declaration can configure a dead-letter exchange and queue for normal TaskFlow queues.
+- Malformed broker deliveries are rejected, and handler failures can be rejected when `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+- Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
+- TaskFlow does not yet provide a DLQ inspection, quarantine, or redrive workflow. Dead-lettered messages require operator review outside TaskFlow before any manual republish.
+
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.

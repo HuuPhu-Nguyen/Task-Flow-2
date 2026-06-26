@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/HuuPhu-Nguyen/Task-Flow-2/actions/workflows/ci.yml/badge.svg)](https://github.com/HuuPhu-Nguyen/Task-Flow-2/actions/workflows/ci.yml)
 
-TaskFlow is a Java 21 coordinated peer-to-peer task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, fault-tolerant scheduling, persisted job history, and documented execution guarantees.
+TaskFlow is a Java 21 coordinated peer-to-peer task execution platform with pluggable job processors, TCP and RabbitMQ transport paths, retry-aware scheduling, persisted job history, and documented execution guarantees.
 
 The project is designed to demonstrate production-relevant distributed systems work: task orchestration, peer scheduling, retries, timeout handling, duplicate-result rejection, broker transport design, and plugin-based extensibility.
 
@@ -14,7 +14,7 @@ TaskFlow follows a **coordinated peer-to-peer model**:
 
 - A **Coordinator Server** manages job state, task assignment, retries, and result aggregation.
 - **Peer nodes** can submit jobs, advertise supported task types, and execute tasks assigned by the coordinator.
-- The **JavaFX peer** acts as both a job submitter and a task executor.
+- The **TCP JavaFX peer** acts as both a job submitter and a task executor.
 - Command-line peers can be started to add more compute capacity.
 
 Jobs are submitted dynamically by peers and processed in a fully asynchronous, message-driven pipeline.
@@ -57,7 +57,7 @@ flowchart LR
     Plugins --> Conversion[Conversion Plugin]
     Scheduler -->|JOB_RESULT| PeerA
 
-    RabbitMQ[(RabbitMQ Broker)] -. experimental transport .- Coordinator
+    RabbitMQ[(RabbitMQ Broker)] -. transitional broker transport .- Coordinator
     RabbitMQ -. task/result routes .- PeerB
     RabbitMQ -. task/result routes .- PeerC
 ```
@@ -136,7 +136,7 @@ The `TaskScheduler` is the core of the system.
 - Peers are filtered by advertised task capability before assignment
 - Eligible peers are selected by a configurable weighted score using load, latency, average task duration, and failure rate
 
-**Fault Tolerance**
+**Failure Handling**
 - Default task timeout: **60 seconds**, configurable with `TASKFLOW_TASK_TIMEOUT_MS`
 - Automatic retries on failure, configurable with `TASKFLOW_MAX_TASK_RETRIES`
 - Failed tasks are returned to the pending queue and retried by available peers
@@ -261,7 +261,7 @@ The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and ac
 - Submit distributed jobs
 - Receive and save results
 - Uses temporary session folders for input/output
-- Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains planned
+- Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains future work
 - Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
 - Persists per-job requester tokens and a requester identity keypair for TCP submissions under the local user profile so result requests can survive GUI restarts
 
@@ -275,10 +275,10 @@ Requester tokens and the GUI requester identity private key are stored by defaul
 - Decoupled components via message passing
 - No blocking request-response model
 
-### Fault Tolerance
+### Failure Handling
 - Task retries
 - Timeout detection
-- Peer failure handling
+- Peer failure handling through heartbeat/liveness checks and scheduler retries
 
 ### Load Balancing
 - Dynamic scheduling
@@ -418,7 +418,7 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE`
 - `TASKFLOW_PEER_ID`
 
-Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. TaskFlow declares and uses dead-letter routing, but it does not yet include a TaskFlow DLQ inspection/redrive command or workflow. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
 
 Run the RabbitMQ coordinator on Windows PowerShell:
 
@@ -551,18 +551,19 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 ## Known Limitations
 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion. Unit coverage verifies bounded scheduler-ingress behavior when the mailbox is full: TCP peer handlers wait for capacity and RabbitMQ broker deliveries are requeued. Full broker outage/restart behavior, adaptive broker/peer throttling, and durable outbox/replay are not complete.
-- RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication.
+- RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication and no TaskFlow DLQ review/redrive workflow for rejected messages.
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
-- SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, and schema-v4 requester identity keys require signed result requests for identity-bound jobs; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. PostgreSQL/Flyway and lease-based recovery are still planned for production-style state management.
+- SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, and schema-v4 requester identity keys require signed result requests for identity-bound jobs; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. PostgreSQL/Flyway and lease-based recovery are not implemented.
 - Result ownership uses per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX TCP submitter stores raw requester tokens and its local signing key in a user-profile file so result requests can survive GUI restarts.
 
 ---
 
-## Future Improvements
+## Candidate Future Improvements
 
 - PostgreSQL/Flyway state-store implementation
-- Add RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit support
+- RabbitMQ durable outbox/replay and DLQ review/redrive workflow
+- Additional RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit support
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard
@@ -575,7 +576,7 @@ This project is designed to demonstrate practical distributed systems concepts, 
 
 - task orchestration
 - concurrency control
-- fault tolerance
+- failure handling
 - network-based computation
 
 ## How to Run
