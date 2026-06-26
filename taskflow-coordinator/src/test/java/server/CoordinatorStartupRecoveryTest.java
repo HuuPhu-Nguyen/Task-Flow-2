@@ -1,6 +1,7 @@
 package server;
 
 import org.junit.jupiter.api.Test;
+import protocol.RequesterTokens;
 import server.db.JobStateStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
@@ -14,6 +15,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoordinatorStartupRecoveryTest {
+    private static final String TOKEN_HASH = RequesterTokens.hashToken("resume-token");
 
     @Test
     void reconcilesAbandonedJobsUsingProvidedCompletionTimestamp() {
@@ -51,6 +53,7 @@ class CoordinatorStartupRecoveryTest {
                 "job-resume",
                 "RABBITMQ_TEST_TASK",
                 "requester-1",
+                TOKEN_HASH,
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-resume-0",
@@ -66,6 +69,7 @@ class CoordinatorStartupRecoveryTest {
 
         assertTrue(result.successful());
         assertEquals(1, result.resumedJobs().size());
+        assertEquals(TOKEN_HASH, result.requesterTokenHashes().get("job-resume"));
         assertEquals(0, result.failedJobs());
         assertEquals(List.of("task-job-resume-0"), store.resetTasks());
 
@@ -81,6 +85,7 @@ class CoordinatorStartupRecoveryTest {
                 "job-completed-before-final-result",
                 "RABBITMQ_TEST_TASK",
                 "requester-1",
+                TOKEN_HASH,
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-completed-before-final-result-0",
@@ -107,6 +112,7 @@ class CoordinatorStartupRecoveryTest {
                 "job-missing-payload",
                 "RABBITMQ_TEST_TASK",
                 "requester-1",
+                TOKEN_HASH,
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-missing-payload-0",
@@ -124,6 +130,33 @@ class CoordinatorStartupRecoveryTest {
         assertEquals(0, result.resumedJobs().size());
         assertEquals(1, result.failedJobs());
         assertEquals(List.of("job-missing-payload:789"), store.failedJobs());
+    }
+
+    @Test
+    void marksRunningJobsFailedWhenRequesterTokenHashIsMissing() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-missing-token",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                "",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-missing-token-0",
+                        "PENDING",
+                        "payload",
+                        null,
+                        0
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 987L);
+
+        assertTrue(result.successful());
+        assertEquals(0, result.resumedJobs().size());
+        assertTrue(result.requesterTokenHashes().isEmpty());
+        assertEquals(1, result.failedJobs());
+        assertEquals(List.of("job-missing-token:987"), store.failedJobs());
     }
 
     private static class RecordingStore implements JobStateStore {

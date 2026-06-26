@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.RequesterTokens;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import server.db.JobStateStore;
@@ -400,9 +401,11 @@ class TaskSchedulerPersistenceTest {
     void completedResultRequestLoadsPersistedJobResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         RecordingJobStateStore store = new RecordingJobStateStore();
+        String requesterToken = "requester-token";
         store.setCompletedResult(new JobStateStore.CompletedJobResultState(
                 "job-completed-result",
                 "TEST_TASK",
+                RequesterTokens.hashToken(requesterToken),
                 List.of("result-alpha", "result-beta")
         ));
         TaskCapturingOutput output = new TaskCapturingOutput();
@@ -418,7 +421,12 @@ class TaskSchedulerPersistenceTest {
 
         try {
             mailbox.put(new MessageEnvelope(
-                    new JobResultRequestMessage("requester-1", "2026-06-25T00:00:00Z", "job-completed-result"),
+                    new JobResultRequestMessage(
+                            "requester-1",
+                            "2026-06-25T00:00:00Z",
+                            "job-completed-result",
+                            requesterToken
+                    ),
                     "requester-1"
             ));
 
@@ -429,6 +437,51 @@ class TaskSchedulerPersistenceTest {
             assertEquals("TEST_TASK", result.getTaskType());
             assertEquals(List.of("result-alpha", "result-beta"), result.getResultsByTaskId());
             assertEquals(List.of("loadCompletedJobResult:job-completed-result"), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void completedResultRequestRejectsWrongRequesterToken() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.setCompletedResult(new JobStateStore.CompletedJobResultState(
+                "job-owned-result",
+                "TEST_TASK",
+                RequesterTokens.hashToken("owner-token"),
+                List.of("secret-result")
+        ));
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-wrong-token-result-request-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    new JobResultRequestMessage(
+                            "requester-2",
+                            "2026-06-25T00:00:00Z",
+                            "job-owned-result",
+                            "wrong-token"
+                    ),
+                    "requester-2"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-owned-result", result.getJobId());
+            assertEquals("Requester token does not match job owner.", result.getErrorMessage());
+            assertEquals(List.of(), result.getResultsByTaskId());
+            assertEquals(List.of("loadCompletedJobResult:job-owned-result"), store.events());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -452,13 +505,17 @@ class TaskSchedulerPersistenceTest {
         schedulerThread.start();
 
         try {
-            mailbox.put(new MessageEnvelope(testJob("job-running-result-request", List.of("payload")),
-                    "requester-1"));
+            JobSubmitMessage submit = testJob("job-running-result-request", List.of("payload"));
+            mailbox.put(new MessageEnvelope(submit, "requester-1"));
 
             assertTrue(output.awaitTask());
             mailbox.put(new MessageEnvelope(
-                    new JobResultRequestMessage("requester-1", "2026-06-25T00:00:00Z",
-                            "job-running-result-request"),
+                    new JobResultRequestMessage(
+                            "requester-1",
+                            "2026-06-25T00:00:00Z",
+                            "job-running-result-request",
+                            submit.getRequesterToken()
+                    ),
                     "requester-1"
             ));
 

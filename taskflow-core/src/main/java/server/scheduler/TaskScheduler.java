@@ -22,6 +22,7 @@ public class TaskScheduler implements Runnable {
     private final SchedulerConfig config;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final Map<String, PendingJobCompletion> pendingJobCompletions = new LinkedHashMap<>();
+    private final Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
     private final SchedulerMetrics metrics = new SchedulerMetrics();
     private long lastMetricsLogAtMillis = 0L;
 
@@ -194,13 +195,18 @@ public class TaskScheduler implements Runnable {
                             "Job id is already active: " + submit.getJobId());
                     return;
                 }
+                String requesterTokenHash = RequesterTokens.hashToken(submit.getRequesterToken());
+                if (!RequesterTokens.hasTokenHash(requesterTokenHash)) {
+                    throw new IllegalArgumentException("Requester token is required.");
+                }
                 EmbarrassinglyParallelJob<?,?> job = JobFactory.create(submit, envelope.fromNodeId());
                 job.initializeTasks(submit);
                 if (job.getTasks().isEmpty()) {
                     throw new IllegalArgumentException("Job must create at least one task.");
                 }
-                persistJobStartup(job, submit.getParameter());
+                persistJobStartup(job, submit.getParameter(), requesterTokenHash);
                 activeJobs.put(job.getJobId(), job);
+                requesterTokenHashes.put(job.getJobId(), requesterTokenHash);
                 metrics.setActiveJobs(activeJobs.size());
                 logInfoEvent("job_started", fields(
                         "job_id", job.getJobId(),
@@ -251,12 +257,30 @@ public class TaskScheduler implements Runnable {
 
         PendingJobCompletion pending = pendingJobCompletions.get(jobId);
         if (pending != null) {
+            if (!authorizeJobResultRequest(
+                    requesterId,
+                    request,
+                    jobId,
+                    pending.response.getTaskType(),
+                    requesterTokenHashes.get(jobId)
+            )) {
+                return;
+            }
             sendRequestedJobResult(requesterId, pending.response);
             return;
         }
 
         EmbarrassinglyParallelJob<?, ?> activeJob = activeJobs.get(jobId);
         if (activeJob != null) {
+            if (!authorizeJobResultRequest(
+                    requesterId,
+                    request,
+                    jobId,
+                    activeJob.getTaskType(),
+                    requesterTokenHashes.get(jobId)
+            )) {
+                return;
+            }
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
                     java.time.Instant.now().toString(),
@@ -285,6 +309,15 @@ public class TaskScheduler implements Runnable {
         Optional<JobStateStore.CompletedJobResultState> result = db.loadCompletedJobResult(jobId);
         if (result.isPresent()) {
             JobStateStore.CompletedJobResultState completed = result.get();
+            if (!authorizeJobResultRequest(
+                    requesterId,
+                    request,
+                    completed.jobId(),
+                    completed.taskType(),
+                    completed.requesterTokenHash()
+            )) {
+                return;
+            }
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
                     java.time.Instant.now().toString(),
@@ -376,7 +409,9 @@ public class TaskScheduler implements Runnable {
         }
     }
 
-    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job, String parameter) {
+    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job,
+                                   String parameter,
+                                   String requesterTokenHash) {
         if (db == null) {
             return;
         }
@@ -384,6 +419,7 @@ public class TaskScheduler implements Runnable {
                 job.getJobId(),
                 job.getTaskType(),
                 job.getRequesterNodeId(),
+                requesterTokenHash,
                 parameter,
                 job.getTasks().values().stream()
                         .sorted(Comparator.comparingInt(task -> taskIndex(task.getTaskId())))
@@ -713,6 +749,7 @@ public class TaskScheduler implements Runnable {
 
         activeJobs.remove(job.getJobId());
         pendingJobCompletions.remove(job.getJobId());
+        requesterTokenHashes.remove(job.getJobId());
         metrics.setActiveJobs(activeJobs.size());
         if (!persisted) {
             logTerminalPersistenceDegraded(job, "markJobFailed", "result_delivery_abandoned");
@@ -746,6 +783,7 @@ public class TaskScheduler implements Runnable {
 
         activeJobs.remove(job.getJobId());
         pendingJobCompletions.remove(job.getJobId());
+        requesterTokenHashes.remove(job.getJobId());
         metrics.setActiveJobs(activeJobs.size());
         if (db != null) {
             if (completion.success) {
@@ -834,16 +872,58 @@ public class TaskScheduler implements Runnable {
         }
     }
 
+    private boolean authorizeJobResultRequest(String requesterNodeId,
+                                              JobResultRequestMessage request,
+                                              String jobId,
+                                              String taskType,
+                                              String expectedTokenHash) throws Exception {
+        String error = null;
+        if (!RequesterTokens.hasToken(request.getRequesterToken())) {
+            error = "Requester token is required.";
+        } else if (!RequesterTokens.hasTokenHash(expectedTokenHash)) {
+            error = "Requester token is unavailable for this job.";
+        } else if (!RequesterTokens.matches(request.getRequesterToken(), expectedTokenHash)) {
+            error = "Requester token does not match job owner.";
+        }
+
+        if (error == null) {
+            return true;
+        }
+
+        sendRequestedJobResult(requesterNodeId, new JobResultMessage(
+                "COORDINATOR",
+                java.time.Instant.now().toString(),
+                jobId == null ? "" : jobId,
+                taskType == null ? "" : taskType,
+                false,
+                List.of(),
+                error
+        ));
+        return false;
+    }
+
     public SchedulerMetrics.Snapshot getMetricsSnapshot() {
         return metrics.snapshot();
     }
 
     public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs) {
+        restoreJobs(jobs, Map.of());
+    }
+
+    public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs,
+                            Map<String, String> restoredRequesterTokenHashes) {
+        Map<String, String> tokenHashes = restoredRequesterTokenHashes == null
+                ? Map.of()
+                : restoredRequesterTokenHashes;
         for (EmbarrassinglyParallelJob<?, ?> job : jobs) {
             if (job == null || activeJobs.containsKey(job.getJobId())) {
                 continue;
             }
             activeJobs.put(job.getJobId(), job);
+            String tokenHash = tokenHashes.get(job.getJobId());
+            if (RequesterTokens.hasTokenHash(tokenHash)) {
+                requesterTokenHashes.put(job.getJobId(), tokenHash);
+            }
             logInfoEvent("job_resumed", fields(
                     "job_id", job.getJobId(),
                     "task_type", job.getTaskType(),

@@ -18,12 +18,14 @@ public interface JobStateStore {
     record ResumableJobState(String jobId,
                              String taskType,
                              String requesterId,
+                             String requesterTokenHash,
                              String parameter,
                              List<ResumableTaskState> tasks) {
     }
 
     record CompletedJobResultState(String jobId,
                                    String taskType,
+                                   String requesterTokenHash,
                                    List<Object> resultsByTaskId) {
     }
 
@@ -36,6 +38,22 @@ public interface JobStateStore {
     default boolean insertJobWithTasks(String jobId,
                                        String taskType,
                                        String requesterId,
+                                       String parameter,
+                                       Collection<TaskStartupState> tasks) {
+        return insertJobWithTasks(
+                jobId,
+                taskType,
+                requesterId,
+                "",
+                parameter,
+                tasks
+        );
+    }
+
+    default boolean insertJobWithTasks(String jobId,
+                                       String taskType,
+                                       String requesterId,
+                                       String requesterTokenHash,
                                        String parameter,
                                        Collection<TaskStartupState> tasks) {
         return insertJobWithTasks(

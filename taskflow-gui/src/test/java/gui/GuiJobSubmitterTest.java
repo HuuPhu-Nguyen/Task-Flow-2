@@ -162,6 +162,13 @@ class GuiJobSubmitterTest {
 
     @Test
     void tcpClientWritesJobResultRequest() {
+        jobSubmissionClient.submitJob(
+                "job-completed",
+                plugin.taskType(),
+                List.of("payload"),
+                "summary",
+                new PrintWriter(new StringWriter(), true)
+        );
         StringWriter writer = new StringWriter();
         PrintWriter out = new PrintWriter(writer, true);
 
@@ -170,6 +177,7 @@ class GuiJobSubmitterTest {
         String json = writer.toString();
         assertTrue(json.contains("\"type\":\"JOB_RESULT_REQUEST\""));
         assertTrue(json.contains("\"jobId\":\"job-completed\""));
+        assertTrue(json.contains("\"requesterToken\":\""));
     }
 
     private static JobResultMessage result(String jobId, boolean successful, String errorMessage) {

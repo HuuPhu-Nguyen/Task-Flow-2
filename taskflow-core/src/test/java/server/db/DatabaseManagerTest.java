@@ -2,6 +2,7 @@ package server.db;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.RequesterTokens;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -105,12 +106,14 @@ class DatabaseManagerTest {
     void persistsTaskPayloadsAndCompletedResultsForResume() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-resume-state-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
+        String requesterTokenHash = RequesterTokens.hashToken("resume-token");
 
         try {
             assertTrue(db.insertJobWithTasks(
                     "job-resume",
                     "TEST_TASK",
                     "requester-1",
+                    requesterTokenHash,
                     "csv",
                     List.of(
                             new JobStateStore.TaskStartupState("task-job-resume-0", "payload-alpha"),
@@ -126,6 +129,7 @@ class DatabaseManagerTest {
             assertEquals("job-resume", job.jobId());
             assertEquals("TEST_TASK", job.taskType());
             assertEquals("requester-1", job.requesterId());
+            assertEquals(requesterTokenHash, job.requesterTokenHash());
             assertEquals("csv", job.parameter());
             assertEquals(2, job.tasks().size());
 
@@ -149,12 +153,14 @@ class DatabaseManagerTest {
     void loadsCompletedJobResultFromPersistedTaskResults() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-completed-result-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
+        String requesterTokenHash = RequesterTokens.hashToken("completed-token");
 
         try {
             assertTrue(db.insertJobWithTasks(
                     "job-completed-result",
                     "TEST_TASK",
                     "requester-1",
+                    requesterTokenHash,
                     "csv",
                     List.of(
                             new JobStateStore.TaskStartupState("task-job-completed-result-1", "payload-beta"),
@@ -172,6 +178,7 @@ class DatabaseManagerTest {
             assertTrue(result.isPresent());
             assertEquals("job-completed-result", result.get().jobId());
             assertEquals("TEST_TASK", result.get().taskType());
+            assertEquals(requesterTokenHash, result.get().requesterTokenHash());
             assertEquals(List.of("result-alpha", "result-beta"), result.get().resultsByTaskId());
         } finally {
             db.close();
@@ -310,6 +317,7 @@ class DatabaseManagerTest {
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(tasksTableReferencesJobs(dbPath));
             assertTrue(columnExists(dbPath, "jobs", "parameter"));
+            assertTrue(columnExists(dbPath, "jobs", "requester_token_hash"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());

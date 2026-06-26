@@ -8,9 +8,16 @@ public class JobSubmitMessage extends Message {
     private String taskType;
     private List<Object> taskPayloads;
     private String parameter;
+    private String requesterToken;
 
     public JobSubmitMessage(String nodeId, String time,
                             String jobId, String taskType, List<Object> taskPayloads, String parameter) {
+        this(nodeId, time, jobId, taskType, taskPayloads, parameter, RequesterTokens.newToken());
+    }
+
+    public JobSubmitMessage(String nodeId, String time,
+                            String jobId, String taskType, List<Object> taskPayloads,
+                            String parameter, String requesterToken) {
         this.type = MessageType.JOB_SUBMIT;
         this.nodeId = nodeId;
         this.time = time;
@@ -18,6 +25,7 @@ public class JobSubmitMessage extends Message {
         this.taskType = taskType;
         this.taskPayloads = taskPayloads;
         this.parameter = parameter;
+        this.requesterToken = requesterToken == null ? "" : requesterToken;
     }
 
     public JobSubmitMessage() {
@@ -38,5 +46,9 @@ public class JobSubmitMessage extends Message {
 
     public String getParameter() {
         return parameter;
+    }
+
+    public String getRequesterToken() {
+        return requesterToken;
     }
 }

@@ -9,6 +9,7 @@ import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PongMessage;
+import protocol.RequesterTokens;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.BrokerTransport;
@@ -195,13 +196,15 @@ public class RabbitMqPeerNode {
         List<Object> payloads = plugin.buildPayloads(inputPaths, parameter);
 
         String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String requesterToken = RequesterTokens.newToken();
         JobSubmitMessage message = new JobSubmitMessage(
                 nodeId,
                 Instant.now().toString(),
                 jobId,
                 taskType,
                 payloads,
-                parameter
+                parameter,
+                requesterToken
         );
         publishConfirmed(
                 transport,

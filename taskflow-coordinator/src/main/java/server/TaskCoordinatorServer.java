@@ -6,6 +6,7 @@ import java.net.Socket;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -47,6 +48,7 @@ public class TaskCoordinatorServer {
 
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
+        Map<String, String> resumedJobTokenHashes = Map.of();
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
@@ -58,6 +60,7 @@ public class TaskCoordinatorServer {
                         DatabaseManager.DB_PATH);
             } else {
                 resumedJobs = recovery.resumedJobs();
+                resumedJobTokenHashes = recovery.requesterTokenHashes();
             }
         } catch (Exception e) {
             if (db != null) {
@@ -75,7 +78,7 @@ public class TaskCoordinatorServer {
                 new PeerRegistrySchedulerOutput(registry),
                 schedulerConfig
         );
-        schedulerLogic.restoreJobs(resumedJobs);
+        schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes);
         Thread schedulerThread = new Thread(schedulerLogic, "task-scheduler");
 
         //Monitoring and Networking

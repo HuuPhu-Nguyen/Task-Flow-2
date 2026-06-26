@@ -30,7 +30,8 @@ class RabbitMqMessageCodecTest {
                 "job-1",
                 "IMAGE_CONVERSION",
                 payloads,
-                "png"
+                "png",
+                "submit-token"
         );
 
         InboundTransportMessage decoded = decode(new OutboundTransportMessage(
@@ -46,6 +47,7 @@ class RabbitMqMessageCodecTest {
         assertEquals("job-1", decodedMessage.getJobId());
         assertEquals("IMAGE_CONVERSION", decodedMessage.getTaskType());
         assertEquals("png", decodedMessage.getParameter());
+        assertEquals("submit-token", decodedMessage.getRequesterToken());
     }
 
     @Test
@@ -96,7 +98,8 @@ class RabbitMqMessageCodecTest {
         JobResultRequestMessage message = new JobResultRequestMessage(
                 "requester-1",
                 "2026-06-25T00:00:00Z",
-                "job-123"
+                "job-123",
+                "request-token"
         );
 
         InboundTransportMessage decoded = decode(new OutboundTransportMessage(
@@ -110,6 +113,7 @@ class RabbitMqMessageCodecTest {
         JobResultRequestMessage decodedMessage = assertInstanceOf(JobResultRequestMessage.class, decoded.message());
         assertEquals(MessageType.JOB_RESULT_REQUEST, decodedMessage.getType());
         assertEquals("job-123", decodedMessage.getJobId());
+        assertEquals("request-token", decodedMessage.getRequesterToken());
     }
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {

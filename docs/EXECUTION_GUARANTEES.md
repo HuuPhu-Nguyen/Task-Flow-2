@@ -78,6 +78,15 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
 - If final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
 
+## Result Ownership
+
+- Job submissions carry a per-job requester token.
+- The coordinator persists only the token hash, not the raw token.
+- `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends an in-memory pending terminal result, reports an active job as still running, or reconstructs a completed persisted result.
+- Requests with a missing or wrong token return a failed `JOB_RESULT` instead of task results.
+- Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
+- This is a bearer-token ownership model, not full user/account authentication. Current JavaFX TCP submissions retain tokens in memory for the running GUI process; durable client-side token storage across GUI restarts is still future work.
+
 ## Persistence
 
 - SQLite is the current `JobStateStore` implementation.
@@ -85,15 +94,15 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - SQLite foreign-key checks are enabled per connection, and `tasks.job_id` must reference an existing `jobs.job_id`.
 - Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
 - Schema version 2 stores job parameters plus task payload/result snapshots used for startup recovery.
+- Schema version 3 stores requester token hashes used to authorize result requests across reconnects.
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, and resets assigned tasks to `PENDING` because leases are not implemented.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to a peer.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
-- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when every task result snapshot exists.
+- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches and every task result snapshot exists.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
-- TCP requester identity remains connection-scoped; full durable requester identity across reconnects is still future work.
 
 ## Heartbeat and Peer Liveness
 

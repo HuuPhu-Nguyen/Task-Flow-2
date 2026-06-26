@@ -3,6 +3,7 @@ package server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.JobSubmitMessage;
+import protocol.RequesterTokens;
 import server.db.JobStateStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
@@ -10,7 +11,9 @@ import server.job.TaskUnit;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 final class CoordinatorStartupRecovery {
     private static final Logger LOGGER = LoggerFactory.getLogger(CoordinatorStartupRecovery.class);
@@ -42,10 +45,11 @@ final class CoordinatorStartupRecovery {
     static RecoveryResult recoverPersistedJobs(JobStateStore store, long completedAt) {
         List<JobStateStore.ResumableJobState> persistedJobs = store.loadRunningJobsForResume();
         if (persistedJobs.isEmpty()) {
-            return new RecoveryResult(true, List.of(), 0);
+            return new RecoveryResult(true, List.of(), Map.of(), 0);
         }
 
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = new ArrayList<>();
+        Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
         int failedJobs = 0;
         boolean successful = true;
 
@@ -60,6 +64,7 @@ final class CoordinatorStartupRecovery {
                     continue;
                 }
                 resumedJobs.add(restored);
+                requesterTokenHashes.put(restored.getJobId(), persistedJob.requesterTokenHash());
                 LOGGER.warn("event=running_job_resumed job_id={} task_count={}",
                         persistedJob.jobId(), persistedJob.tasks().size());
             } catch (Exception e) {
@@ -75,11 +80,21 @@ final class CoordinatorStartupRecovery {
         if (failedJobs > 0) {
             LOGGER.warn("event=non_resumable_running_jobs_marked_failed count={}", failedJobs);
         }
-        return new RecoveryResult(successful, List.copyOf(resumedJobs), failedJobs);
+        return new RecoveryResult(
+                successful,
+                List.copyOf(resumedJobs),
+                Map.copyOf(requesterTokenHashes),
+                failedJobs
+        );
     }
 
     private static EmbarrassinglyParallelJob<?, ?> restoreJob(JobStateStore store,
                                                               JobStateStore.ResumableJobState persistedJob) {
+        if (!RequesterTokens.hasTokenHash(persistedJob.requesterTokenHash())) {
+            LOGGER.warn("event=running_job_not_resumable job_id={} reason=missing_requester_token_hash",
+                    persistedJob.jobId());
+            return null;
+        }
         if (persistedJob.tasks().isEmpty()) {
             LOGGER.warn("event=running_job_not_resumable job_id={} reason=no_tasks", persistedJob.jobId());
             return null;
@@ -138,6 +153,7 @@ final class CoordinatorStartupRecovery {
 
     record RecoveryResult(boolean successful,
                           List<EmbarrassinglyParallelJob<?, ?>> resumedJobs,
+                          Map<String, String> requesterTokenHashes,
                           int failedJobs) {
     }
 }

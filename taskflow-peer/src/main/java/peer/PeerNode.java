@@ -92,6 +92,7 @@ public class PeerNode {
 
     public String submitJob(String taskType, List<?> payloads, String parameter, PrintWriter out) {
         String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String requesterToken = RequesterTokens.newToken();
 
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
 
@@ -101,7 +102,8 @@ public class PeerNode {
                 jobId,
                 taskType,
                 taskPayloads,
-                parameter
+                parameter,
+                requesterToken
         );
 
         boolean sent = SafeJsonWriter.send(out, new Gson(), msg);
