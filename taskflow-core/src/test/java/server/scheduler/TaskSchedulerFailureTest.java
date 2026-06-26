@@ -48,7 +48,8 @@ class TaskSchedulerFailureTest {
                     "job-unsupported",
                     "UNSUPPORTED_TASK",
                     List.of("payload"),
-                    ""
+                    "",
+                    "token-job-unsupported"
             );
             mailbox.put(new MessageEnvelope(unsupportedJob, "requester-1"));
 
@@ -86,7 +87,8 @@ class TaskSchedulerFailureTest {
                     "job-empty",
                     "TEST_TASK",
                     List.of(),
-                    ""
+                    "",
+                    "token-job-empty"
             );
             mailbox.put(new MessageEnvelope(emptyJob, "requester-1"));
 
@@ -123,7 +125,8 @@ class TaskSchedulerFailureTest {
                     "job-invalid-submit",
                     "TEST_TASK",
                     List.of("payload"),
-                    "INVALID_PARAMETER"
+                    "INVALID_PARAMETER",
+                    "token-job-invalid-submit"
             );
             mailbox.put(new MessageEnvelope(invalidJob, "requester-1"));
 
@@ -162,7 +165,8 @@ class TaskSchedulerFailureTest {
                     "job-ack",
                     "TEST_TASK",
                     List.of(),
-                    ""
+                    "",
+                    "token-job-ack"
             );
             mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
 
@@ -199,7 +203,8 @@ class TaskSchedulerFailureTest {
                     "job-start-result-send-failure",
                     "TEST_TASK",
                     List.of(),
-                    ""
+                    "",
+                    "token-job-start-result-send-failure"
             );
             mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
 
@@ -236,7 +241,8 @@ class TaskSchedulerFailureTest {
                     "job-start-result-unrouted",
                     "TEST_TASK",
                     List.of(),
-                    ""
+                    "",
+                    "token-job-start-result-unrouted"
             );
             mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
 
@@ -361,7 +367,8 @@ class TaskSchedulerFailureTest {
                     "job-capability",
                     "TEST_TASK",
                     List.of("payload"),
-                    ""
+                    "",
+                    "token-job-capability"
             );
             mailbox.put(new MessageEnvelope(supportedJob, "requester-1"));
 
@@ -627,7 +634,8 @@ class TaskSchedulerFailureTest {
                 jobId,
                 "TEST_TASK",
                 payloads,
-                ""
+                "",
+                "token-" + jobId
         );
     }
 

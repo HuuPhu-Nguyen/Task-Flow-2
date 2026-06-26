@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.RequesterIdentity;
 
 import java.io.PrintWriter;
 import java.time.Instant;
@@ -42,15 +43,28 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
         }
         Objects.requireNonNull(out, "out");
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
+        RequesterIdentity.Credentials identity = requesterTokenStore.requesterIdentity();
         String requesterToken = requesterTokenStore.createTokenForJob(jobId);
+        String time = Instant.now().toString();
+        String signature = RequesterIdentity.signJobSubmit(
+                identity.privateKey(),
+                nodeId,
+                time,
+                jobId,
+                taskType,
+                parameter,
+                requesterToken
+        );
         JobSubmitMessage message = new JobSubmitMessage(
                 nodeId,
-                Instant.now().toString(),
+                time,
                 jobId,
                 taskType,
                 taskPayloads,
                 parameter,
-                requesterToken
+                requesterToken,
+                identity.publicKey(),
+                signature
         );
 
         boolean sent;
@@ -75,11 +89,22 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
         String requesterToken = requesterTokenStore.tokenForJob(jobId)
                 .orElseThrow(() -> new IllegalStateException(
                         "No requester token is available for job " + jobId + "."));
-        JobResultRequestMessage message = new JobResultRequestMessage(
+        RequesterIdentity.Credentials identity = requesterTokenStore.requesterIdentity();
+        String time = Instant.now().toString();
+        String signature = RequesterIdentity.signJobResultRequest(
+                identity.privateKey(),
                 nodeId,
-                Instant.now().toString(),
+                time,
                 jobId,
                 requesterToken
+        );
+        JobResultRequestMessage message = new JobResultRequestMessage(
+                nodeId,
+                time,
+                jobId,
+                requesterToken,
+                identity.publicKey(),
+                signature
         );
 
         if (!SafeJsonWriter.send(out, gson, message)) {

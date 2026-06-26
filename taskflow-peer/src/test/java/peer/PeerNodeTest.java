@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import peer.engine.PeerExecutionEngine;
 import protocol.JobSubmitMessage;
 import protocol.PingMessage;
+import protocol.RequesterIdentity;
 import transport.BrokerTransport;
 import transport.OutboundTransportMessage;
 import transport.TransportMessageHandler;
@@ -47,6 +48,7 @@ class PeerNodeTest {
         assertTrue(json.contains("\"type\":\"JOB_SUBMIT\""));
         assertTrue(json.contains("\"jobId\":\"" + jobId + "\""));
         assertTrue(json.contains("\"taskType\":\"TEXT_ANALYSIS\""));
+        assertTrue(RequesterIdentity.verifyJobSubmit(new Gson().fromJson(json, JobSubmitMessage.class)));
     }
 
     @Test
@@ -111,6 +113,7 @@ class PeerNodeTest {
         assertEquals("TEXT_ANALYSIS", message.getTaskType());
         assertEquals("CSV", message.getParameter());
         assertEquals(List.of("payload:notes-one.txt:CSV", "payload:notes-two.txt:CSV"), message.getTaskPayloads());
+        assertTrue(RequesterIdentity.verifyJobSubmit(message));
     }
 
     @Test

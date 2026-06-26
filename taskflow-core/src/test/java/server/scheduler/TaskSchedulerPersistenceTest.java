@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
@@ -406,6 +407,7 @@ class TaskSchedulerPersistenceTest {
                 "job-completed-result",
                 "TEST_TASK",
                 RequesterTokens.hashToken(requesterToken),
+                "",
                 List.of("result-alpha", "result-beta")
         ));
         TaskCapturingOutput output = new TaskCapturingOutput();
@@ -451,6 +453,7 @@ class TaskSchedulerPersistenceTest {
                 "job-owned-result",
                 "TEST_TASK",
                 RequesterTokens.hashToken("owner-token"),
+                "",
                 List.of("secret-result")
         ));
         TaskCapturingOutput output = new TaskCapturingOutput();
@@ -482,6 +485,183 @@ class TaskSchedulerPersistenceTest {
             assertEquals("Requester token does not match job owner.", result.getErrorMessage());
             assertEquals(List.of(), result.getResultsByTaskId());
             assertEquals(List.of("loadCompletedJobResult:job-owned-result"), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void signedJobSubmitPersistsRequesterIdentityKey() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-signed-submit-test");
+        schedulerThread.start();
+
+        try {
+            RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+            mailbox.put(new MessageEnvelope(
+                    signedTestJob("job-signed-submit", List.of("payload"), "token-signed-submit", identity),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitTask());
+            assertEquals(identity.publicKey(), store.lastRequesterIdentityKey());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void signedJobSubmitRejectsInvalidRequesterIdentitySignature() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registryWithPeer("peer-1"),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-invalid-submit-signature-test");
+        schedulerThread.start();
+
+        try {
+            RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+            String time = "2026-06-26T00:00:00Z";
+            String signature = RequesterIdentity.signJobSubmit(
+                    identity.privateKey(),
+                    "requester-1",
+                    time,
+                    "job-invalid-signature",
+                    "TEST_TASK",
+                    "",
+                    "different-token"
+            );
+            mailbox.put(new MessageEnvelope(
+                    new JobSubmitMessage(
+                            "requester-1",
+                            time,
+                            "job-invalid-signature",
+                            "TEST_TASK",
+                            List.of("payload"),
+                            "",
+                            "token-invalid-signature",
+                            identity.publicKey(),
+                            signature
+                    ),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("Requester identity signature is invalid.", result.getErrorMessage());
+            assertTrue(store.events().isEmpty());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void completedResultRequestRequiresSignedRequesterIdentityForIdentityBoundJob() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        String requesterToken = "requester-token";
+        RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+        store.setCompletedResult(new JobStateStore.CompletedJobResultState(
+                "job-identity-bound-result",
+                "TEST_TASK",
+                RequesterTokens.hashToken(requesterToken),
+                identity.publicKey(),
+                List.of("secret-result")
+        ));
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-missing-identity-result-request-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    new JobResultRequestMessage(
+                            "requester-1",
+                            "2026-06-26T00:00:00Z",
+                            "job-identity-bound-result",
+                            requesterToken
+                    ),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-identity-bound-result", result.getJobId());
+            assertEquals("Requester identity signature is required.", result.getErrorMessage());
+            assertEquals(List.of(), result.getResultsByTaskId());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void completedResultRequestAcceptsValidRequesterIdentitySignature() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        String requesterToken = "requester-token";
+        RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+        store.setCompletedResult(new JobStateStore.CompletedJobResultState(
+                "job-signed-result",
+                "TEST_TASK",
+                RequesterTokens.hashToken(requesterToken),
+                identity.publicKey(),
+                List.of("secret-result")
+        ));
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-signed-result-request-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    signedResultRequest(
+                            "requester-1",
+                            "job-signed-result",
+                            requesterToken,
+                            identity
+                    ),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertTrue(result.isSuccessful());
+            assertEquals("job-signed-result", result.getJobId());
+            assertEquals(List.of("secret-result"), result.getResultsByTaskId());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -548,7 +728,57 @@ class TaskSchedulerPersistenceTest {
                 jobId,
                 "TEST_TASK",
                 payloads,
-                ""
+                "",
+                "token-" + jobId
+        );
+    }
+
+    private static JobSubmitMessage signedTestJob(String jobId,
+                                                  List<Object> payloads,
+                                                  String requesterToken,
+                                                  RequesterIdentity.Credentials identity) {
+        String time = "2026-06-26T00:00:00Z";
+        String signature = RequesterIdentity.signJobSubmit(
+                identity.privateKey(),
+                "requester-1",
+                time,
+                jobId,
+                "TEST_TASK",
+                "",
+                requesterToken
+        );
+        return new JobSubmitMessage(
+                "requester-1",
+                time,
+                jobId,
+                "TEST_TASK",
+                payloads,
+                "",
+                requesterToken,
+                identity.publicKey(),
+                signature
+        );
+    }
+
+    private static JobResultRequestMessage signedResultRequest(String requesterId,
+                                                               String jobId,
+                                                               String requesterToken,
+                                                               RequesterIdentity.Credentials identity) {
+        String time = "2026-06-26T00:00:00Z";
+        String signature = RequesterIdentity.signJobResultRequest(
+                identity.privateKey(),
+                requesterId,
+                time,
+                jobId,
+                requesterToken
+        );
+        return new JobResultRequestMessage(
+                requesterId,
+                time,
+                jobId,
+                requesterToken,
+                identity.publicKey(),
+                signature
         );
     }
 
@@ -682,6 +912,7 @@ class TaskSchedulerPersistenceTest {
         private final boolean jobStartupPersists;
         private final String failingOperation;
         private JobStateStore.CompletedJobResultState completedResult;
+        private String lastRequesterIdentityKey = "";
 
         private RecordingJobStateStore() {
             this(true);
@@ -694,6 +925,26 @@ class TaskSchedulerPersistenceTest {
         private RecordingJobStateStore(boolean jobStartupPersists, String failingOperation) {
             this.jobStartupPersists = jobStartupPersists;
             this.failingOperation = failingOperation == null ? "" : failingOperation;
+        }
+
+        @Override
+        public synchronized boolean insertJobWithTasks(String jobId,
+                                                       String taskType,
+                                                       String requesterId,
+                                                       String requesterTokenHash,
+                                                       String requesterIdentityKey,
+                                                       String parameter,
+                                                       Collection<TaskStartupState> tasks) {
+            lastRequesterIdentityKey = requesterIdentityKey == null ? "" : requesterIdentityKey;
+            return JobStateStore.super.insertJobWithTasks(
+                    jobId,
+                    taskType,
+                    requesterId,
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    parameter,
+                    tasks
+            );
         }
 
         @Override
@@ -792,6 +1043,10 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<String> events() {
             return List.copyOf(events);
+        }
+
+        synchronized String lastRequesterIdentityKey() {
+            return lastRequesterIdentityKey;
         }
 
         synchronized void setCompletedResult(JobStateStore.CompletedJobResultState completedResult) {

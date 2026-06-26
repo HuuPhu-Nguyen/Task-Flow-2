@@ -2,6 +2,7 @@ package gui;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.RequesterIdentity;
 
 import java.nio.file.Path;
 
@@ -21,6 +22,19 @@ class FileGuiRequesterTokenStoreTest {
 
         FileGuiRequesterTokenStore secondStore = new FileGuiRequesterTokenStore(storePath);
         assertEquals(token, secondStore.tokenForJob("job-1").orElseThrow());
+    }
+
+    @Test
+    void persistsRequesterIdentityAcrossStoreInstances() {
+        Path storePath = tempDir.resolve("requester-tokens.properties");
+        FileGuiRequesterTokenStore firstStore = new FileGuiRequesterTokenStore(storePath);
+
+        RequesterIdentity.Credentials identity = firstStore.requesterIdentity();
+
+        FileGuiRequesterTokenStore secondStore = new FileGuiRequesterTokenStore(storePath);
+        RequesterIdentity.Credentials reloaded = secondStore.requesterIdentity();
+        assertEquals(identity.publicKey(), reloaded.publicKey());
+        assertEquals(identity.privateKey(), reloaded.privateKey());
     }
 
     @Test

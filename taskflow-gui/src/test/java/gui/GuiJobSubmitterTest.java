@@ -3,6 +3,7 @@ package gui;
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
+import protocol.RequesterIdentity;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -249,6 +250,12 @@ class GuiJobSubmitterTest {
 
     private static final class RecordingRequesterTokenStore implements GuiRequesterTokenStore {
         private final Map<String, String> tokens = new ConcurrentHashMap<>();
+        private final RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+
+        @Override
+        public RequesterIdentity.Credentials requesterIdentity() {
+            return identity;
+        }
 
         @Override
         public String createTokenForJob(String jobId) {

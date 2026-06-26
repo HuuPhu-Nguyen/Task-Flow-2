@@ -42,6 +42,7 @@ public class RabbitMqTaskCoordinatorServer {
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
         Map<String, String> resumedJobTokenHashes = Map.of();
+        Map<String, String> resumedJobIdentityKeys = Map.of();
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
@@ -54,6 +55,7 @@ public class RabbitMqTaskCoordinatorServer {
             } else {
                 resumedJobs = recovery.resumedJobs();
                 resumedJobTokenHashes = recovery.requesterTokenHashes();
+                resumedJobIdentityKeys = recovery.requesterIdentityKeys();
             }
         } catch (Exception e) {
             if (db != null) {
@@ -71,7 +73,7 @@ public class RabbitMqTaskCoordinatorServer {
                 new RabbitMqSchedulerOutput(transport),
                 schedulerConfig
         );
-        schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes);
+        schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,

@@ -1,8 +1,12 @@
 package gui;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.JobResultRequestMessage;
+import protocol.JobSubmitMessage;
+import protocol.RequesterIdentity;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -16,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TcpJobSubmissionClientTest {
+    private static final Gson GSON = new Gson();
+
     @TempDir
     Path tempDir;
 
@@ -44,6 +50,11 @@ class TcpJobSubmissionClientTest {
         restartedClient.requestJobResult("job-restart", new PrintWriter(requestWriter, true));
 
         assertEquals(submittedToken, requesterToken(requestWriter.toString()));
+        JobSubmitMessage submit = jobSubmit(submitWriter.toString());
+        JobResultRequestMessage request = jobResultRequest(requestWriter.toString());
+        assertEquals(submit.getRequesterPublicKey(), request.getRequesterPublicKey());
+        assertTrue(RequesterIdentity.verifyJobSubmit(submit));
+        assertTrue(RequesterIdentity.verifyJobResultRequest(request));
     }
 
     @Test
@@ -71,6 +82,14 @@ class TcpJobSubmissionClientTest {
                 .getAsJsonObject()
                 .get("requesterToken")
                 .getAsString();
+    }
+
+    private static JobSubmitMessage jobSubmit(String json) {
+        return GSON.fromJson(json, JobSubmitMessage.class);
+    }
+
+    private static JobResultRequestMessage jobResultRequest(String json) {
+        return GSON.fromJson(json, JobResultRequestMessage.class);
     }
 
     private static final class FailingWriter extends Writer {

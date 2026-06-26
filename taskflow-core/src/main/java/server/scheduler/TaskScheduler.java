@@ -23,6 +23,7 @@ public class TaskScheduler implements Runnable {
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final Map<String, PendingJobCompletion> pendingJobCompletions = new LinkedHashMap<>();
     private final Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
+    private final Map<String, String> requesterIdentityKeys = new LinkedHashMap<>();
     private final SchedulerMetrics metrics = new SchedulerMetrics();
     private long lastMetricsLogAtMillis = 0L;
 
@@ -199,14 +200,18 @@ public class TaskScheduler implements Runnable {
                 if (!RequesterTokens.hasTokenHash(requesterTokenHash)) {
                     throw new IllegalArgumentException("Requester token is required.");
                 }
+                String requesterIdentityKey = requesterIdentityKey(submit);
                 EmbarrassinglyParallelJob<?,?> job = JobFactory.create(submit, envelope.fromNodeId());
                 job.initializeTasks(submit);
                 if (job.getTasks().isEmpty()) {
                     throw new IllegalArgumentException("Job must create at least one task.");
                 }
-                persistJobStartup(job, submit.getParameter(), requesterTokenHash);
+                persistJobStartup(job, submit.getParameter(), requesterTokenHash, requesterIdentityKey);
                 activeJobs.put(job.getJobId(), job);
                 requesterTokenHashes.put(job.getJobId(), requesterTokenHash);
+                if (hasText(requesterIdentityKey)) {
+                    requesterIdentityKeys.put(job.getJobId(), requesterIdentityKey);
+                }
                 metrics.setActiveJobs(activeJobs.size());
                 logInfoEvent("job_started", fields(
                         "job_id", job.getJobId(),
@@ -262,7 +267,8 @@ public class TaskScheduler implements Runnable {
                     request,
                     jobId,
                     pending.response.getTaskType(),
-                    requesterTokenHashes.get(jobId)
+                    requesterTokenHashes.get(jobId),
+                    requesterIdentityKeys.get(jobId)
             )) {
                 return;
             }
@@ -277,7 +283,8 @@ public class TaskScheduler implements Runnable {
                     request,
                     jobId,
                     activeJob.getTaskType(),
-                    requesterTokenHashes.get(jobId)
+                    requesterTokenHashes.get(jobId),
+                    requesterIdentityKeys.get(jobId)
             )) {
                 return;
             }
@@ -314,7 +321,8 @@ public class TaskScheduler implements Runnable {
                     request,
                     completed.jobId(),
                     completed.taskType(),
-                    completed.requesterTokenHash()
+                    completed.requesterTokenHash(),
+                    completed.requesterIdentityKey()
             )) {
                 return;
             }
@@ -411,7 +419,8 @@ public class TaskScheduler implements Runnable {
 
     private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job,
                                    String parameter,
-                                   String requesterTokenHash) {
+                                   String requesterTokenHash,
+                                   String requesterIdentityKey) {
         if (db == null) {
             return;
         }
@@ -420,6 +429,7 @@ public class TaskScheduler implements Runnable {
                 job.getTaskType(),
                 job.getRequesterNodeId(),
                 requesterTokenHash,
+                requesterIdentityKey,
                 parameter,
                 job.getTasks().values().stream()
                         .sorted(Comparator.comparingInt(task -> taskIndex(task.getTaskId())))
@@ -750,6 +760,7 @@ public class TaskScheduler implements Runnable {
         activeJobs.remove(job.getJobId());
         pendingJobCompletions.remove(job.getJobId());
         requesterTokenHashes.remove(job.getJobId());
+        requesterIdentityKeys.remove(job.getJobId());
         metrics.setActiveJobs(activeJobs.size());
         if (!persisted) {
             logTerminalPersistenceDegraded(job, "markJobFailed", "result_delivery_abandoned");
@@ -784,6 +795,7 @@ public class TaskScheduler implements Runnable {
         activeJobs.remove(job.getJobId());
         pendingJobCompletions.remove(job.getJobId());
         requesterTokenHashes.remove(job.getJobId());
+        requesterIdentityKeys.remove(job.getJobId());
         metrics.setActiveJobs(activeJobs.size());
         if (db != null) {
             if (completion.success) {
@@ -876,7 +888,8 @@ public class TaskScheduler implements Runnable {
                                               JobResultRequestMessage request,
                                               String jobId,
                                               String taskType,
-                                              String expectedTokenHash) throws Exception {
+                                              String expectedTokenHash,
+                                              String expectedIdentityKey) throws Exception {
         String error = null;
         if (!RequesterTokens.hasToken(request.getRequesterToken())) {
             error = "Requester token is required.";
@@ -884,6 +897,13 @@ public class TaskScheduler implements Runnable {
             error = "Requester token is unavailable for this job.";
         } else if (!RequesterTokens.matches(request.getRequesterToken(), expectedTokenHash)) {
             error = "Requester token does not match job owner.";
+        } else if (hasText(expectedIdentityKey)
+                && !RequesterIdentity.hasIdentity(request.getRequesterPublicKey(), request.getRequesterSignature())) {
+            error = "Requester identity signature is required.";
+        } else if (hasText(expectedIdentityKey) && !expectedIdentityKey.equals(request.getRequesterPublicKey())) {
+            error = "Requester identity key does not match job owner.";
+        } else if (hasText(expectedIdentityKey) && !RequesterIdentity.verifyJobResultRequest(request)) {
+            error = "Requester identity signature is invalid.";
         }
 
         if (error == null) {
@@ -907,14 +927,23 @@ public class TaskScheduler implements Runnable {
     }
 
     public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs) {
-        restoreJobs(jobs, Map.of());
+        restoreJobs(jobs, Map.of(), Map.of());
     }
 
     public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs,
                             Map<String, String> restoredRequesterTokenHashes) {
+        restoreJobs(jobs, restoredRequesterTokenHashes, Map.of());
+    }
+
+    public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs,
+                            Map<String, String> restoredRequesterTokenHashes,
+                            Map<String, String> restoredRequesterIdentityKeys) {
         Map<String, String> tokenHashes = restoredRequesterTokenHashes == null
                 ? Map.of()
                 : restoredRequesterTokenHashes;
+        Map<String, String> identityKeys = restoredRequesterIdentityKeys == null
+                ? Map.of()
+                : restoredRequesterIdentityKeys;
         for (EmbarrassinglyParallelJob<?, ?> job : jobs) {
             if (job == null || activeJobs.containsKey(job.getJobId())) {
                 continue;
@@ -923,6 +952,10 @@ public class TaskScheduler implements Runnable {
             String tokenHash = tokenHashes.get(job.getJobId());
             if (RequesterTokens.hasTokenHash(tokenHash)) {
                 requesterTokenHashes.put(job.getJobId(), tokenHash);
+            }
+            String identityKey = identityKeys.get(job.getJobId());
+            if (hasText(identityKey)) {
+                requesterIdentityKeys.put(job.getJobId(), identityKey);
             }
             logInfoEvent("job_resumed", fields(
                     "job_id", job.getJobId(),
@@ -999,6 +1032,24 @@ public class TaskScheduler implements Runnable {
 
     private String persistenceFailureReason(String operation) {
         return "Persistence write failed during " + operation + ".";
+    }
+
+    private static String requesterIdentityKey(JobSubmitMessage submit) {
+        if (RequesterIdentity.hasPartialIdentity(submit.getRequesterPublicKey(), submit.getRequesterSignature())) {
+            throw new IllegalArgumentException(
+                    "Requester identity public key and signature are both required when identity is provided.");
+        }
+        if (!RequesterIdentity.hasIdentity(submit.getRequesterPublicKey(), submit.getRequesterSignature())) {
+            return "";
+        }
+        if (!RequesterIdentity.verifyJobSubmit(submit)) {
+            throw new IllegalArgumentException("Requester identity signature is invalid.");
+        }
+        return submit.getRequesterPublicKey();
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private void logTerminalPersistenceDegraded(EmbarrassinglyParallelJob<?, ?> job,

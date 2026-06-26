@@ -45,11 +45,12 @@ final class CoordinatorStartupRecovery {
     static RecoveryResult recoverPersistedJobs(JobStateStore store, long completedAt) {
         List<JobStateStore.ResumableJobState> persistedJobs = store.loadRunningJobsForResume();
         if (persistedJobs.isEmpty()) {
-            return new RecoveryResult(true, List.of(), Map.of(), 0);
+            return new RecoveryResult(true, List.of(), Map.of(), Map.of(), 0);
         }
 
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = new ArrayList<>();
         Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
+        Map<String, String> requesterIdentityKeys = new LinkedHashMap<>();
         int failedJobs = 0;
         boolean successful = true;
 
@@ -65,6 +66,9 @@ final class CoordinatorStartupRecovery {
                 }
                 resumedJobs.add(restored);
                 requesterTokenHashes.put(restored.getJobId(), persistedJob.requesterTokenHash());
+                if (hasText(persistedJob.requesterIdentityKey())) {
+                    requesterIdentityKeys.put(restored.getJobId(), persistedJob.requesterIdentityKey());
+                }
                 LOGGER.warn("event=running_job_resumed job_id={} task_count={}",
                         persistedJob.jobId(), persistedJob.tasks().size());
             } catch (Exception e) {
@@ -84,6 +88,7 @@ final class CoordinatorStartupRecovery {
                 successful,
                 List.copyOf(resumedJobs),
                 Map.copyOf(requesterTokenHashes),
+                Map.copyOf(requesterIdentityKeys),
                 failedJobs
         );
     }
@@ -151,9 +156,14 @@ final class CoordinatorStartupRecovery {
         return job;
     }
 
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
     record RecoveryResult(boolean successful,
                           List<EmbarrassinglyParallelJob<?, ?>> resumedJobs,
                           Map<String, String> requesterTokenHashes,
+                          Map<String, String> requesterIdentityKeys,
                           int failedJobs) {
     }
 }

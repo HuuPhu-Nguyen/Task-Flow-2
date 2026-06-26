@@ -5,6 +5,7 @@ import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
 import protocol.PongMessage;
+import protocol.RequesterIdentity;
 import protocol.TaskAssignMessage;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
@@ -24,14 +25,27 @@ class RabbitMqMessageCodecTest {
     void roundTripsJobSubmitMessages() {
         List<Object> payloads = new ArrayList<>();
         payloads.add(new TestPayload("input.png", "abc123"));
+        RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+        String time = "2026-06-02T00:00:00Z";
+        String signature = RequesterIdentity.signJobSubmit(
+                identity.privateKey(),
+                "client-1",
+                time,
+                "job-1",
+                "IMAGE_CONVERSION",
+                "png",
+                "submit-token"
+        );
         JobSubmitMessage message = new JobSubmitMessage(
                 "client-1",
-                "2026-06-02T00:00:00Z",
+                time,
                 "job-1",
                 "IMAGE_CONVERSION",
                 payloads,
                 "png",
-                "submit-token"
+                "submit-token",
+                identity.publicKey(),
+                signature
         );
 
         InboundTransportMessage decoded = decode(new OutboundTransportMessage(
@@ -48,6 +62,8 @@ class RabbitMqMessageCodecTest {
         assertEquals("IMAGE_CONVERSION", decodedMessage.getTaskType());
         assertEquals("png", decodedMessage.getParameter());
         assertEquals("submit-token", decodedMessage.getRequesterToken());
+        assertEquals(identity.publicKey(), decodedMessage.getRequesterPublicKey());
+        assertEquals(signature, decodedMessage.getRequesterSignature());
     }
 
     @Test
@@ -95,11 +111,22 @@ class RabbitMqMessageCodecTest {
 
     @Test
     void roundTripsJobResultRequests() {
-        JobResultRequestMessage message = new JobResultRequestMessage(
+        RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
+        String time = "2026-06-25T00:00:00Z";
+        String signature = RequesterIdentity.signJobResultRequest(
+                identity.privateKey(),
                 "requester-1",
-                "2026-06-25T00:00:00Z",
+                time,
                 "job-123",
                 "request-token"
+        );
+        JobResultRequestMessage message = new JobResultRequestMessage(
+                "requester-1",
+                time,
+                "job-123",
+                "request-token",
+                identity.publicKey(),
+                signature
         );
 
         InboundTransportMessage decoded = decode(new OutboundTransportMessage(
@@ -114,6 +141,8 @@ class RabbitMqMessageCodecTest {
         assertEquals(MessageType.JOB_RESULT_REQUEST, decodedMessage.getType());
         assertEquals("job-123", decodedMessage.getJobId());
         assertEquals("request-token", decodedMessage.getRequesterToken());
+        assertEquals(identity.publicKey(), decodedMessage.getRequesterPublicKey());
+        assertEquals(signature, decodedMessage.getRequesterSignature());
     }
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {

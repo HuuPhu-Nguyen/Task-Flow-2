@@ -16,6 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoordinatorStartupRecoveryTest {
     private static final String TOKEN_HASH = RequesterTokens.hashToken("resume-token");
+    private static final String IDENTITY_KEY = "resume-public-key";
 
     @Test
     void reconcilesAbandonedJobsUsingProvidedCompletionTimestamp() {
@@ -54,6 +55,7 @@ class CoordinatorStartupRecoveryTest {
                 "RABBITMQ_TEST_TASK",
                 "requester-1",
                 TOKEN_HASH,
+                IDENTITY_KEY,
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-resume-0",
@@ -70,6 +72,7 @@ class CoordinatorStartupRecoveryTest {
         assertTrue(result.successful());
         assertEquals(1, result.resumedJobs().size());
         assertEquals(TOKEN_HASH, result.requesterTokenHashes().get("job-resume"));
+        assertEquals(IDENTITY_KEY, result.requesterIdentityKeys().get("job-resume"));
         assertEquals(0, result.failedJobs());
         assertEquals(List.of("task-job-resume-0"), store.resetTasks());
 
@@ -86,6 +89,7 @@ class CoordinatorStartupRecoveryTest {
                 "RABBITMQ_TEST_TASK",
                 "requester-1",
                 TOKEN_HASH,
+                "",
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-completed-before-final-result-0",
@@ -114,6 +118,7 @@ class CoordinatorStartupRecoveryTest {
                 "requester-1",
                 TOKEN_HASH,
                 "",
+                "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-missing-payload-0",
                         "PENDING",
@@ -140,6 +145,7 @@ class CoordinatorStartupRecoveryTest {
                 "requester-1",
                 "",
                 "",
+                "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-missing-token-0",
                         "PENDING",
@@ -155,6 +161,7 @@ class CoordinatorStartupRecoveryTest {
         assertTrue(result.successful());
         assertEquals(0, result.resumedJobs().size());
         assertTrue(result.requesterTokenHashes().isEmpty());
+        assertTrue(result.requesterIdentityKeys().isEmpty());
         assertEquals(1, result.failedJobs());
         assertEquals(List.of("job-missing-token:987"), store.failedJobs());
     }

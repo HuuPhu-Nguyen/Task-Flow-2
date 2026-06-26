@@ -9,6 +9,8 @@ public class JobSubmitMessage extends Message {
     private List<Object> taskPayloads;
     private String parameter;
     private String requesterToken;
+    private String requesterPublicKey;
+    private String requesterSignature;
 
     public JobSubmitMessage(String nodeId, String time,
                             String jobId, String taskType, List<Object> taskPayloads, String parameter) {
@@ -18,6 +20,13 @@ public class JobSubmitMessage extends Message {
     public JobSubmitMessage(String nodeId, String time,
                             String jobId, String taskType, List<Object> taskPayloads,
                             String parameter, String requesterToken) {
+        this(nodeId, time, jobId, taskType, taskPayloads, parameter, requesterToken, "", "");
+    }
+
+    public JobSubmitMessage(String nodeId, String time,
+                            String jobId, String taskType, List<Object> taskPayloads,
+                            String parameter, String requesterToken,
+                            String requesterPublicKey, String requesterSignature) {
         this.type = MessageType.JOB_SUBMIT;
         this.nodeId = nodeId;
         this.time = time;
@@ -26,6 +35,8 @@ public class JobSubmitMessage extends Message {
         this.taskPayloads = taskPayloads;
         this.parameter = parameter;
         this.requesterToken = requesterToken == null ? "" : requesterToken;
+        this.requesterPublicKey = requesterPublicKey == null ? "" : requesterPublicKey;
+        this.requesterSignature = requesterSignature == null ? "" : requesterSignature;
     }
 
     public JobSubmitMessage() {
@@ -50,5 +61,13 @@ public class JobSubmitMessage extends Message {
 
     public String getRequesterToken() {
         return requesterToken;
+    }
+
+    public String getRequesterPublicKey() {
+        return requesterPublicKey;
+    }
+
+    public String getRequesterSignature() {
+        return requesterSignature;
     }
 }

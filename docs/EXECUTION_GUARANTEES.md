@@ -81,12 +81,14 @@ The SQLite state store also guards these persisted transitions so terminal task/
 ## Result Ownership
 
 - Job submissions carry a per-job requester token.
-- The coordinator persists only the token hash, not the raw token.
+- Job submissions may also carry a requester public key and Ed25519 signature. The JavaFX TCP submitter and command-line submit paths sign submissions.
+- The coordinator persists only the token hash and requester public key, not the raw token or private key.
 - `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends an in-memory pending terminal result, reports an active job as still running, or reconstructs a completed persisted result.
-- Requests with a missing or wrong token return a failed `JOB_RESULT` instead of task results.
+- Jobs submitted with a requester public key are identity-bound: result requests must include the same public key and a valid signature over the request fields.
+- Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
-- JavaFX TCP submissions persist raw requester tokens in a local user-profile token file so later GUI processes can request owned results. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
-- This is a bearer-token ownership model, not full user/account authentication.
+- JavaFX TCP submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file so later GUI processes can request owned results. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
+- This is a per-job token plus local-signing-key ownership model, not full user/account authentication.
 
 ## Persistence
 
@@ -96,13 +98,14 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
 - Schema version 2 stores job parameters plus task payload/result snapshots used for startup recovery.
 - Schema version 3 stores requester token hashes used to authorize result requests across reconnects.
+- Schema version 4 stores requester identity public keys used to require signed result requests for identity-bound jobs.
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, and resets assigned tasks to `PENDING` because leases are not implemented.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to a peer.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
-- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches and every task result snapshot exists.
+- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
 
 ## Heartbeat and Peer Liveness

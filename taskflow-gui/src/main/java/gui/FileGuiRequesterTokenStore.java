@@ -1,6 +1,7 @@
 package gui;
 
 import protocol.RequesterTokens;
+import protocol.RequesterIdentity;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -16,6 +17,8 @@ import java.util.Set;
 
 final class FileGuiRequesterTokenStore implements GuiRequesterTokenStore {
     private static final String STORE_ENV = "TASKFLOW_GUI_REQUESTER_TOKEN_STORE";
+    private static final String IDENTITY_PUBLIC_KEY = "__requesterIdentity.publicKey";
+    private static final String IDENTITY_PRIVATE_KEY = "__requesterIdentity.privateKey";
     private static final Set<PosixFilePermission> OWNER_FILE_PERMISSIONS = EnumSet.of(
             PosixFilePermission.OWNER_READ,
             PosixFilePermission.OWNER_WRITE
@@ -42,6 +45,22 @@ final class FileGuiRequesterTokenStore implements GuiRequesterTokenStore {
                 ".taskflow",
                 "gui-requester-tokens.properties"
         ));
+    }
+
+    @Override
+    public synchronized RequesterIdentity.Credentials requesterIdentity() {
+        Properties tokens = load();
+        String publicKey = tokens.getProperty(IDENTITY_PUBLIC_KEY);
+        String privateKey = tokens.getProperty(IDENTITY_PRIVATE_KEY);
+        if (hasText(publicKey) && hasText(privateKey)) {
+            return new RequesterIdentity.Credentials(publicKey, privateKey);
+        }
+
+        RequesterIdentity.Credentials credentials = RequesterIdentity.newCredentials();
+        tokens.setProperty(IDENTITY_PUBLIC_KEY, credentials.publicKey());
+        tokens.setProperty(IDENTITY_PRIVATE_KEY, credentials.privateKey());
+        save(tokens);
+        return credentials;
     }
 
     @Override
@@ -107,6 +126,10 @@ final class FileGuiRequesterTokenStore implements GuiRequesterTokenStore {
             throw new IllegalArgumentException("jobId is required.");
         }
         return jobId.trim();
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     private static void restrictPermissions(Path path, Set<PosixFilePermission> permissions) {

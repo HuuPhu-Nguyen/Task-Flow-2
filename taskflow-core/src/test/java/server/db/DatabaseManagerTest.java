@@ -107,6 +107,7 @@ class DatabaseManagerTest {
         Path dbPath = tempDir.resolve("taskflow-resume-state-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
         String requesterTokenHash = RequesterTokens.hashToken("resume-token");
+        String requesterIdentityKey = "resume-public-key";
 
         try {
             assertTrue(db.insertJobWithTasks(
@@ -114,6 +115,7 @@ class DatabaseManagerTest {
                     "TEST_TASK",
                     "requester-1",
                     requesterTokenHash,
+                    requesterIdentityKey,
                     "csv",
                     List.of(
                             new JobStateStore.TaskStartupState("task-job-resume-0", "payload-alpha"),
@@ -130,6 +132,7 @@ class DatabaseManagerTest {
             assertEquals("TEST_TASK", job.taskType());
             assertEquals("requester-1", job.requesterId());
             assertEquals(requesterTokenHash, job.requesterTokenHash());
+            assertEquals(requesterIdentityKey, job.requesterIdentityKey());
             assertEquals("csv", job.parameter());
             assertEquals(2, job.tasks().size());
 
@@ -154,6 +157,7 @@ class DatabaseManagerTest {
         Path dbPath = tempDir.resolve("taskflow-completed-result-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
         String requesterTokenHash = RequesterTokens.hashToken("completed-token");
+        String requesterIdentityKey = "completed-public-key";
 
         try {
             assertTrue(db.insertJobWithTasks(
@@ -161,6 +165,7 @@ class DatabaseManagerTest {
                     "TEST_TASK",
                     "requester-1",
                     requesterTokenHash,
+                    requesterIdentityKey,
                     "csv",
                     List.of(
                             new JobStateStore.TaskStartupState("task-job-completed-result-1", "payload-beta"),
@@ -179,6 +184,7 @@ class DatabaseManagerTest {
             assertEquals("job-completed-result", result.get().jobId());
             assertEquals("TEST_TASK", result.get().taskType());
             assertEquals(requesterTokenHash, result.get().requesterTokenHash());
+            assertEquals(requesterIdentityKey, result.get().requesterIdentityKey());
             assertEquals(List.of("result-alpha", "result-beta"), result.get().resultsByTaskId());
         } finally {
             db.close();
@@ -318,6 +324,7 @@ class DatabaseManagerTest {
             assertTrue(tasksTableReferencesJobs(dbPath));
             assertTrue(columnExists(dbPath, "jobs", "parameter"));
             assertTrue(columnExists(dbPath, "jobs", "requester_token_hash"));
+            assertTrue(columnExists(dbPath, "jobs", "requester_identity_key"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());

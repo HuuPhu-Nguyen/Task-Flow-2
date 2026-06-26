@@ -17,7 +17,7 @@ public class DatabaseManager implements JobStateStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 3;
+    public static final int CURRENT_SCHEMA_VERSION = 4;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -106,6 +106,7 @@ public class DatabaseManager implements JobStateStore {
                     task_type        TEXT    NOT NULL,
                     requester_node_id TEXT   NOT NULL,
                     requester_token_hash TEXT NOT NULL DEFAULT '',
+                    requester_identity_key TEXT NOT NULL DEFAULT '',
                     status           TEXT    NOT NULL DEFAULT 'RUNNING',
                     submitted_at     INTEGER NOT NULL,
                     completed_at     INTEGER,
@@ -145,6 +146,11 @@ public class DatabaseManager implements JobStateStore {
         if (!columnExists("jobs", "requester_token_hash")) {
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("ALTER TABLE jobs ADD COLUMN requester_token_hash TEXT NOT NULL DEFAULT ''");
+            }
+        }
+        if (!columnExists("jobs", "requester_identity_key")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE jobs ADD COLUMN requester_identity_key TEXT NOT NULL DEFAULT ''");
             }
         }
     }
@@ -305,6 +311,9 @@ public class DatabaseManager implements JobStateStore {
         if (!columnExists("jobs", "requester_token_hash")) {
             throw new SQLException("Database schema is missing jobs.requester_token_hash.");
         }
+        if (!columnExists("jobs", "requester_identity_key")) {
+            throw new SQLException("Database schema is missing jobs.requester_identity_key.");
+        }
         if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
         }
@@ -335,6 +344,7 @@ public class DatabaseManager implements JobStateStore {
                                                    String taskType,
                                                    String requesterId,
                                                    String requesterTokenHash,
+                                                   String requesterIdentityKey,
                                                    String parameter,
                                                    Collection<TaskStartupState> tasks) {
         List<TaskStartupState> taskStates = List.copyOf(tasks);
@@ -344,12 +354,13 @@ public class DatabaseManager implements JobStateStore {
                     task_type,
                     requester_node_id,
                     requester_token_hash,
+                    requester_identity_key,
                     status,
                     submitted_at,
                     file_count,
                     parameter
                 )
-                VALUES(?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """;
         String insertTaskSql = "INSERT INTO tasks(task_id,job_id,status,payload_json) VALUES(?,?,?,?)";
         boolean originalAutoCommit;
@@ -362,10 +373,11 @@ public class DatabaseManager implements JobStateStore {
                 job.setString(2, taskType);
                 job.setString(3, requesterId);
                 job.setString(4, requesterTokenHash == null ? "" : requesterTokenHash);
-                job.setString(5, "RUNNING");
-                job.setLong(6, System.currentTimeMillis());
-                job.setInt(7, taskStates.size());
-                job.setString(8, parameter == null ? "" : parameter);
+                job.setString(5, requesterIdentityKey == null ? "" : requesterIdentityKey);
+                job.setString(6, "RUNNING");
+                job.setLong(7, System.currentTimeMillis());
+                job.setInt(8, taskStates.size());
+                job.setString(9, parameter == null ? "" : parameter);
                 if (job.executeUpdate() <= 0) {
                     throw new SQLException("No job row inserted.");
                 }
@@ -396,18 +408,29 @@ public class DatabaseManager implements JobStateStore {
 
     public synchronized boolean insertJob(String jobId, String taskType, String requesterId, int fileCount) {
         String sql = """
-                INSERT INTO jobs(job_id,task_type,requester_node_id,requester_token_hash,status,submitted_at,file_count,parameter)
-                VALUES(?,?,?,?,?,?,?,?)
+                INSERT INTO jobs(
+                    job_id,
+                    task_type,
+                    requester_node_id,
+                    requester_token_hash,
+                    requester_identity_key,
+                    status,
+                    submitted_at,
+                    file_count,
+                    parameter
+                )
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, jobId);
             ps.setString(2, taskType);
             ps.setString(3, requesterId);
             ps.setString(4, "");
-            ps.setString(5, "RUNNING");
-            ps.setLong(6, System.currentTimeMillis());
-            ps.setInt(7, fileCount);
-            ps.setString(8, "");
+            ps.setString(5, "");
+            ps.setString(6, "RUNNING");
+            ps.setLong(7, System.currentTimeMillis());
+            ps.setInt(8, fileCount);
+            ps.setString(9, "");
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             logSqlFailure("insertJob", e);
@@ -639,6 +662,7 @@ public class DatabaseManager implements JobStateStore {
                         rs.getString("task_type"),
                         rs.getString("requester_node_id"),
                         rs.getString("requester_token_hash"),
+                        rs.getString("requester_identity_key"),
                         rs.getString("parameter"),
                         loadTasksForResume(jobId)
                 ));
@@ -682,7 +706,7 @@ public class DatabaseManager implements JobStateStore {
         }
 
         String jobSql = """
-                SELECT task_type, file_count, requester_token_hash
+                SELECT task_type, file_count, requester_token_hash, requester_identity_key
                 FROM jobs
                 WHERE job_id=? AND status='COMPLETED'
                 """;
@@ -708,6 +732,7 @@ public class DatabaseManager implements JobStateStore {
                         jobId,
                         taskType,
                         jobResult.getString("requester_token_hash"),
+                        jobResult.getString("requester_identity_key"),
                         taskResults.stream()
                                 .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
                                 .map(TaskResultSnapshot::resultPayload)

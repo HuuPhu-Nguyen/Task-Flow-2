@@ -49,6 +49,7 @@ public class TaskCoordinatorServer {
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
         Map<String, String> resumedJobTokenHashes = Map.of();
+        Map<String, String> resumedJobIdentityKeys = Map.of();
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
@@ -61,6 +62,7 @@ public class TaskCoordinatorServer {
             } else {
                 resumedJobs = recovery.resumedJobs();
                 resumedJobTokenHashes = recovery.requesterTokenHashes();
+                resumedJobIdentityKeys = recovery.requesterIdentityKeys();
             }
         } catch (Exception e) {
             if (db != null) {
@@ -78,7 +80,7 @@ public class TaskCoordinatorServer {
                 new PeerRegistrySchedulerOutput(registry),
                 schedulerConfig
         );
-        schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes);
+        schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
         Thread schedulerThread = new Thread(schedulerLogic, "task-scheduler");
 
         //Monitoring and Networking

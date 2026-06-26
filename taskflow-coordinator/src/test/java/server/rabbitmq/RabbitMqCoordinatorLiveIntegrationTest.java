@@ -131,7 +131,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                                 jobId,
                                 TestTaskPlugin.TASK_TYPE,
                                 List.of("alpha"),
-                                ""
+                                "",
+                                "token-" + jobId
                         )
                 ));
 
