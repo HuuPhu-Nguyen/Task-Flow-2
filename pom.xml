@@ -11,6 +11,7 @@
     <modules>
         <module>taskflow-spi</module>
         <module>taskflow-core</module>
+        <module>taskflow-persistence-sqlite</module>
         <module>plugins/conversion</module>
         <module>plugins/text</module>
         <module>taskflow-transport-rabbitmq</module>
@@ -45,6 +46,11 @@
             <dependency>
                 <groupId>com.dickinson.cs</groupId>
                 <artifactId>taskflow-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.dickinson.cs</groupId>
+                <artifactId>taskflow-persistence-sqlite</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

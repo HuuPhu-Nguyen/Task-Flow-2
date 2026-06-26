@@ -100,7 +100,7 @@ The SQLite state store also guards these persisted transitions so terminal task/
 
 ## Persistence
 
-- SQLite is the current `JobStateStore` implementation.
+- SQLite is the current `JobStateStore` implementation, provided by `taskflow-persistence-sqlite`.
 - The SQLite schema is versioned and startup rejects schema versions newer than this runtime supports.
 - SQLite foreign-key checks are enabled per connection, and `tasks.job_id` must reference an existing `jobs.job_id`.
 - Existing unversioned task tables are migrated to the current foreign-key schema when they do not contain orphan task rows.
