@@ -263,6 +263,9 @@ The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and ac
 - Uses temporary session folders for input/output
 - Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains planned
 - Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
+- Persists per-job requester tokens for TCP submissions under the local user profile so result requests can survive GUI restarts
+
+Requester tokens are stored by default at `<user-home>/.taskflow/gui-requester-tokens.properties`. Override the location with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE` when a different local path is needed. These are bearer tokens for job-result ownership, not user account credentials.
 
 ---
 
@@ -552,7 +555,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 - The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
 - SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. PostgreSQL/Flyway and lease-based recovery are still planned for production-style state management.
-- Result ownership uses per-job bearer requester tokens. The coordinator persists only token hashes and requires a matching token for `JOB_RESULT_REQUEST`, but this is not a full user/account authentication model. The JavaFX TCP submitter retains tokens in memory for the running GUI process; durable client-side token storage across GUI restarts is still planned.
+- Result ownership uses per-job bearer requester tokens. The coordinator persists only token hashes and requires a matching token for `JOB_RESULT_REQUEST`, but this is not a full user/account authentication model. The JavaFX TCP submitter stores raw requester tokens in a local user-profile file so result requests can survive GUI restarts.
 
 ---
 

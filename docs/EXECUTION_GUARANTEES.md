@@ -85,7 +85,8 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends an in-memory pending terminal result, reports an active job as still running, or reconstructs a completed persisted result.
 - Requests with a missing or wrong token return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
-- This is a bearer-token ownership model, not full user/account authentication. Current JavaFX TCP submissions retain tokens in memory for the running GUI process; durable client-side token storage across GUI restarts is still future work.
+- JavaFX TCP submissions persist raw requester tokens in a local user-profile token file so later GUI processes can request owned results. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
+- This is a bearer-token ownership model, not full user/account authentication.
 
 ## Persistence
 

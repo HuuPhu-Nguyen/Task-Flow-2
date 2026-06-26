@@ -11,6 +11,8 @@ import java.io.Writer;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,7 +28,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GuiJobSubmitterTest {
     private final ClientJobPlugin plugin = new FakeClientJobPlugin();
-    private final JobSubmissionClient jobSubmissionClient = new TcpJobSubmissionClient("CLIENT");
+    private final RecordingRequesterTokenStore requesterTokenStore = new RecordingRequesterTokenStore();
+    private final JobSubmissionClient jobSubmissionClient =
+            new TcpJobSubmissionClient("CLIENT", requesterTokenStore);
 
     @Test
     void successfulSubmitTracksActiveJobImmediately() {
@@ -177,7 +181,7 @@ class GuiJobSubmitterTest {
         String json = writer.toString();
         assertTrue(json.contains("\"type\":\"JOB_RESULT_REQUEST\""));
         assertTrue(json.contains("\"jobId\":\"job-completed\""));
-        assertTrue(json.contains("\"requesterToken\":\""));
+        assertTrue(json.contains("\"requesterToken\":\"token-job-completed\""));
     }
 
     private static JobResultMessage result(String jobId, boolean successful, String errorMessage) {
@@ -240,6 +244,27 @@ class GuiJobSubmitterTest {
 
         @Override
         public void close() {
+        }
+    }
+
+    private static final class RecordingRequesterTokenStore implements GuiRequesterTokenStore {
+        private final Map<String, String> tokens = new ConcurrentHashMap<>();
+
+        @Override
+        public String createTokenForJob(String jobId) {
+            String token = "token-" + jobId;
+            tokens.put(jobId, token);
+            return token;
+        }
+
+        @Override
+        public Optional<String> tokenForJob(String jobId) {
+            return Optional.ofNullable(tokens.get(jobId));
+        }
+
+        @Override
+        public void forgetToken(String jobId) {
+            tokens.remove(jobId);
         }
     }
 }
