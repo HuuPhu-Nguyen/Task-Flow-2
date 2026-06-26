@@ -4,8 +4,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import protocol.RequesterIdentity;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -47,5 +52,28 @@ class FileGuiRequesterTokenStoreTest {
 
         FileGuiRequesterTokenStore reloaded = new FileGuiRequesterTokenStore(storePath);
         assertTrue(reloaded.tokenForJob("job-1").isEmpty());
+    }
+
+    @Test
+    void restrictsStorePermissionsWhenPosixPermissionsAreSupported() throws Exception {
+        assumeTrue(Files.getFileAttributeView(tempDir, PosixFileAttributeView.class) != null);
+        Path storeDirectory = tempDir.resolve("nested");
+        Path storePath = storeDirectory.resolve("requester-tokens.properties");
+        FileGuiRequesterTokenStore store = new FileGuiRequesterTokenStore(storePath);
+
+        store.createTokenForJob("job-1");
+
+        assertEquals(
+                Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
+                Files.getPosixFilePermissions(storePath)
+        );
+        assertEquals(
+                Set.of(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE
+                ),
+                Files.getPosixFilePermissions(storeDirectory)
+        );
     }
 }

@@ -95,7 +95,8 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
 - JavaFX TCP submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file so later GUI processes can request owned results. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
-- This is a per-job token plus local-signing-key ownership model, not full user/account authentication.
+- On POSIX-compatible filesystems, TaskFlow attempts to restrict that token file to owner read/write and its parent directory to owner read/write/execute. On Windows or unsupported filesystems, token-file protection depends on the normal user-profile and filesystem access controls.
+- This is a per-job token plus local-signing-key ownership model, not full user/account authentication, login sessions, authorization roles, replay prevention, or a credential vault.
 
 ## Persistence
 
