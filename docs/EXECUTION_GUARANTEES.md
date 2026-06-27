@@ -23,6 +23,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - Failed task-assignment publishes are retried by scheduler dispatch logic.
 - Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
 - This is not a durable outbox: coordinator crash replay around publication is still not implemented.
+- RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it a supported runtime.
 
 ## RabbitMQ Connection Recovery
 
@@ -115,6 +116,7 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
 - `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
+- Explicit attempt history, lease-based recovery, and PostgreSQL/Flyway are not implemented. `docs/RECOVERY_SCOPE.md` records attempt history and leases as accepted future behavior scope, with PostgreSQL/Flyway deferred until there is a concrete external database requirement.
 
 ## Heartbeat and Peer Liveness
 
