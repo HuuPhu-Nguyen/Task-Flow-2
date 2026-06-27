@@ -1,0 +1,134 @@
+# Observability Scope
+
+This document records what TaskFlow exposes through logs today and what remains
+deferred before adding a dedicated metrics backend.
+
+## Current Position
+
+TaskFlow currently relies on structured SLF4J/Logback event logs plus scheduler
+metrics snapshots. These logs are suitable for local runs, CI output, Docker
+demo inspection, and focused troubleshooting.
+
+TaskFlow does not yet provide a metrics exporter, dashboard, alerting rules,
+distributed tracing, log retention policy, or TaskFlow-managed DLQ review
+workflow.
+
+## Current Event Map
+
+Queue pressure and scheduler health:
+
+- `scheduler_metrics` includes `queue_depth`, `active_jobs`,
+  `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `success_count`,
+  and `failure_count`.
+- `scheduler_ingress_requeued reason=mailbox_full` records RabbitMQ
+  scheduler-delivery requeue when the bounded scheduler mailbox is full.
+- TCP coordinator `peer_status` logs include peer connection state and active
+  scheduler work snapshots.
+
+Job lifecycle:
+
+- `job_started` records accepted scheduler jobs with `job_id`, `task_type`,
+  requester, and task count.
+- `job_completed` records terminal scheduler completion with success and result
+  count.
+- `job_failed` records terminal scheduler failure reasons.
+- `job_start_failed`, `job_start_failure_requester_missing`, and
+  `job_start_failure_send_failed` record rejected or unroutable startup
+  failures.
+- RabbitMQ command-line submitters log `job_submitted`, `job_result_received`,
+  `job_completed`, and `job_failed`.
+- JavaFX TCP submission and save paths log `gui_job_submitted`,
+  `gui_results_saved`, and `gui_results_save_failed`.
+
+Task assignment, retry, and failure:
+
+- `task_assigned` records assignment ownership with `job_id`, `task_id`,
+  `peer_id`, and `dispatch_latency_ms`.
+- `task_completed` records accepted successful task results.
+- `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
+  attempts with `retry_count` and `terminal_failure`.
+- `peer_unavailable_tasks_released` records how many tasks were returned for
+  retry or made terminal after peer disconnect or heartbeat timeout.
+- `task_dispatch_failed` records failed assignment sends before work reaches a
+  peer.
+
+Final result delivery and abandoned states:
+
+- `job_result_delivery_deferred` records a failed final `JOB_RESULT` delivery
+  attempt.
+- `job_result_delivery_abandoned` records final-result delivery exhaustion with
+  attempt count, requester, success flag, and reason.
+- `job_terminal_persistence_degraded` records terminal history writes that
+  failed after result delivery or abandonment.
+- `job_result_requester_missing` and `job_result_request_send_failed` record
+  failed `JOB_RESULT_REQUEST` responses.
+
+Persistence and recovery:
+
+- `database_initialized`, `database_unavailable`, and `database_disabled`
+  record whether SQLite history is available for the coordinator run.
+- `running_job_resumed` and scheduler `job_resumed` record rebuildable jobs
+  restored at startup.
+- `running_job_not_resumable`,
+  `non_resumable_running_jobs_marked_failed`,
+  `abandoned_jobs_marked_failed`, and
+  `abandoned_job_reconciliation_failed` record recovery decisions that prevent
+  silent history drift.
+- `scheduler_persistence_failed` records post-start persistence writes that
+  fail during scheduler state transitions.
+
+RabbitMQ publish, acknowledgement, and DLQ routing:
+
+- `rabbitmq_connected` records the broker connection configuration, including
+  prefetch, publisher-confirm timeout, dead-letter setting, and handler-failure
+  requeue policy.
+- `rabbitmq_topology_declared` records dead-letter exchange and queue
+  declaration when enabled.
+- `rabbitmq_publish_unroutable`, `rabbitmq_publish_not_confirmed`,
+  `rabbitmq_publish_confirm_timeout`, and
+  `rabbitmq_publish_returned_unmatched` record broker publication failures or
+  mandatory-return anomalies.
+- `scheduler_message_ack_failed`, `scheduler_message_requeue_failed`, and
+  `rabbitmq_delivery_requeue_failed` record failed acknowledgement settlement.
+- `task_result_publish_failed` and `rabbitmq_heartbeat_failed` record peer-side
+  RabbitMQ publish failures.
+- `rabbitmq_delivery_decode_failed action=reject` records malformed broker
+  delivery rejection. With dead-lettering enabled, RabbitMQ routes rejected
+  deliveries to the configured dead-letter queue.
+- `rabbitmq_delivery_handler_failed action=reject` can also route failed
+  handler deliveries to the dead-letter queue when
+  `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+
+## Current Limits
+
+Current observability is log-based. Operators can grep logs for structured
+events, but TaskFlow does not aggregate those events into a metrics backend or
+provide stable dashboard contracts.
+
+The logs also do not provide durable attempt-history records, lease ownership
+timelines, outbox replay state, DLQ review decisions, or redrive counts. Those
+behaviors are deferred in the recovery and RabbitMQ scope documents.
+
+## Metrics Backend Deferral
+
+A dedicated metrics backend is deferred until at least one of these behavior
+tracks is implemented and needs promoted operational visibility:
+
+- recovery leases and explicit attempt history;
+- RabbitMQ durable outbox and replay;
+- TaskFlow DLQ inspection, quarantine, discard, and redrive.
+
+Before adding a metrics exporter, define:
+
+- metric names, units, and label cardinality;
+- which log events remain canonical and which become metrics;
+- persistence-backed attempt and lease semantics for retry/recovery metrics;
+- outbox and DLQ state transitions for RabbitMQ metrics;
+- focused tests that prove emitted metrics match scheduler and broker state.
+
+## Public Claim Rule
+
+Public docs should describe current observability as structured logs and
+log-based scheduler metrics. Avoid claiming built-in dashboards, alerting,
+tracing, durable retry audit, outbox observability, or DLQ workflow visibility
+until those systems exist and are tested.

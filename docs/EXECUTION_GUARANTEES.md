@@ -143,3 +143,5 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 - `failure_count`
 
 These metrics are intended for immediate operational visibility in Phase 1 and as migration inputs to dedicated metrics backends in later phases.
+
+`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until recovery leases, RabbitMQ outbox/replay, or TaskFlow DLQ workflow work needs promoted operational visibility.
