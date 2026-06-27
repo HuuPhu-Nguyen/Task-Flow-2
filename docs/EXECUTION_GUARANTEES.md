@@ -39,6 +39,13 @@ This document defines the current runtime guarantees of TaskFlow.
 - Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
 - TaskFlow does not yet provide a DLQ inspection, quarantine, or redrive workflow. Dead-lettered messages require operator review outside TaskFlow before any manual republish.
 
+## JavaFX GUI Transport Scope
+
+- The JavaFX GUI is TCP-only today.
+- GUI job submission, result reception, requester-token persistence, and GUI task execution use the TCP coordinator path.
+- RabbitMQ submission and RabbitMQ task execution are currently command-line peer capabilities, not JavaFX GUI capabilities.
+- Adding JavaFX RabbitMQ support would require a separate design through the GUI `JobSubmissionClient`, `CoordinatorConnection`, result routing, and worker-runtime boundaries.
+
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.

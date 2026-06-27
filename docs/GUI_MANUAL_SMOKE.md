@@ -1,8 +1,8 @@
 # GUI Manual Smoke Run
 
-Last updated: 2026-06-24 14:38 Asia/Bangkok
+Last updated: 2026-06-27 16:54 Asia/Bangkok
 
-This is the repeatable desktop smoke check for the TCP JavaFX GUI. It complements the headless GUI service tests; it does not claim RabbitMQ GUI support or automated JavaFX end-to-end coverage.
+This is the repeatable desktop smoke check for the TCP-only JavaFX GUI. It complements the headless GUI service tests; it does not claim RabbitMQ GUI submission, RabbitMQ GUI execution, or automated JavaFX end-to-end coverage.
 
 ## Scope
 

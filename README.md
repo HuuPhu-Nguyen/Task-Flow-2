@@ -262,7 +262,7 @@ The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and ac
 - Submit distributed jobs
 - Receive and save results
 - Uses temporary session folders for input/output
-- Uses TCP coordinator connectivity; RabbitMQ GUI submit/execution remains future work
+- JavaFX is TCP-only today: it connects to the TCP coordinator and does not submit jobs, receive job results, or execute assigned work over RabbitMQ
 - Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
 - Persists per-job requester tokens and a requester identity keypair for TCP submissions under the local user profile so result requests can survive GUI restarts
 
@@ -553,7 +553,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion. Unit coverage verifies bounded scheduler-ingress behavior when the mailbox is full: TCP peer handlers wait for capacity and RabbitMQ broker deliveries are requeued. Full broker outage/restart behavior, adaptive broker/peer throttling, and durable outbox/replay are not complete.
 - RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication and no TaskFlow DLQ review/redrive workflow for rejected messages. `docs/RABBITMQ_SCOPE.md` records the current decision to keep RabbitMQ transitional until outbox/replay and DLQ review/redrive gates are complete.
-- The JavaFX GUI currently submits through TCP, not RabbitMQ; RabbitMQ submit is currently command-line only.
+- The JavaFX GUI is TCP-only: it currently submits jobs, receives results, and executes assigned work through TCP. RabbitMQ submission/execution is command-line only.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded.
 - SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, and schema-v4 requester identity keys require signed result requests for identity-bound jobs; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. Explicit attempt history, lease-based recovery, and PostgreSQL/Flyway are not implemented; `docs/RECOVERY_SCOPE.md` records the accepted behavior scope and PostgreSQL/Flyway deferral.
 - Result ownership uses per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX TCP submitter stores raw requester tokens and its local signing key in a user-profile file so result requests can survive GUI restarts; POSIX owner-only permission hardening is attempted when supported, but this is not a credential vault or role-based authorization system.
@@ -564,7 +564,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 - Explicit attempt history and lease-based restart recovery before any PostgreSQL/Flyway state-store work
 - RabbitMQ durable outbox/replay and DLQ review/redrive workflow
-- Additional RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit support
+- Additional RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit/execution support
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard
@@ -673,6 +673,8 @@ Inside the GUI:
 6. Select a folder to save results
 
 For a repeatable desktop smoke checklist covering connection refusal, successful TCP job submit/execute/save, job history refresh, and coordinator disconnect behavior, see [docs/GUI_MANUAL_SMOKE.md](docs/GUI_MANUAL_SMOKE.md).
+
+This JavaFX path is TCP-only. Use the command-line peer for RabbitMQ submission or execution.
 
 ---
 
