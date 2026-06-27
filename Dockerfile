@@ -9,6 +9,7 @@ COPY config config
 
 COPY taskflow-spi/pom.xml taskflow-spi/pom.xml
 COPY taskflow-core/pom.xml taskflow-core/pom.xml
+COPY taskflow-persistence-sqlite/pom.xml taskflow-persistence-sqlite/pom.xml
 COPY plugins/conversion/pom.xml plugins/conversion/pom.xml
 COPY plugins/conversion/model/pom.xml plugins/conversion/model/pom.xml
 COPY plugins/conversion/server/pom.xml plugins/conversion/server/pom.xml
