@@ -890,23 +890,12 @@ public class TaskScheduler implements Runnable {
                                               String taskType,
                                               String expectedTokenHash,
                                               String expectedIdentityKey) throws Exception {
-        String error = null;
-        if (!RequesterTokens.hasToken(request.getRequesterToken())) {
-            error = "Requester token is required.";
-        } else if (!RequesterTokens.hasTokenHash(expectedTokenHash)) {
-            error = "Requester token is unavailable for this job.";
-        } else if (!RequesterTokens.matches(request.getRequesterToken(), expectedTokenHash)) {
-            error = "Requester token does not match job owner.";
-        } else if (hasText(expectedIdentityKey)
-                && !RequesterIdentity.hasIdentity(request.getRequesterPublicKey(), request.getRequesterSignature())) {
-            error = "Requester identity signature is required.";
-        } else if (hasText(expectedIdentityKey) && !expectedIdentityKey.equals(request.getRequesterPublicKey())) {
-            error = "Requester identity key does not match job owner.";
-        } else if (hasText(expectedIdentityKey) && !RequesterIdentity.verifyJobResultRequest(request)) {
-            error = "Requester identity signature is invalid.";
-        }
-
-        if (error == null) {
+        JobResultRequestAuthorizer.Authorization authorization = JobResultRequestAuthorizer.authorize(
+                request,
+                expectedTokenHash,
+                expectedIdentityKey
+        );
+        if (authorization.authorized()) {
             return true;
         }
 
@@ -917,7 +906,7 @@ public class TaskScheduler implements Runnable {
                 taskType == null ? "" : taskType,
                 false,
                 List.of(),
-                error
+                authorization.errorMessage()
         ));
         return false;
     }
