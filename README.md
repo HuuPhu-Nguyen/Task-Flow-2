@@ -306,6 +306,9 @@ TaskFlow currently provides:
 Detailed guarantee definitions are documented in:
 `docs/EXECUTION_GUARANTEES.md`
 
+For a repeatable supported fault-injection demo covering TCP peer-disconnect
+retry, see [docs/FAULT_INJECTION_DEMO.md](docs/FAULT_INJECTION_DEMO.md).
+
 ---
 
 ## Dependencies
