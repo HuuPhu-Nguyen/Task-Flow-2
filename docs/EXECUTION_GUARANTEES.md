@@ -55,7 +55,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or peer explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
-- Adaptive backpressure across broker queue depth, peer capacity, and external autoscaling remains future work.
+- Adaptive backpressure across broker queue depth, peer capacity, and external autoscaling remains future work. `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and the evidence required before adding adaptive throttling.
 
 ## Task State Machine
 

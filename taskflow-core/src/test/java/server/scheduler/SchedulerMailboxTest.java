@@ -74,6 +74,37 @@ class SchedulerMailboxTest {
         assertEquals(1, mailbox.size());
     }
 
+    @Test
+    void repeatedBrokerOverflowRequeuesDeliveriesWithoutReplacingAcceptedWork() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
+        );
+        MessageEnvelope accepted = new MessageEnvelope(heartbeat(), "peer-accepted");
+        assertTrue(SchedulerMailbox.offer(mailbox, accepted));
+
+        RecordingAcknowledgement firstOverflow = new RecordingAcknowledgement();
+        RecordingAcknowledgement secondOverflow = new RecordingAcknowledgement();
+
+        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, brokerDelivery("peer-overflow-1", firstOverflow)));
+        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, brokerDelivery("peer-overflow-2", secondOverflow)));
+
+        assertEquals(1, firstOverflow.deferCount());
+        assertEquals(1, firstOverflow.requeueCount());
+        assertEquals(1, secondOverflow.deferCount());
+        assertEquals(1, secondOverflow.requeueCount());
+        assertEquals(1, mailbox.size());
+        assertSame(accepted, mailbox.take());
+    }
+
+    private static InboundTransportMessage brokerDelivery(String peerId, TransportAcknowledgement acknowledgement) {
+        return new InboundTransportMessage(
+                TransportRoute.TASK_RESULT,
+                peerId,
+                heartbeat(),
+                acknowledgement
+        );
+    }
+
     private static PongMessage heartbeat() {
         return new PongMessage("peer", Instant.now().toString(), List.of("TEST_TASK"));
     }
