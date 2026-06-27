@@ -4,6 +4,8 @@ Last updated: 2026-06-27 16:54 Asia/Bangkok
 
 This is the repeatable desktop smoke check for the TCP-only JavaFX GUI. It complements the headless GUI service tests; it does not claim RabbitMQ GUI submission, RabbitMQ GUI execution, or automated JavaFX end-to-end coverage.
 
+JavaFX end-to-end UI smoke remains manual until CI has a stable desktop automation harness. See `docs/GUI_AUTOMATION_SCOPE.md` for the automation decision and prerequisites.
+
 ## Scope
 
 - TCP coordinator connection from `PeerApp`
