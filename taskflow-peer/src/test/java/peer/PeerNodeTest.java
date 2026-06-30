@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
 import peer.engine.PeerExecutionEngine;
+import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.PingMessage;
 import protocol.RequesterIdentity;
@@ -21,6 +22,7 @@ import java.io.Writer;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -129,6 +131,26 @@ class PeerNodeTest {
 
         assertTrue(error.getMessage().contains("Job submit publish was not confirmed"));
         assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());
+    }
+
+    @Test
+    void rabbitMqResultHandlingSavesThroughClientPlugin() throws Exception {
+        CapturingClientPlugin plugin = new CapturingClientPlugin();
+        JobResultMessage result = new JobResultMessage(
+                "coordinator",
+                Instant.EPOCH.toString(),
+                "job-result",
+                "TEXT_ANALYSIS",
+                true,
+                List.of("first", "second"));
+
+        Path outputDir = RabbitMqPeerNode.writeJobResults(
+                result,
+                Map.of("TEXT_ANALYSIS", plugin));
+
+        assertEquals(Path.of("target", "rabbitmq-results", "job-result"), outputDir);
+        assertEquals(List.of("first", "second"), plugin.savedResults);
+        assertEquals(outputDir, plugin.outputDir);
     }
 
     @Test
@@ -251,6 +273,8 @@ class PeerNodeTest {
     private static final class CapturingClientPlugin implements ClientJobPlugin {
         private List<Path> inputPaths;
         private String parameter;
+        private List<Object> savedResults;
+        private Path outputDir;
 
         @Override
         public String taskType() {
@@ -289,6 +313,8 @@ class PeerNodeTest {
 
         @Override
         public void saveResults(List<Object> results, Path outputDir) {
+            this.savedResults = List.copyOf(results);
+            this.outputDir = outputDir;
         }
     }
 }

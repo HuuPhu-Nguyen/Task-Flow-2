@@ -13,7 +13,7 @@ The project is designed to demonstrate production-relevant distributed systems w
 TaskFlow follows a **coordinated peer-to-peer model**:
 
 - A **Coordinator Server** manages job state, task assignment, retries, and result aggregation.
-- **Peer nodes** can submit jobs, advertise supported task types, and execute tasks assigned by the coordinator.
+- **Peer nodes** can submit jobs, advertise supported task types, execute tasks assigned by the coordinator, and handle terminal results for their own submissions.
 - The **TCP JavaFX peer** acts as both a job submitter and a task executor.
 - Command-line peers can be started to add more compute capacity.
 
@@ -86,9 +86,9 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ, with submitter/executor/combined runtime profiles
 - `taskflow-gui` - TCP-only JavaFX peer with GUI-facing adapters and submitter/executor/combined runtime profiles
 
-Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist and role-by-role plugin contract.
+Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist and role-by-role plugin contract, and `docs/PEER_LIFECYCLE.md` for the peer submitter/result-handling lifecycle.
 
-The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. The GUI module depends on `taskflow-core` for shared messaging/execution and `taskflow-persistence-sqlite` for local SQLite-backed history reads, but it does not depend on the command-line `taskflow-peer` runtime.
+The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. It is the TCP peer UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution and `taskflow-persistence-sqlite` for local SQLite-backed history reads, but it does not depend on the command-line `taskflow-peer` runtime.
 
 `taskflow-peer` and `taskflow-gui` define Maven runtime profiles so role classpaths can be narrowed without changing source modules:
 
@@ -102,7 +102,7 @@ The core peer registry uses a `transport.TransportConnection` abstraction instea
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. After startup, assignment persistence must succeed before a task is dispatched, and failed retry, task-failure, or task-completion writes fail the job with a terminal `JOB_RESULT` rather than allowing in-memory state to diverge silently. Final job-status writes happen after final result routing; if that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` so the delivered result and degraded history are inspectable. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, and requester public keys for signed ownership when present. On startup, resumable `RUNNING` jobs are rebuilt, previously assigned tasks are returned to pending because leases are not implemented, completed tasks with persisted result payloads are restored, and non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` with the job id and matching requester token; identity-bound jobs must also include the matching requester public key and a valid signature. The coordinator resends an in-memory pending terminal result or reconstructs a completed persisted result when ownership checks pass and every task result snapshot is present. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; TCP peer handlers wait for mailbox capacity and broker deliveries are requeued when the scheduler mailbox is full and acknowledged only after scheduler handling succeeds.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a basic broker-aware peer submit path.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a broker-aware submit path that builds payloads and saves successful final results through `ClientJobPlugin`.
 
 ---
 
@@ -238,14 +238,14 @@ TCP communication is done using JSON messages over sockets. RabbitMQ communicati
 
 ## Workflow
 
-1. GUI uploads files and encodes them in Base64
+1. A submit-capable peer uses a `ClientJobPlugin` to build job payloads from local inputs
 2. A `JOB_SUBMIT` message is sent to the coordinator
 3. The scheduler creates a job and splits it into tasks
-4. Tasks are distributed to peers (`TASK_ASSIGN`)
+4. Tasks are distributed to capable peers (`TASK_ASSIGN`)
 5. Peers execute tasks and return results (`TASK_RESULT`)
 6. The scheduler aggregates results
-7. The coordinator sends a `JOB_RESULT` back to the submitting peer
-8. The GUI allows the user to save output files
+7. The coordinator sends a terminal `JOB_RESULT` back to the submitting peer
+8. The submitter-side result handler uses the matching `ClientJobPlugin` to save successful final results
 
 ---
 
@@ -265,6 +265,8 @@ The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and ac
 - JavaFX is TCP-only today: it connects to the TCP coordinator and does not submit jobs, receive job results, or execute assigned work over RabbitMQ
 - Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
 - Persists per-job requester tokens and a requester identity keypair for TCP submissions under the local user profile so result requests can survive GUI restarts
+
+See `docs/PEER_LIFECYCLE.md` for how GUI and command-line peer submit/result paths share client-plugin semantics, and where the legacy TCP command-line peer differs.
 
 Requester tokens and the GUI requester identity private key are stored by default at `<user-home>/.taskflow/gui-requester-tokens.properties`. Override the location with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE` when a different local path is needed. On POSIX-compatible filesystems, TaskFlow attempts to restrict that file to owner read/write and its parent directory to owner read/write/execute; on Windows or unsupported filesystems, protection relies on the normal user-profile and filesystem access controls. This is per-job result ownership using bearer tokens and a local signing key, not user account credentials, login sessions, authorization roles, or a credential vault.
 

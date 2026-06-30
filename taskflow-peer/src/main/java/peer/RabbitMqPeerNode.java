@@ -270,8 +270,8 @@ public class RabbitMqPeerNode {
         throw new IllegalStateException("Timed out waiting for JOB_RESULT for " + jobId);
     }
 
-    private static Path writeJobResults(JobResultMessage result,
-                                        Map<String, ClientJobPlugin> clientPlugins) throws Exception {
+    static Path writeJobResults(JobResultMessage result,
+                                Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         Path outputDir = Path.of("target", "rabbitmq-results", result.getJobId());
         ClientJobPlugin plugin = resolveClientPlugin(result.getTaskType(), clientPlugins);
         plugin.saveResults(result.getResultsByTaskId(), outputDir);

@@ -23,6 +23,8 @@ The current RabbitMQ path includes:
 - Peer-specific broker routes for task assignment and job result messages.
 - JSON protocol serialization through the same protocol message types used by
   TCP.
+- Command-line peer submit mode builds payloads and saves successful final
+  results through `ClientJobPlugin`.
 - Publisher confirms for broker publishes.
 - Mandatory-return detection for unroutable peer-targeted publishes.
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject

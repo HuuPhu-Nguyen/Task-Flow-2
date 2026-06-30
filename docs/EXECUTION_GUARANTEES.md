@@ -14,6 +14,16 @@ This document defines the current runtime guarantees of TaskFlow.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, and invalid Base64 file data.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work.
 
+## Peer Submitter and Result Handling
+
+- Peers may combine submitter, executor, and result-handler capabilities depending on their runtime profile and transport.
+- Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling.
+- Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.saveResults(...)` in the JavaFX TCP GUI and the RabbitMQ command-line submitter.
+- The JavaFX GUI is the supported TCP peer UI for submit, execute, receive-result, and save-result behavior.
+- The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
+- The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
+- `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
+
 ## RabbitMQ Publication
 
 - RabbitMQ transport channels enable publisher-confirm mode during startup.
