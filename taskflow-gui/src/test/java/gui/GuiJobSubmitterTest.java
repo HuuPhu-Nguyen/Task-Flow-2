@@ -37,14 +37,14 @@ class GuiJobSubmitterTest {
     void successfulSubmitTracksActiveJobImmediately() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
         StringWriter writer = new StringWriter();
-        PrintWriter out = new PrintWriter(writer, true);
+        CoordinatorConnection connection = new TestCoordinatorConnection(new PrintWriter(writer, true));
 
         GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
                 jobSubmissionClient,
                 plugin,
                 List.of("payload"),
                 "summary",
-                out,
+                connection,
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -73,14 +73,14 @@ class GuiJobSubmitterTest {
                                   String taskType,
                                   List<?> payloads,
                                   String parameter,
-                                  PrintWriter out) {
+                                  CoordinatorConnection connection) {
                 routedAction.set(GuiJobResultRouter.route(
                         result(jobId, false, "failed immediately"),
                         activeJobs).action());
             }
 
             @Override
-            public void requestJobResult(String jobId, PrintWriter out) {
+            public void requestJobResult(String jobId, CoordinatorConnection connection) {
                 throw new AssertionError("result request should not be used during submit");
             }
         };
@@ -90,7 +90,7 @@ class GuiJobSubmitterTest {
                 plugin,
                 List.of("payload"),
                 "summary",
-                new PrintWriter(new StringWriter(), true),
+                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -114,7 +114,7 @@ class GuiJobSubmitterTest {
                 plugin,
                 List.of("payload"),
                 "summary",
-                new PrintWriter(writer, true),
+                new TestCoordinatorConnection(new PrintWriter(writer, true)),
                 () -> false,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
@@ -136,7 +136,7 @@ class GuiJobSubmitterTest {
                 plugin,
                 List.of("payload"),
                 "summary",
-                new PrintWriter(writer, true),
+                new TestCoordinatorConnection(new PrintWriter(writer, true)),
                 () -> connectionChecks.incrementAndGet() == 1,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
@@ -156,7 +156,7 @@ class GuiJobSubmitterTest {
                 plugin,
                 List.of("payload"),
                 "summary",
-                new PrintWriter(new FailingWriter(), true),
+                new TestCoordinatorConnection(new PrintWriter(new FailingWriter(), true)),
                 () -> true,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
@@ -172,12 +172,12 @@ class GuiJobSubmitterTest {
                 plugin.taskType(),
                 List.of("payload"),
                 "summary",
-                new PrintWriter(new StringWriter(), true)
+                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true))
         );
         StringWriter writer = new StringWriter();
         PrintWriter out = new PrintWriter(writer, true);
 
-        jobSubmissionClient.requestJobResult("job-completed", out);
+        jobSubmissionClient.requestJobResult("job-completed", new TestCoordinatorConnection(out));
 
         String json = writer.toString();
         assertTrue(json.contains("\"type\":\"JOB_RESULT_REQUEST\""));

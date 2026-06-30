@@ -30,7 +30,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new PrintWriter(new StringWriter(), true),
+                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -62,7 +62,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new PrintWriter(new StringWriter(), true),
+                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -90,7 +90,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new PrintWriter(new StringWriter(), true),
+                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -116,7 +116,11 @@ class GuiJobSubmissionServiceTest {
         }
 
         @Override
-        public void submitJob(String jobId, String taskType, List<?> payloads, String parameter, PrintWriter out) {
+        public void submitJob(String jobId,
+                              String taskType,
+                              List<?> payloads,
+                              String parameter,
+                              CoordinatorConnection connection) {
             this.submitCalls++;
             this.taskType = taskType;
             this.payloads = List.copyOf(payloads);
@@ -124,7 +128,7 @@ class GuiJobSubmissionServiceTest {
         }
 
         @Override
-        public void requestJobResult(String jobId, PrintWriter out) {
+        public void requestJobResult(String jobId, CoordinatorConnection connection) {
             throw new AssertionError("result request should not be used during submit");
         }
     }

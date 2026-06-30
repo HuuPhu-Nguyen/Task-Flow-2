@@ -37,7 +37,7 @@ Job lifecycle:
   failures.
 - RabbitMQ command-line submitters log `job_submitted`, `job_result_received`,
   `job_completed`, and `job_failed`.
-- JavaFX TCP submission and save paths log `gui_job_submitted`,
+- JavaFX submission and save paths log `gui_job_submitted`,
   `gui_results_saved`, and `gui_results_save_failed`.
 
 Task assignment, retry, and failure:

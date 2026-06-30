@@ -38,7 +38,7 @@ class TcpJobSubmissionClientTest {
                 "TEXT_ANALYSIS",
                 List.of("payload"),
                 "summary",
-                new PrintWriter(submitWriter, true)
+                new TestCoordinatorConnection(new PrintWriter(submitWriter, true))
         );
         String submittedToken = requesterToken(submitWriter.toString());
 
@@ -47,7 +47,9 @@ class TcpJobSubmissionClientTest {
                 new FileGuiRequesterTokenStore(storePath)
         );
         StringWriter requestWriter = new StringWriter();
-        restartedClient.requestJobResult("job-restart", new PrintWriter(requestWriter, true));
+        restartedClient.requestJobResult(
+                "job-restart",
+                new TestCoordinatorConnection(new PrintWriter(requestWriter, true)));
 
         assertEquals(submittedToken, requesterToken(requestWriter.toString()));
         JobSubmitMessage submit = jobSubmit(submitWriter.toString());
@@ -70,7 +72,7 @@ class TcpJobSubmissionClientTest {
                 "TEXT_ANALYSIS",
                 List.of("payload"),
                 "summary",
-                new PrintWriter(new FailingWriter(), true)
+                new TestCoordinatorConnection(new PrintWriter(new FailingWriter(), true))
         ));
 
         FileGuiRequesterTokenStore reloaded = new FileGuiRequesterTokenStore(storePath);

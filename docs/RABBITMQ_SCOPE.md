@@ -28,6 +28,10 @@ The current RabbitMQ path includes:
   TCP.
 - Command-line peer submit mode builds payloads and saves successful final
   results through `ClientJobPlugin`.
+- JavaFX GUI mode can select RabbitMQ with `TASKFLOW_TRANSPORT=rabbitmq`,
+  publish signed job submissions, send heartbeats, consume peer-specific task
+  assignments and job results, publish task results, and route successful final
+  results through `ClientJobPlugin`.
 - Publisher confirms for broker publishes.
 - Mandatory-return detection for unroutable peer-targeted publishes.
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject
@@ -45,9 +49,9 @@ The current RabbitMQ path includes:
 
 TaskFlow does not yet provide:
 
-- JavaFX RabbitMQ submission or JavaFX RabbitMQ worker runtime.
 - Stable shared peer identity across GUI and command-line peers.
 - Peer-scoped job IDs.
+- RabbitMQ GUI `JOB_RESULT_REQUEST` replay after restart.
 - Durable coordinator outbox persistence.
 - Replay of confirmed or unconfirmed outbound messages after coordinator crash.
 - Defined idempotency and duplicate handling for outbox replay.
@@ -68,11 +72,12 @@ RabbitMQ can be reconsidered as the primary supported runtime only after the
 replacement gates in `docs/RUNTIME_STRATEGY.md` and the behavior gates below
 are implemented and tested.
 
-First close runtime replacement gaps:
+First close remaining runtime replacement gaps:
 
-- Add JavaFX RabbitMQ submission, worker execution, result routing, result
-  saving, and broker-failure handling behind the existing GUI service
-  boundaries.
+- Broaden JavaFX RabbitMQ evidence from headless service tests to live broker
+  and desktop smoke or automation evidence, including broker-failure handling.
+- Define RabbitMQ result-request behavior or keep it explicitly unsupported
+  while live `JOB_RESULT` delivery is the GUI RabbitMQ result path.
 - Define stable peer identity for GUI and command-line peers, including
   configured IDs, generated IDs, sanitization, and duplicate-ID behavior.
 - Generate peer-scoped, collision-resistant job IDs on every submit path.

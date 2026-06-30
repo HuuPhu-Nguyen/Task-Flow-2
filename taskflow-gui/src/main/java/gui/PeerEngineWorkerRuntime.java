@@ -2,6 +2,7 @@ package gui;
 
 import peer.engine.PeerExecutionEngine;
 import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
 
 import java.io.PrintWriter;
 import java.util.Set;
@@ -22,6 +23,11 @@ final class PeerEngineWorkerRuntime implements GuiWorkerRuntime {
     @Override
     public Set<String> supportedTaskTypes() {
         return engine.getRegisteredTaskTypes();
+    }
+
+    @Override
+    public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+        return engine.executeTask(task);
     }
 
     @Override

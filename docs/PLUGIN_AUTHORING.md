@@ -106,7 +106,7 @@ into independent tasks. A job should:
 The client module owns local input and output behavior for command-line
 submitters and the JavaFX GUI.
 
-This is the shared local submit/result contract. The JavaFX TCP GUI and the
+This is the shared local submit/result contract. The JavaFX GUI and the
 RabbitMQ command-line submitter both use `ClientJobPlugin` to build local
 payloads and save successful final results; transport and UI code decide where
 results are shown or written and how save failures are reported.

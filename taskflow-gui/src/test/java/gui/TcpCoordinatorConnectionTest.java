@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.PingMessage;
 import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -211,6 +212,21 @@ class TcpCoordinatorConnectionTest {
         }
 
         @Override
+        public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+            assignedTask.set(task);
+            assigned.countDown();
+            return CompletableFuture.completedFuture(new TaskResultMessage(
+                    "peer-1",
+                    Instant.EPOCH.toString(),
+                    task.getTaskId(),
+                    task.getJobId(),
+                    "done",
+                    true,
+                    null
+            ));
+        }
+
+        @Override
         public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
             assignedTask.set(task);
             assigned.countDown();
@@ -231,7 +247,7 @@ class TcpCoordinatorConnectionTest {
         }
     }
 
-    private static final class RecordingListener implements TcpCoordinatorConnection.Listener {
+    private static final class RecordingListener implements CoordinatorConnectionListener {
         private final CountDownLatch connected = new CountDownLatch(1);
         private final CountDownLatch connectionFailed = new CountDownLatch(1);
         private final CountDownLatch disconnected = new CountDownLatch(1);

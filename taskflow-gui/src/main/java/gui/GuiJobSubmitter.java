@@ -2,7 +2,6 @@ package gui;
 
 import client.ClientJobPlugin;
 
-import java.io.PrintWriter;
 import java.util.List;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
@@ -16,7 +15,7 @@ final class GuiJobSubmitter {
             ClientJobPlugin plugin,
             List<Object> payloads,
             String targetFormat,
-            PrintWriter out,
+            CoordinatorConnection connection,
             BooleanSupplier connectionCurrent,
             Runnable onSendFailure,
             Set<String> activeJobIds) {
@@ -39,7 +38,7 @@ final class GuiJobSubmitter {
         }
 
         try {
-            jobSubmissionClient.submitJob(jobId, plugin.taskType(), payloads, targetFormat, out);
+            jobSubmissionClient.submitJob(jobId, plugin.taskType(), payloads, targetFormat, connection);
         } catch (RuntimeException sendFailure) {
             activeJobIds.remove(jobId);
             onSendFailure.run();

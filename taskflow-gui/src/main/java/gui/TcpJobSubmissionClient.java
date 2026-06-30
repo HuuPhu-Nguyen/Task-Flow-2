@@ -37,11 +37,15 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
     }
 
     @Override
-    public void submitJob(String jobId, String taskType, List<?> payloads, String parameter, PrintWriter out) {
+    public void submitJob(String jobId,
+                          String taskType,
+                          List<?> payloads,
+                          String parameter,
+                          CoordinatorConnection connection) {
         if (jobId == null || jobId.isBlank()) {
             throw new IllegalArgumentException("jobId is required.");
         }
-        Objects.requireNonNull(out, "out");
+        PrintWriter out = requireWriter(connection);
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
         RequesterIdentity.Credentials identity = requesterTokenStore.requesterIdentity();
         String requesterToken = requesterTokenStore.createTokenForJob(jobId);
@@ -81,11 +85,11 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
     }
 
     @Override
-    public void requestJobResult(String jobId, PrintWriter out) {
+    public void requestJobResult(String jobId, CoordinatorConnection connection) {
         if (jobId == null || jobId.isBlank()) {
             throw new IllegalArgumentException("jobId is required.");
         }
-        Objects.requireNonNull(out, "out");
+        PrintWriter out = requireWriter(connection);
         String requesterToken = requesterTokenStore.tokenForJob(jobId)
                 .orElseThrow(() -> new IllegalStateException(
                         "No requester token is available for job " + jobId + "."));
@@ -110,5 +114,17 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
         if (!SafeJsonWriter.send(out, gson, message)) {
             throw new IllegalStateException("Could not send job result request to coordinator.");
         }
+    }
+
+    private PrintWriter requireWriter(CoordinatorConnection connection) {
+        Objects.requireNonNull(connection, "connection");
+        if (!connection.isOpen()) {
+            throw new IllegalStateException("Connection to coordinator is not open.");
+        }
+        PrintWriter out = connection.writer();
+        if (out == null) {
+            throw new IllegalStateException("Connection does not provide a TCP writer.");
+        }
+        return out;
     }
 }

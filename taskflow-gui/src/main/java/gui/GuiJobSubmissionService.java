@@ -2,7 +2,6 @@ package gui;
 
 import client.ClientJobPlugin;
 
-import java.io.PrintWriter;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
@@ -21,7 +20,7 @@ final class GuiJobSubmissionService {
             ClientJobPlugin plugin,
             List<Path> inputPaths,
             String targetFormat,
-            PrintWriter out,
+            CoordinatorConnection connection,
             BooleanSupplier connectionCurrent,
             Runnable onSendFailure,
             BooleanSupplier cancelled,
@@ -36,7 +35,7 @@ final class GuiJobSubmissionService {
                 plugin,
                 payloads,
                 targetFormat,
-                out,
+                connection,
                 connectionCurrent,
                 onSendFailure,
                 activeJobIds);

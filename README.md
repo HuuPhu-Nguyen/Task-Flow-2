@@ -14,7 +14,7 @@ TaskFlow follows a **coordinated peer-to-peer model**:
 
 - A **Coordinator Server** manages job state, task assignment, retries, and result aggregation.
 - **Peer nodes** can submit jobs, advertise supported task types, execute tasks assigned by the coordinator, and handle terminal results for their own submissions.
-- The **TCP JavaFX peer** acts as both a job submitter and a task executor.
+- The **JavaFX peer** acts as both a job submitter and a task executor over the default TCP path or the selectable RabbitMQ path.
 - Command-line peers can be started to add more compute capacity.
 
 Jobs are submitted dynamically by peers and processed in a fully asynchronous, message-driven pipeline.
@@ -58,11 +58,12 @@ flowchart LR
     Scheduler -->|JOB_RESULT| PeerA
 
     RabbitMQ[(RabbitMQ Broker)] -. target broker runtime (transitional today) .- Coordinator
+    RabbitMQ -. task/result routes .- PeerA
     RabbitMQ -. task/result routes .- PeerB
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the current default local runtime and compatibility/demo path. RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and future JavaFX GUI peers, but it remains transitional today. Command-line RabbitMQ peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, plus bounded scheduler-ingress backpressure for broker deliveries, but JavaFX RabbitMQ support, stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ workflow, broker-backed CI, and default-flip evidence are still incomplete. See `docs/RUNTIME_STRATEGY.md` for the target-runtime decision and TCP deprecation/removal gates, `docs/RABBITMQ_SCOPE.md` for the current RabbitMQ support decision, `docs/BACKPRESSURE_SCOPE.md` for the current backpressure boundaries and adaptive-backpressure deferral, and `docs/OBSERVABILITY_SCOPE.md` for the current structured-log event map and metrics-backend deferral.
+TCP is the current default local runtime and compatibility/demo path. RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and JavaFX GUI peers, but it remains transitional today. RabbitMQ peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. JavaFX can select RabbitMQ with `TASKFLOW_TRANSPORT=rabbitmq` and uses the same GUI service boundaries for submission, task execution, result routing, and result saving. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, plus bounded scheduler-ingress backpressure for broker deliveries, but stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ workflow, broker-backed CI, default-flip evidence, and JavaFX desktop end-to-end automation are still incomplete. See `docs/RUNTIME_STRATEGY.md` for the target-runtime decision and TCP deprecation/removal gates, `docs/RABBITMQ_SCOPE.md` for the current RabbitMQ support decision, `docs/BACKPRESSURE_SCOPE.md` for the current backpressure boundaries and adaptive-backpressure deferral, and `docs/OBSERVABILITY_SCOPE.md` for the current structured-log event map and metrics-backend deferral.
 
 ---
 
@@ -84,11 +85,11 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-transport-rabbitmq` - RabbitMQ broker transport primitives
 - `taskflow-coordinator` - coordinator runtime for TCP or RabbitMQ
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ, with submitter/executor/combined runtime profiles
-- `taskflow-gui` - TCP-only JavaFX peer with GUI-facing adapters and submitter/executor/combined runtime profiles
+- `taskflow-gui` - JavaFX peer for TCP or RabbitMQ with GUI-facing adapters and submitter/executor/combined runtime profiles
 
 Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist and role-by-role plugin contract, and `docs/PEER_LIFECYCLE.md` for the peer submitter/result-handling lifecycle.
 
-The JavaFX presentation layer talks to GUI-facing services for TCP connection lifecycle, job submission, result routing, worker execution, and history reads. It is the TCP peer UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution and `taskflow-persistence-sqlite` for local SQLite-backed history reads, but it does not depend on the command-line `taskflow-peer` runtime.
+The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, job submission, result routing, worker execution, and history reads. It is a peer UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for the selectable RabbitMQ adapter, but it does not depend on the command-line `taskflow-peer` runtime.
 
 `taskflow-peer` and `taskflow-gui` define Maven runtime profiles so role classpaths can be narrowed without changing source modules:
 
@@ -98,11 +99,11 @@ The JavaFX presentation layer talks to GUI-facing services for TCP connection li
 
 The coordinator runtime carries server plugin artifacts only. It does not need client plugins or peer processor artifacts.
 
-The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the current default runtime for local compatibility and the JavaFX GUI, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq` for the coordinator and command-line peer.
+The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the current default runtime for local compatibility, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq` for the coordinator, command-line peer, and JavaFX GUI.
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. After startup, assignment persistence must succeed before a task is dispatched, and failed retry, task-failure, or task-completion writes fail the job with a terminal `JOB_RESULT` rather than allowing in-memory state to diverge silently. Final job-status writes happen after final result routing; if that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` so the delivered result and degraded history are inspectable. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, and requester public keys for signed ownership when present. On startup, resumable `RUNNING` jobs are rebuilt, previously assigned tasks are returned to pending because leases are not implemented, completed tasks with persisted result payloads are restored, and non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` with the job id and matching requester token; identity-bound jobs must also include the matching requester public key and a valid signature. The coordinator resends an in-memory pending terminal result or reconstructs a completed persisted result when ownership checks pass and every task result snapshot is present. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; TCP peer handlers wait for mailbox capacity and broker deliveries are requeued when the scheduler mailbox is full and acknowledged only after scheduler handling succeeds.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a broker-aware submit path that builds payloads and saves successful final results through `ClientJobPlugin`. RabbitMQ is the target broker runtime, but it is not the default or primary supported runtime until the gates in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md` are complete.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a broker-aware submit path that builds payloads and saves successful final results through `ClientJobPlugin`. The JavaFX GUI also has a RabbitMQ adapter for broker-backed submit, execute, live `JOB_RESULT` routing, and result saving through the same client plugins. RabbitMQ is the target broker runtime, but it is not the default or primary supported runtime until the gates in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md` are complete.
 
 ---
 
@@ -262,9 +263,9 @@ The JavaFX GUI (`PeerApp`) uses the `combined-runtime` profile by default and ac
 - Submit distributed jobs
 - Receive and save results
 - Uses temporary session folders for input/output
-- JavaFX is TCP-only today: it connects to the TCP coordinator and does not submit jobs, receive job results, or execute assigned work over RabbitMQ
+- Uses TCP by default and can use RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq` is set before launch
 - Can be launched with `-Psubmitter-runtime` or `-Pexecutor-runtime` when a narrower GUI classpath is needed
-- Persists per-job requester tokens and a requester identity keypair for TCP submissions under the local user profile so result requests can survive GUI restarts
+- Persists per-job requester tokens and a requester identity keypair under the local user profile; TCP result requests can survive GUI restarts, while RabbitMQ GUI currently handles live `JOB_RESULT` delivery and does not send `JOB_RESULT_REQUEST` over the broker
 
 See `docs/PEER_LIFECYCLE.md` for how GUI and command-line peer submit/result paths share client-plugin semantics, and where the legacy TCP command-line peer differs.
 
@@ -390,7 +391,7 @@ $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 
 ## RabbitMQ Transport
 
-TCP is the current default transport. RabbitMQ is the planned primary runtime, but it must be selected explicitly today. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or command-line peer against RabbitMQ.
+TCP is the current default transport. RabbitMQ is the planned primary runtime, but it must be selected explicitly today. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator, command-line peer, or JavaFX GUI against RabbitMQ.
 
 The RabbitMQ transport module uses the following routes:
 
@@ -424,7 +425,7 @@ Configuration can be supplied through environment variables:
 - `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE`
 - `TASKFLOW_PEER_ID`
 
-Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. TaskFlow declares and uses dead-letter routing, but it does not yet include a TaskFlow DLQ inspection/redrive command or workflow. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID.
+Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, routing key `dead-letter`, and handler failures requeued by default. Malformed broker deliveries are rejected so RabbitMQ can dead-letter them when dead-lettering is enabled. Set `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false` to reject handler failures instead of requeueing them. TaskFlow declares and uses dead-letter routing, but it does not yet include a TaskFlow DLQ inspection/redrive command or workflow. If `TASKFLOW_PEER_ID` is not set, RabbitMQ command-line peers generate a unique runtime peer ID and the JavaFX GUI falls back to its runtime session ID.
 
 Run the RabbitMQ coordinator on Windows PowerShell:
 
@@ -467,7 +468,17 @@ $env:TASKFLOW_PEER_ID = "peer-submit"
 
 With the default `combined-runtime` profile, the submitting peer stays available for task execution while waiting for `JOB_RESULT`. Successful CLI-submitted results are written under `target\rabbitmq-results\<jobId>`.
 
-RabbitMQ command-line peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered. If the coordinator scheduler mailbox is full, RabbitMQ job submissions and task results are requeued instead of accepted into process memory.
+Run a RabbitMQ JavaFX peer on Windows PowerShell:
+
+```powershell
+$env:TASKFLOW_TRANSPORT = "rabbitmq"
+$env:TASKFLOW_PEER_ID = "gui-peer-a"
+.\mvnw.cmd -pl taskflow-gui javafx:run
+```
+
+The GUI connection screen uses broker host `localhost` and port `5672` by default in RabbitMQ mode. A RabbitMQ GUI peer publishes signed `JOB_SUBMIT` messages, sends heartbeats with its advertised task types, consumes peer-specific `TASK_ASSIGN` and `JOB_RESULT` queues, defers assignment acknowledgement until its `TASK_RESULT` publish is confirmed, and routes successful final results to the existing plugin-backed save window. RabbitMQ GUI `JOB_RESULT_REQUEST` is not implemented because there is no broker route for that request yet; live broker result delivery is the supported GUI RabbitMQ result path.
+
+RabbitMQ peers execute assignments asynchronously relative to broker delivery callbacks. Assignment acknowledgements are deferred until the peer publishes the corresponding `TASK_RESULT`. For CLI-submitted jobs, `JOB_RESULT` acknowledgement is deferred until the result has been handled locally; for JavaFX GUI peers, `JOB_RESULT` is acknowledged after the GUI accepts it for routing to the user-facing result flow. RabbitMQ publishes wait for broker publisher confirms before returning success. Peer-targeted coordinator publishes also use mandatory-return detection, so unroutable task assignments are retried by the scheduler and unroutable job results are not finalized as delivered. If the coordinator scheduler mailbox is full, RabbitMQ job submissions and task results are requeued instead of accepted into process memory.
 
 ### Live RabbitMQ Integration Tests
 
@@ -557,18 +568,18 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 ## Known Limitations
 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion. Unit coverage verifies bounded scheduler-ingress behavior when the mailbox is full: TCP peer handlers wait for capacity and RabbitMQ broker deliveries are requeued. Full broker outage/restart behavior, adaptive broker/peer throttling, and durable outbox/replay are not complete; `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and deferral conditions.
-- RabbitMQ is the planned primary runtime, but RabbitMQ mode is still transitional; peer-specific routing, publisher confirms, command-line submit/result handling, and dead-letter topology configuration are implemented, but JavaFX RabbitMQ support, stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ review/redrive workflow, broker-backed CI, and default-flip evidence are incomplete. `docs/RUNTIME_STRATEGY.md` records the target-runtime decision and TCP deprecation/removal gates; `docs/RABBITMQ_SCOPE.md` records the current support limits.
-- The JavaFX GUI is TCP-only: it currently submits jobs, receives results, and executes assigned work through TCP. RabbitMQ submission/execution is command-line only.
+- RabbitMQ is the planned primary runtime, but RabbitMQ mode is still transitional; peer-specific routing, publisher confirms, command-line and JavaFX GUI submit/result handling, and dead-letter topology configuration are implemented, but stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ review/redrive workflow, broker-backed CI, JavaFX desktop end-to-end automation, and default-flip evidence are incomplete. `docs/RUNTIME_STRATEGY.md` records the target-runtime decision and TCP deprecation/removal gates; `docs/RABBITMQ_SCOPE.md` records the current support limits.
+- The JavaFX GUI can use RabbitMQ for live submit, execute, and result delivery, but it does not send RabbitMQ `JOB_RESULT_REQUEST` messages for post-restart result replay.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. `docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and metrics-backend deferral.
 - SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, and schema-v4 requester identity keys require signed result requests for identity-bound jobs; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. Explicit attempt history, lease-based recovery, and PostgreSQL/Flyway are not implemented; `docs/RECOVERY_SCOPE.md` records the accepted behavior scope and PostgreSQL/Flyway deferral.
-- Result ownership uses per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX TCP submitter stores raw requester tokens and its local signing key in a user-profile file so result requests can survive GUI restarts; POSIX owner-only permission hardening is attempted when supported, but this is not a credential vault or role-based authorization system.
+- Result ownership uses per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX submitter stores raw requester tokens and its local signing key in a user-profile file; TCP result requests can use those tokens across GUI restarts, while RabbitMQ GUI result-request replay is not implemented. POSIX owner-only permission hardening is attempted when supported, but this is not a credential vault or role-based authorization system.
 
 ---
 
 ## Candidate Future Improvements
 
 - Explicit attempt history and lease-based restart recovery before any PostgreSQL/Flyway state-store work
-- RabbitMQ primary-runtime gates: JavaFX RabbitMQ submit/execution/result handling, stable peer identity, peer-scoped job IDs, durable outbox/replay, DLQ review/redrive workflow, broker-backed CI, and docs/demo alignment
+- RabbitMQ primary-runtime gates: stable peer identity, peer-scoped job IDs, durable outbox/replay, DLQ review/redrive workflow, broker-backed CI, JavaFX desktop automation evidence, and docs/demo alignment
 - Additional RabbitMQ failure-path integration tests
 - Distributed coordinator (no single point of failure)
 - More task types
@@ -679,7 +690,7 @@ Inside the GUI:
 
 For a repeatable desktop smoke checklist covering connection refusal, successful TCP job submit/execute/save, job history refresh, and coordinator disconnect behavior, see [docs/GUI_MANUAL_SMOKE.md](docs/GUI_MANUAL_SMOKE.md). JavaFX end-to-end UI smoke remains a manual gate until CI has a stable desktop automation harness; see [docs/GUI_AUTOMATION_SCOPE.md](docs/GUI_AUTOMATION_SCOPE.md).
 
-This JavaFX path is TCP-only. Use the command-line peer for RabbitMQ submission or execution.
+For RabbitMQ GUI use, set `TASKFLOW_TRANSPORT=rabbitmq` before launching the JavaFX app and connect to the broker host/port instead of the TCP coordinator port.
 
 ---
 

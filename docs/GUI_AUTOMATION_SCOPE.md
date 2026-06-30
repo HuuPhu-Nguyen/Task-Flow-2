@@ -19,7 +19,10 @@ The stable automated GUI coverage is therefore service-level and headless:
 - download-save controller behavior;
 - background task runner behavior;
 - local requester-token and requester-identity persistence;
-- job-history formatting and refresh behavior.
+- job-history formatting and refresh behavior;
+- RabbitMQ GUI job submission publish behavior;
+- RabbitMQ GUI task assignment execution, task-result publish acknowledgement,
+  result routing, and startup failure behavior.
 
 ## Required Manual Gate
 
@@ -30,6 +33,10 @@ user-facing JavaFX path. It covers:
 - successful TCP job submit, execute, result receive, and save;
 - job history refresh;
 - coordinator disconnect alert.
+
+RabbitMQ GUI behavior currently has headless service coverage. Add a desktop
+RabbitMQ smoke step before promoting RabbitMQ as the primary supported GUI
+runtime.
 
 ## Deferred CI End-To-End UI Smoke
 
@@ -45,7 +52,9 @@ includes:
   shutdown;
 - deterministic file chooser or save-dialog handling;
 - a timeout and cleanup strategy for coordinator and GUI processes;
-- a local TCP-only submit-to-save scenario that passes repeatedly in CI.
+- a local TCP submit-to-save scenario that passes repeatedly in CI;
+- a RabbitMQ-backed GUI submit-to-save scenario once broker-backed GUI behavior
+  becomes a release gate.
 
 Until those prerequisites exist, keep JavaFX end-to-end smoke manual and keep
 CI coverage focused on the GUI services behind the JavaFX presentation layer.

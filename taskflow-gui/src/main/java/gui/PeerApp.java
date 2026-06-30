@@ -15,6 +15,7 @@ import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
+import transport.rabbitmq.RabbitMqRuntimeDefaults;
 
 import java.io.*;
 import java.nio.file.*;
@@ -40,21 +41,36 @@ public class PeerApp extends Application {
     private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
     private GuiDownloadWindow downloadWindow =
             new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
+    private GuiTransportMode transportMode = GuiTransportMode.TCP;
+    private String peerNodeId;
 
     @Override
     public void init() {
         try {
             // Generate unique folders for this GUI instance
             this.sessionId = "PEER_" + (System.currentTimeMillis() % 100000);
+            this.transportMode = GuiTransportMode.fromEnvironment();
+            this.peerNodeId = transportMode == GuiTransportMode.RABBITMQ
+                    ? resolveRabbitMqPeerId(sessionId)
+                    : sessionId;
             inputStagingService = GuiInputStagingService.forSession(sessionId);
             inputStagingService.prepareDirectories();
 
-            workerRuntime = new PeerEngineWorkerRuntime(sessionId);
-            jobSubmissionClient = new TcpJobSubmissionClient(sessionId);
+            workerRuntime = new PeerEngineWorkerRuntime(peerNodeId);
+            GuiRequesterTokenStore tokenStore = FileGuiRequesterTokenStore.openDefault();
+            if (transportMode == GuiTransportMode.RABBITMQ) {
+                jobSubmissionClient = new RabbitMqJobSubmissionClient(peerNodeId, tokenStore);
+                connectionService = new GuiCoordinatorConnectionService(
+                        workerRuntime,
+                        (host, port, runtime, listener) ->
+                                new RabbitMqCoordinatorConnection(peerNodeId, host, port, runtime, listener));
+            } else {
+                jobSubmissionClient = new TcpJobSubmissionClient(peerNodeId, tokenStore);
+                connectionService = new GuiCoordinatorConnectionService(workerRuntime);
+            }
             jobSubmissionService = new GuiJobSubmissionService(jobSubmissionClient, myActiveJobIds);
-            connectionService = new GuiCoordinatorConnectionService(workerRuntime);
-            LOGGER.info("event=gui_processors_registered peer_id={} task_types={}",
-                    sessionId, workerRuntime.supportedTaskTypes());
+            LOGGER.info("event=gui_processors_registered transport={} peer_id={} task_types={}",
+                    transportMode.name().toLowerCase(), peerNodeId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
             Map<String, ClientJobPlugin> clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
@@ -76,8 +92,8 @@ public class PeerApp extends Application {
         root.setPadding(new Insets(20));
 
         TextField hostField = new TextField("localhost");
-        TextField portField = new TextField("6789");
-        Button connectBtn = new Button("Connect to Coordinator");
+        TextField portField = new TextField(Integer.toString(transportMode.defaultPort()));
+        Button connectBtn = new Button(transportMode.connectButtonText());
 
         connectBtn.setOnAction(e -> {
             connectBtn.setDisable(true);
@@ -100,7 +116,12 @@ public class PeerApp extends Application {
                     }));
         });
 
-        root.getChildren().addAll(new Label("Host:"), hostField, new Label("Port:"), portField, connectBtn);
+        root.getChildren().addAll(
+                new Label(transportMode.hostLabel() + ":"),
+                hostField,
+                new Label(transportMode.portLabel() + ":"),
+                portField,
+                connectBtn);
         window.setScene(new Scene(root, 300, 250));
         window.setTitle("Connect Peer");
         window.show();
@@ -180,8 +201,7 @@ public class PeerApp extends Application {
         startBtn.setOnAction(e -> {
             try {
                 CoordinatorConnection connection = connectionService.currentConnection();
-                PrintWriter out = connection == null ? null : connection.writer();
-                if (connection == null || out == null || !connection.isOpen()) {
+                if (connection == null || !connection.isOpen()) {
                     new Alert(Alert.AlertType.ERROR, "Not connected to the coordinator yet.").show();
                     return;
                 }
@@ -201,7 +221,7 @@ public class PeerApp extends Application {
 
                 String targetFormat = plugin.normalizeParameter(selectedFormat);
                 Task<GuiJobSubmitter.SubmittedJob> submitTask =
-                        createSubmitJobTask(connection, out, plugin, inputPaths, targetFormat);
+                        createSubmitJobTask(connection, plugin, inputPaths, targetFormat);
                 backgroundTaskRunner.run(
                         "Submit job",
                         submitTask,
@@ -280,7 +300,6 @@ public class PeerApp extends Application {
 
     private Task<GuiJobSubmitter.SubmittedJob> createSubmitJobTask(
             CoordinatorConnection connection,
-            PrintWriter out,
             ClientJobPlugin plugin,
             List<Path> inputPaths,
             String targetFormat) {
@@ -292,7 +311,7 @@ public class PeerApp extends Application {
                         plugin,
                         inputPaths,
                         targetFormat,
-                        out,
+                        connection,
                         () -> connectionService.isCurrent(connection),
                         () -> connectionService.clear(connection, true),
                         this::isCancelled,
@@ -430,7 +449,7 @@ public class PeerApp extends Application {
         if (workerRuntime != null) {
             workerRuntime.shutdown();
             if (!workerRuntime.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
-                LOGGER.warn("event=gui_engine_shutdown_timeout peer_id={}", sessionId);
+                LOGGER.warn("event=gui_engine_shutdown_timeout peer_id={}", peerNodeId);
             }
         }
         if (historyView != null) {
@@ -441,6 +460,14 @@ public class PeerApp extends Application {
 
     public static void main(String[] args) {
         launch(args);
+    }
+
+    private static String resolveRabbitMqPeerId(String fallback) {
+        String configured = System.getenv(RabbitMqRuntimeDefaults.PEER_ID_ENV);
+        if (configured != null && !configured.isBlank()) {
+            return configured.trim();
+        }
+        return fallback;
     }
 
 }

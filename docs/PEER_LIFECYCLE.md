@@ -14,14 +14,17 @@ A TaskFlow peer can combine three capabilities:
 - receive terminal `JOB_RESULT` messages for jobs it submitted and handle
   successful final results through the matching `ClientJobPlugin`.
 
-The JavaFX GUI is the peer-facing UI for the TCP path, not a separate
-client/server application. The command-line peer is the headless peer runtime.
+The JavaFX GUI is the peer-facing UI for the default TCP path and the selectable
+RabbitMQ path, not a separate client/server application. The command-line peer
+is the headless peer runtime.
 Both are expected to use the same plugin ownership rules when they submit jobs
 or handle successful final results.
 
-RabbitMQ is the planned primary runtime for these peer roles, but the GUI is
-still TCP-only today. `docs/RUNTIME_STRATEGY.md` records the runtime direction
-and the gates before TCP can be deprecated or removed.
+RabbitMQ is the planned primary runtime for these peer roles. The GUI now has
+RabbitMQ service adapters for live broker-backed submit, execute, result
+routing, and result saving, while TCP remains the default. `docs/RUNTIME_STRATEGY.md`
+records the runtime direction and the gates before TCP can be deprecated or
+removed.
 
 ## Lifecycle
 
@@ -45,13 +48,19 @@ for client plugins to save.
 
 ## Current Implementations
 
-The TCP JavaFX GUI path is implemented through GUI-facing services:
+The JavaFX GUI path is implemented through GUI-facing services:
 
 - `GuiJobSubmissionService` calls `ClientJobPlugin.buildPayloads(...)`.
 - `GuiJobSubmitter` reserves the job id before sending so fast terminal results
   cannot be lost.
 - `TcpCoordinatorConnection` handles `TASK_ASSIGN` through
   `PeerExecutionEngine` and forwards `JOB_RESULT` messages to the GUI listener.
+- `RabbitMqCoordinatorConnection` sends heartbeats, consumes peer-specific
+  `TASK_ASSIGN` and `JOB_RESULT` queues, publishes `TASK_RESULT`, and forwards
+  live `JOB_RESULT` messages to the same GUI listener.
+- `TcpJobSubmissionClient` and `RabbitMqJobSubmissionClient` both create signed
+  `JOB_SUBMIT` messages with the GUI requester-token store. TCP still supports
+  `JOB_RESULT_REQUEST`; RabbitMQ GUI result-request replay is not implemented.
 - `GuiJobResultRouter` ignores results for untracked job ids and routes active
   failed or successful results.
 - `GuiResultSaveService` saves successful results with the matching
@@ -70,8 +79,9 @@ The RabbitMQ command-line peer path is implemented in `RabbitMqPeerNode`:
 
 The legacy TCP command-line `PeerNode` supports task execution and has a
 low-level signed `submitJob(...)` helper, but it does not provide a supported
-submit-and-save result workflow. Use the JavaFX GUI for the TCP peer UI, or use
-the RabbitMQ command-line submit path for a headless submit-and-save flow.
+submit-and-save result workflow. Use the JavaFX GUI for an interactive peer UI,
+or use the RabbitMQ command-line submit path for a headless submit-and-save
+flow.
 
 ## Shared-Service Candidates
 
@@ -101,5 +111,11 @@ Current focused coverage includes:
   `JOB_RESULT` routing.
 - `GuiResultSaverTest` and `GuiResultSaveServiceTest` for GUI result saving
   through `ClientJobPlugin`.
+- `RabbitMqJobSubmissionClientTest` for RabbitMQ GUI publish-confirm behavior,
+  requester-token cleanup, and signed job submission.
+- `RabbitMqCoordinatorConnectionTest` for RabbitMQ GUI heartbeat startup,
+  peer-route subscription, task assignment execution, task-result publish
+  acknowledgement/requeue behavior, job-result routing, malformed-result
+  rejection, and startup failure handling.
 - `PeerNodeTest` for RabbitMQ command-line payload creation, publish-confirm
   failure, and result saving through `ClientJobPlugin`.

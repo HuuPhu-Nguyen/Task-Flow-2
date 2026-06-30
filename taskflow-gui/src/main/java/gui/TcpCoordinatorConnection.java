@@ -23,20 +23,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
     private static final Logger LOGGER = LoggerFactory.getLogger(TcpCoordinatorConnection.class);
 
-    interface Listener {
-        void onConnected(CoordinatorConnection connection);
-
-        void onConnectionFailed(CoordinatorConnection connection, String error);
-
-        void onDisconnected(CoordinatorConnection connection, String message);
-
-        void onJobResult(CoordinatorConnection connection, JobResultMessage result);
-    }
-
     private final String host;
     private final int port;
     private final GuiWorkerRuntime workerRuntime;
-    private final Listener listener;
+    private final CoordinatorConnectionListener listener;
     private final Gson gson = new Gson();
     private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -45,7 +35,10 @@ final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
     private volatile Thread thread;
     private volatile boolean connected;
 
-    TcpCoordinatorConnection(String host, int port, GuiWorkerRuntime workerRuntime, Listener listener) {
+    TcpCoordinatorConnection(String host,
+                             int port,
+                             GuiWorkerRuntime workerRuntime,
+                             CoordinatorConnectionListener listener) {
         this.host = Objects.requireNonNull(host, "host");
         this.port = port;
         this.workerRuntime = Objects.requireNonNull(workerRuntime, "workerRuntime");

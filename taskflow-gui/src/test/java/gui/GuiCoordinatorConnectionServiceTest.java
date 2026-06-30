@@ -3,6 +3,7 @@ package gui;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -117,7 +118,7 @@ class GuiCoordinatorConnectionServiceTest {
                 String host,
                 int port,
                 GuiWorkerRuntime workerRuntime,
-                TcpCoordinatorConnection.Listener listener) {
+                CoordinatorConnectionListener listener) {
             this.host.set(host);
             this.port.set(port);
             this.workerRuntime.set(workerRuntime);
@@ -128,12 +129,12 @@ class GuiCoordinatorConnectionServiceTest {
     }
 
     private static final class FakeConnection implements StartableCoordinatorConnection {
-        private final TcpCoordinatorConnection.Listener listener;
+        private final CoordinatorConnectionListener listener;
         private final PrintWriter writer = new PrintWriter(new StringWriter(), true);
         private boolean started;
         private boolean closed;
 
-        private FakeConnection(TcpCoordinatorConnection.Listener listener) {
+        private FakeConnection(CoordinatorConnectionListener listener) {
             this.listener = listener;
         }
 
@@ -187,6 +188,19 @@ class GuiCoordinatorConnectionServiceTest {
         @Override
         public Set<String> supportedTaskTypes() {
             return Set.of("TEXT_ANALYSIS");
+        }
+
+        @Override
+        public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+            return CompletableFuture.completedFuture(new TaskResultMessage(
+                    "peer-1",
+                    Instant.EPOCH.toString(),
+                    task.getTaskId(),
+                    task.getJobId(),
+                    "done",
+                    true,
+                    null
+            ));
         }
 
         @Override

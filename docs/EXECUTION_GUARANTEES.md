@@ -18,17 +18,17 @@ This document defines the current runtime guarantees of TaskFlow.
 
 - Peers may combine submitter, executor, and result-handler capabilities depending on their runtime profile and transport.
 - Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling.
-- Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.saveResults(...)` in the JavaFX TCP GUI and the RabbitMQ command-line submitter.
-- The JavaFX GUI is the supported TCP peer UI for submit, execute, receive-result, and save-result behavior.
+- Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.saveResults(...)` in the JavaFX GUI and the RabbitMQ command-line submitter.
+- The JavaFX GUI is the supported peer UI for TCP submit, execute, receive-result, and save-result behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
 - The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
 - `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
 
 ## Runtime Direction
 
-- RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and future JavaFX GUI peers.
+- RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and JavaFX GUI peers.
 - TCP remains the current default local runtime and compatibility/demo path until RabbitMQ replacement gates pass.
-- This direction does not change current guarantees: JavaFX is still TCP-only, RabbitMQ live broker tests are opt-in, and RabbitMQ is still transitional until its documented gates are implemented and tested.
+- This direction does not change current defaults: TCP remains default, RabbitMQ live broker tests are opt-in, and RabbitMQ is still transitional until its documented gates are implemented and tested.
 - `docs/RUNTIME_STRATEGY.md` records the default-flip, support-promotion, TCP-deprecation, and TCP-removal gates.
 
 ## RabbitMQ Publication
@@ -58,10 +58,11 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## JavaFX GUI Transport Scope
 
-- The JavaFX GUI is TCP-only today.
-- GUI job submission, result reception, requester-token persistence, and GUI task execution use the TCP coordinator path.
-- RabbitMQ submission and RabbitMQ task execution are currently command-line peer capabilities, not JavaFX GUI capabilities.
-- Adding JavaFX RabbitMQ support would require a separate design through the GUI `JobSubmissionClient`, `CoordinatorConnection`, result routing, and worker-runtime boundaries.
+- The JavaFX GUI uses TCP by default and selects RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq` is set before launch.
+- GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and worker-runtime boundaries for both TCP and RabbitMQ.
+- RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI peer publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
+- RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.
+- Current JavaFX RabbitMQ coverage is service-level and headless. Full JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
 
 ## Scheduler Ingress and Backpressure
 
@@ -113,13 +114,13 @@ The SQLite state store also guards these persisted transitions so terminal task/
 ## Result Ownership
 
 - Job submissions carry a per-job requester token.
-- Job submissions may also carry a requester public key and Ed25519 signature. The JavaFX TCP submitter and command-line submit paths sign submissions.
+- Job submissions may also carry a requester public key and Ed25519 signature. The JavaFX submitter and command-line submit paths sign submissions.
 - The coordinator persists only the token hash and requester public key, not the raw token or private key.
 - `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends an in-memory pending terminal result, reports an active job as still running, or reconstructs a completed persisted result.
 - Jobs submitted with a requester public key are identity-bound: result requests must include the same public key and a valid signature over the request fields.
 - Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
-- JavaFX TCP submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file so later GUI processes can request owned results. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
+- JavaFX submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file. TCP result requests can use those tokens across later GUI processes; RabbitMQ GUI result-request replay is not implemented. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
 - On POSIX-compatible filesystems, TaskFlow attempts to restrict that token file to owner read/write and its parent directory to owner read/write/execute. On Windows or unsupported filesystems, token-file protection depends on the normal user-profile and filesystem access controls.
 - This is a per-job token plus local-signing-key ownership model, not full user/account authentication, login sessions, authorization roles, replay prevention, or a credential vault.
 

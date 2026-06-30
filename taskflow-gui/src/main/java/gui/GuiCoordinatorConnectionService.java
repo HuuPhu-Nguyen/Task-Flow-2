@@ -20,7 +20,7 @@ final class GuiCoordinatorConnectionService {
                 String host,
                 int port,
                 GuiWorkerRuntime workerRuntime,
-                TcpCoordinatorConnection.Listener listener);
+                CoordinatorConnectionListener listener);
     }
 
     private final GuiWorkerRuntime workerRuntime;
@@ -41,7 +41,7 @@ final class GuiCoordinatorConnectionService {
     void start(String host, int port, Listener listener) {
         Objects.requireNonNull(listener, "listener");
         stopping = false;
-        TcpCoordinatorConnection.Listener connectionListener = new TcpCoordinatorConnection.Listener() {
+        CoordinatorConnectionListener connectionListener = new CoordinatorConnectionListener() {
             @Override
             public void onConnected(CoordinatorConnection connection) {
                 listener.onConnected();
