@@ -1,17 +1,20 @@
 # RabbitMQ Runtime Scope Decision
 
 This document records the RabbitMQ support decision for TaskFlow. It does not
-add new runtime guarantees beyond `docs/EXECUTION_GUARANTEES.md`.
+add new runtime guarantees beyond `docs/EXECUTION_GUARANTEES.md`. The broader
+transport direction is recorded in `docs/RUNTIME_STRATEGY.md`.
 
 ## Decision
 
-RabbitMQ remains a transitional broker adapter, not a fully supported production
-runtime.
+RabbitMQ is the planned primary runtime, but the current RabbitMQ
+implementation remains a transitional broker adapter, not a fully supported
+production runtime.
 
 The current implementation is useful for broker-backed demos and focused
 integration coverage, but it does not yet provide the durability workflows
-needed to call RabbitMQ a complete supported runtime. TCP remains the default
-runtime.
+needed to call RabbitMQ a complete supported runtime. TCP remains the current
+default compatibility/demo runtime until the replacement gates in
+`docs/RUNTIME_STRATEGY.md` pass.
 
 ## Current RabbitMQ Guarantees
 
@@ -42,6 +45,9 @@ The current RabbitMQ path includes:
 
 TaskFlow does not yet provide:
 
+- JavaFX RabbitMQ submission or JavaFX RabbitMQ worker runtime.
+- Stable shared peer identity across GUI and command-line peers.
+- Peer-scoped job IDs.
 - Durable coordinator outbox persistence.
 - Replay of confirmed or unconfirmed outbound messages after coordinator crash.
 - Defined idempotency and duplicate handling for outbox replay.
@@ -50,7 +56,6 @@ TaskFlow does not yet provide:
 - TaskFlow DLQ inspection.
 - TaskFlow DLQ quarantine/discard decisions.
 - TaskFlow DLQ redrive back to the correct normal route.
-- JavaFX RabbitMQ submission or JavaFX RabbitMQ worker runtime.
 - Adaptive broker/peer backpressure beyond bounded scheduler ingress and broker
   prefetch.
 
@@ -59,10 +64,20 @@ the tested behavior above.
 
 ## Gates For Supported Runtime Status
 
-RabbitMQ can be reconsidered as a supported runtime only after these behavior
-gates are implemented and tested.
+RabbitMQ can be reconsidered as the primary supported runtime only after the
+replacement gates in `docs/RUNTIME_STRATEGY.md` and the behavior gates below
+are implemented and tested.
 
-First implement durable outbox/replay:
+First close runtime replacement gaps:
+
+- Add JavaFX RabbitMQ submission, worker execution, result routing, result
+  saving, and broker-failure handling behind the existing GUI service
+  boundaries.
+- Define stable peer identity for GUI and command-line peers, including
+  configured IDs, generated IDs, sanitization, and duplicate-ID behavior.
+- Generate peer-scoped, collision-resistant job IDs on every submit path.
+
+Then implement durable outbox/replay:
 
 - Define an outbox persistence contract.
 - Define message identity and replay ordering.
@@ -83,8 +98,17 @@ Then implement DLQ review/redrive:
 - Avoid automatic requeue of poisoned messages.
 - Test redrive to the correct normal route and quarantine/discard behavior.
 
-Only after those gates should documentation describe RabbitMQ as a supported
-runtime rather than a transitional adapter.
+Then promote evidence:
+
+- Add a RabbitMQ-backed CI profile that starts a broker and runs focused live
+  integration gates.
+- Keep Docker Compose and manual or automated GUI evidence aligned with the
+  README path.
+- Update public docs so quick-start, demos, limitations, execution guarantees,
+  and transport scope describe the same default and support status.
+
+Only after those gates should documentation describe RabbitMQ as the primary
+supported runtime rather than a transitional adapter.
 
 ## Public Claim Rule
 

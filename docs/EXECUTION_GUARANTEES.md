@@ -24,6 +24,13 @@ This document defines the current runtime guarantees of TaskFlow.
 - The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
 - `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
 
+## Runtime Direction
+
+- RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and future JavaFX GUI peers.
+- TCP remains the current default local runtime and compatibility/demo path until RabbitMQ replacement gates pass.
+- This direction does not change current guarantees: JavaFX is still TCP-only, RabbitMQ live broker tests are opt-in, and RabbitMQ is still transitional until its documented gates are implemented and tested.
+- `docs/RUNTIME_STRATEGY.md` records the default-flip, support-promotion, TCP-deprecation, and TCP-removal gates.
+
 ## RabbitMQ Publication
 
 - RabbitMQ transport channels enable publisher-confirm mode during startup.
@@ -33,7 +40,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - Failed task-assignment publishes are retried by scheduler dispatch logic.
 - Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
 - This is not a durable outbox: coordinator crash replay around publication is still not implemented.
-- RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it a supported runtime.
+- RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it the primary supported runtime.
 
 ## RabbitMQ Connection Recovery
 

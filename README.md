@@ -28,7 +28,7 @@ Jobs are submitted dynamically by peers and processed in a fully asynchronous, m
 - Mailbox-driven scheduler that decouples network I/O from task orchestration.
 - Assignment ownership checks that reject duplicate or stale task results.
 - Retry and timeout handling with terminal job failure semantics.
-- TCP runtime for simple demos and a RabbitMQ adapter path for broker-backed execution.
+- TCP compatibility/demo runtime plus a RabbitMQ target path for broker-backed execution.
 - SQLite-backed job history for local observability.
 
 ---
@@ -57,12 +57,12 @@ flowchart LR
     Plugins --> Conversion[Conversion Plugin]
     Scheduler -->|JOB_RESULT| PeerA
 
-    RabbitMQ[(RabbitMQ Broker)] -. transitional broker transport .- Coordinator
+    RabbitMQ[(RabbitMQ Broker)] -. target broker runtime (transitional today) .- Coordinator
     RabbitMQ -. task/result routes .- PeerB
     RabbitMQ -. task/result routes .- PeerC
 ```
 
-TCP is the default runtime. TCP peer handlers feed scheduler-bound messages through the bounded scheduler mailbox and wait for capacity when it is full, applying socket-level backpressure instead of dropping accepted peer messages. RabbitMQ support exists as a broker-backed peer runtime: command-line peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, plus bounded scheduler-ingress backpressure for broker deliveries, but remains transitional until broader broker failure paths, durable outbox/replay, and GUI support are complete. See `docs/RABBITMQ_SCOPE.md` for the RabbitMQ support decision and promotion gates, `docs/BACKPRESSURE_SCOPE.md` for the current backpressure boundaries and adaptive-backpressure deferral, and `docs/OBSERVABILITY_SCOPE.md` for the current structured-log event map and metrics-backend deferral.
+TCP is the current default local runtime and compatibility/demo path. RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and future JavaFX GUI peers, but it remains transitional today. Command-line RabbitMQ peers register with peer IDs, send heartbeats, receive peer-specific task assignments, publish task results, and can submit jobs through the broker. RabbitMQ mode has opt-in live broker coverage for transport delivery and coordinator job completion, plus bounded scheduler-ingress backpressure for broker deliveries, but JavaFX RabbitMQ support, stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ workflow, broker-backed CI, and default-flip evidence are still incomplete. See `docs/RUNTIME_STRATEGY.md` for the target-runtime decision and TCP deprecation/removal gates, `docs/RABBITMQ_SCOPE.md` for the current RabbitMQ support decision, `docs/BACKPRESSURE_SCOPE.md` for the current backpressure boundaries and adaptive-backpressure deferral, and `docs/OBSERVABILITY_SCOPE.md` for the current structured-log event map and metrics-backend deferral.
 
 ---
 
@@ -98,11 +98,11 @@ The JavaFX presentation layer talks to GUI-facing services for TCP connection li
 
 The coordinator runtime carries server plugin artifacts only. It does not need client plugins or peer processor artifacts.
 
-The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the default runtime, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq`.
+The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. TCP remains the current default runtime for local compatibility and the JavaFX GUI, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq` for the coordinator and command-line peer.
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. After startup, assignment persistence must succeed before a task is dispatched, and failed retry, task-failure, or task-completion writes fail the job with a terminal `JOB_RESULT` rather than allowing in-memory state to diverge silently. Final job-status writes happen after final result routing; if that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` so the delivered result and degraded history are inspectable. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, and requester public keys for signed ownership when present. On startup, resumable `RUNNING` jobs are rebuilt, previously assigned tasks are returned to pending because leases are not implemented, completed tasks with persisted result payloads are restored, and non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` with the job id and matching requester token; identity-bound jobs must also include the matching requester public key and a valid signature. The coordinator resends an in-memory pending terminal result or reconstructs a completed persisted result when ownership checks pass and every task result snapshot is present. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; TCP peer handlers wait for mailbox capacity and broker deliveries are requeued when the scheduler mailbox is full and acknowledged only after scheduler handling succeeds.
 
-The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a broker-aware submit path that builds payloads and saves successful final results through `ClientJobPlugin`.
+The RabbitMQ module provides broker topology declaration, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, requeue, reject, dead-letter exchange/queue configuration, and mandatory-return detection for unroutable peer-targeted publishes. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ is wired into coordinator and command-line peer entry points, including a broker-aware submit path that builds payloads and saves successful final results through `ClientJobPlugin`. RabbitMQ is the target broker runtime, but it is not the default or primary supported runtime until the gates in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md` are complete.
 
 ---
 
@@ -390,7 +390,7 @@ $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 
 ## RabbitMQ Transport
 
-TCP is the default transport. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or command-line peer against RabbitMQ.
+TCP is the current default transport. RabbitMQ is the planned primary runtime, but it must be selected explicitly today. Set `TASKFLOW_TRANSPORT=rabbitmq` to run the coordinator or command-line peer against RabbitMQ.
 
 The RabbitMQ transport module uses the following routes:
 
@@ -557,7 +557,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 ## Known Limitations
 
 - RabbitMQ live broker tests cover transport delivery, handler-failure requeue/reject/dead-letter behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, and coordinator end-to-end job completion. Unit coverage verifies bounded scheduler-ingress behavior when the mailbox is full: TCP peer handlers wait for capacity and RabbitMQ broker deliveries are requeued. Full broker outage/restart behavior, adaptive broker/peer throttling, and durable outbox/replay are not complete; `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and deferral conditions.
-- RabbitMQ mode is functional but transitional; peer-specific routing, publisher confirms, and dead-letter topology configuration are implemented, but there is still no durable outbox/replay model for coordinator crashes around publication and no TaskFlow DLQ review/redrive workflow for rejected messages. `docs/RABBITMQ_SCOPE.md` records the current decision to keep RabbitMQ transitional until outbox/replay and DLQ review/redrive gates are complete.
+- RabbitMQ is the planned primary runtime, but RabbitMQ mode is still transitional; peer-specific routing, publisher confirms, command-line submit/result handling, and dead-letter topology configuration are implemented, but JavaFX RabbitMQ support, stable shared peer identity, peer-scoped job IDs, durable outbox/replay, TaskFlow DLQ review/redrive workflow, broker-backed CI, and default-flip evidence are incomplete. `docs/RUNTIME_STRATEGY.md` records the target-runtime decision and TCP deprecation/removal gates; `docs/RABBITMQ_SCOPE.md` records the current support limits.
 - The JavaFX GUI is TCP-only: it currently submits jobs, receives results, and executes assigned work through TCP. RabbitMQ submission/execution is command-line only.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. `docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and metrics-backend deferral.
 - SQLite is the current `JobStateStore` implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, post-start task-state persistence failures fail jobs terminally, and terminal job-status write failures after result delivery are logged as degraded history. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, and schema-v4 requester identity keys require signed result requests for identity-bound jobs; assigned tasks are reset to pending on resume because task leases are not implemented, and legacy or otherwise non-resumable running jobs are marked failed. Explicit attempt history, lease-based recovery, and PostgreSQL/Flyway are not implemented; `docs/RECOVERY_SCOPE.md` records the accepted behavior scope and PostgreSQL/Flyway deferral.
@@ -568,8 +568,8 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 ## Candidate Future Improvements
 
 - Explicit attempt history and lease-based restart recovery before any PostgreSQL/Flyway state-store work
-- RabbitMQ durable outbox/replay and DLQ review/redrive workflow
-- Additional RabbitMQ failure-path integration tests and JavaFX RabbitMQ submit/execution support
+- RabbitMQ primary-runtime gates: JavaFX RabbitMQ submit/execution/result handling, stable peer identity, peer-scoped job IDs, durable outbox/replay, DLQ review/redrive workflow, broker-backed CI, and docs/demo alignment
+- Additional RabbitMQ failure-path integration tests
 - Distributed coordinator (no single point of failure)
 - More task types
 - Monitoring and metrics dashboard

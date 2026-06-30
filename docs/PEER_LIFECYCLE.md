@@ -19,6 +19,10 @@ client/server application. The command-line peer is the headless peer runtime.
 Both are expected to use the same plugin ownership rules when they submit jobs
 or handle successful final results.
 
+RabbitMQ is the planned primary runtime for these peer roles, but the GUI is
+still TCP-only today. `docs/RUNTIME_STRATEGY.md` records the runtime direction
+and the gates before TCP can be deprecated or removed.
+
 ## Lifecycle
 
 1. A submit-capable peer loads `ClientJobPlugin` providers on its runtime
