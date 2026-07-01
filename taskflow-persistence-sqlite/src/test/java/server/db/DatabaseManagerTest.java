@@ -65,6 +65,8 @@ class DatabaseManagerTest {
             assertEquals(456L, task.completedAt());
             assertEquals(333L, task.durationMs());
             assertEquals(0, task.retryCount());
+            assertEquals("", task.leaseOwnerId());
+            assertEquals(0L, task.leaseExpiresAt());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-1");
             assertEquals(1, attempts.size());
@@ -321,6 +323,81 @@ class DatabaseManagerTest {
             assertEquals(0L, task.startedAt());
             assertEquals(0L, task.completedAt());
             assertEquals(0L, task.durationMs());
+            assertEquals("", task.leaseOwnerId());
+            assertEquals(0L, task.leaseExpiresAt());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void assignedTaskPersistsLeaseOwnerAndExpiryForResume() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-lease-state-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-lease", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-lease", "job-lease");
+
+            assertTrue(db.markTaskAssigned(
+                    "task-lease",
+                    "peer-1",
+                    100L,
+                    "COORDINATOR_A",
+                    900L));
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-lease").getFirst();
+            assertEquals("ASSIGNED", task.status());
+            assertEquals("peer-1", task.assignedPeerId());
+            assertEquals(100L, task.startedAt());
+            assertEquals("COORDINATOR_A", task.leaseOwnerId());
+            assertEquals(900L, task.leaseExpiresAt());
+
+            JobStateStore.ResumableTaskState resumedTask =
+                    db.loadRunningJobsForResume().getFirst().tasks().getFirst();
+            assertEquals("ASSIGNED", resumedTask.status());
+            assertEquals("peer-1", resumedTask.assignedPeerId());
+            assertEquals(100L, resumedTask.startedAt());
+            assertEquals("COORDINATOR_A", resumedTask.leaseOwnerId());
+            assertEquals(900L, resumedTask.leaseExpiresAt());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void releaseExpiredTaskLeaseForResumeClearsAssignmentAndClosesAttempt() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-expired-lease-release-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-expired-lease", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-expired-lease", "job-expired-lease");
+            assertTrue(db.markTaskAssigned(
+                    "task-expired-lease",
+                    "peer-1",
+                    100L,
+                    "COORDINATOR_A",
+                    150L));
+
+            assertFalse(db.releaseExpiredTaskLeaseForResume("task-expired-lease", 149L));
+            assertTrue(db.releaseExpiredTaskLeaseForResume("task-expired-lease", 175L));
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-expired-lease").getFirst();
+            assertEquals("PENDING", task.status());
+            assertNull(task.assignedPeerId());
+            assertEquals(0, task.retryCount());
+            assertEquals(0L, task.startedAt());
+            assertEquals("", task.leaseOwnerId());
+            assertEquals(0L, task.leaseExpiresAt());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-expired-lease");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, attempt.outcome());
+            assertEquals("lease_expired", attempt.failureReason());
+            assertEquals(175L, attempt.finishedAt());
+            assertEquals(75L, attempt.durationMs());
         } finally {
             db.close();
         }
@@ -688,6 +765,8 @@ class DatabaseManagerTest {
             assertTrue(columnExists(dbPath, "jobs", "result_payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
+            assertTrue(columnExists(dbPath, "tasks", "lease_owner_id"));
+            assertTrue(columnExists(dbPath, "tasks", "lease_expires_at"));
             assertTrue(tableExists(dbPath, "task_attempts"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());
             assertFalse(db.insertTask("orphan-task", "missing-job"));

@@ -24,7 +24,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 7;
+    public static final int CURRENT_SCHEMA_VERSION = 8;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -141,6 +141,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     retry_count      INTEGER NOT NULL DEFAULT 0,
                     payload_json     TEXT,
                     result_payload_json TEXT,
+                    lease_owner_id   TEXT    NOT NULL DEFAULT '',
+                    lease_expires_at INTEGER NOT NULL DEFAULT 0,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
                 )
             """);
@@ -222,6 +224,16 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         if (!columnExists("tasks", "result_payload_json")) {
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("ALTER TABLE tasks ADD COLUMN result_payload_json TEXT");
+            }
+        }
+        if (!columnExists("tasks", "lease_owner_id")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN lease_owner_id TEXT NOT NULL DEFAULT ''");
+            }
+        }
+        if (!columnExists("tasks", "lease_expires_at")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0");
             }
         }
     }
@@ -375,7 +387,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         if (!columnExists("jobs", "result_payload_json")) {
             throw new SQLException("Database schema is missing jobs.result_payload_json.");
         }
-        if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
+        if (!columnExists("tasks", "payload_json")
+                || !columnExists("tasks", "result_payload_json")
+                || !columnExists("tasks", "lease_owner_id")
+                || !columnExists("tasks", "lease_expires_at")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
         }
         if (!tableExists("task_attempts")) {
@@ -560,11 +575,22 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
+        return markTaskAssigned(taskId, peerId, startedAt, "", 0L);
+    }
+
+    @Override
+    public synchronized boolean markTaskAssigned(String taskId,
+                                                String peerId,
+                                                long startedAt,
+                                                String leaseOwnerId,
+                                                long leaseExpiresAt) {
         String updateTaskSql = """
                 UPDATE tasks
                 SET status='ASSIGNED',
                     assigned_peer_id=?,
-                    started_at=?
+                    started_at=?,
+                    lease_owner_id=?,
+                    lease_expires_at=?
                 WHERE task_id=? AND status='PENDING'
                 """;
         boolean originalAutoCommit;
@@ -574,7 +600,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
                 ps.setString(1, peerId);
                 ps.setLong(2, startedAt);
-                ps.setString(3, taskId);
+                ps.setString(3, leaseOwnerId == null ? "" : leaseOwnerId);
+                ps.setLong(4, Math.max(0L, leaseExpiresAt));
+                ps.setString(5, taskId);
                 if (ps.executeUpdate() <= 0 || !insertTaskAttempt(taskId, peerId, startedAt)) {
                     conn.rollback();
                     return false;
@@ -607,7 +635,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                 SET status='COMPLETED',
                     completed_at=?,
                     duration_ms=?,
-                    result_payload_json=?
+                    result_payload_json=?,
+                    lease_owner_id='',
+                    lease_expires_at=0
                 WHERE task_id=? AND status='ASSIGNED'
                 """;
         boolean originalAutoCommit;
@@ -671,6 +701,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     started_at=NULL,
                     completed_at=NULL,
                     duration_ms=NULL,
+                    lease_owner_id='',
+                    lease_expires_at=0,
                     retry_count=?
                 WHERE task_id=? AND status='ASSIGNED'
                 """;
@@ -726,7 +758,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         String sql = """
                 UPDATE tasks
                 SET status='FAILED',
-                    completed_at=?
+                    completed_at=?,
+                    lease_owner_id='',
+                    lease_expires_at=0
                 WHERE task_id=? AND status NOT IN ('COMPLETED', 'FAILED')
                 """;
         boolean originalAutoCommit;
@@ -813,7 +847,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                 """;
         String failTasksSql = """
                 UPDATE tasks
-                SET status='FAILED', completed_at=?
+                SET status='FAILED',
+                    completed_at=?,
+                    lease_owner_id='',
+                    lease_expires_at=0
                 WHERE status NOT IN ('COMPLETED', 'FAILED')
                   AND job_id IN (SELECT job_id FROM jobs WHERE status='RUNNING')
                 """;
@@ -861,7 +898,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                 """;
         String failTasksSql = """
                 UPDATE tasks
-                SET status='FAILED', completed_at=?
+                SET status='FAILED',
+                    completed_at=?,
+                    lease_owner_id='',
+                    lease_expires_at=0
                 WHERE status NOT IN ('COMPLETED', 'FAILED')
                   AND job_id=?
                 """;
@@ -907,7 +947,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     assigned_peer_id=NULL,
                     started_at=NULL,
                     completed_at=NULL,
-                    duration_ms=NULL
+                    duration_ms=NULL,
+                    lease_owner_id='',
+                    lease_expires_at=0
                 WHERE task_id=? AND status IN ('PENDING', 'ASSIGNED')
                 """;
         boolean originalAutoCommit;
@@ -949,6 +991,57 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     @Override
+    public synchronized boolean releaseExpiredTaskLeaseForResume(String taskId, long releasedAt) {
+        String sql = """
+                UPDATE tasks
+                SET status='PENDING',
+                    assigned_peer_id=NULL,
+                    started_at=NULL,
+                    completed_at=NULL,
+                    duration_ms=NULL,
+                    lease_owner_id='',
+                    lease_expires_at=0
+                WHERE task_id=?
+                  AND status='ASSIGNED'
+                  AND (lease_expires_at<=0 OR lease_expires_at<=?)
+                """;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                if (hasRunningAttempt(taskId)
+                        && !finishRunningAttempt(
+                        taskId,
+                        releasedAt,
+                        attemptDuration(taskId, releasedAt),
+                        TaskAttemptOutcome.RETRY_SCHEDULED,
+                        "lease_expired"
+                )) {
+                    conn.rollback();
+                    return false;
+                }
+                ps.setString(1, taskId);
+                ps.setLong(2, releasedAt);
+                if (ps.executeUpdate() <= 0) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            logSqlFailure("releaseExpiredTaskLeaseForResume", e);
+            return false;
+        }
+    }
+
+    @Override
     public synchronized List<ResumableJobState> loadRunningJobsForResume() {
         List<ResumableJobState> jobs = new ArrayList<>();
         String sql = "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY submitted_at ASC";
@@ -974,7 +1067,15 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     private List<ResumableTaskState> loadTasksForResume(String jobId) throws SQLException {
         List<ResumableTaskState> tasks = new ArrayList<>();
         String sql = """
-                SELECT task_id, status, payload_json, result_payload_json, retry_count
+                SELECT task_id,
+                       status,
+                       payload_json,
+                       result_payload_json,
+                       retry_count,
+                       assigned_peer_id,
+                       started_at,
+                       lease_owner_id,
+                       lease_expires_at
                 FROM tasks
                 WHERE job_id=?
                 """;
@@ -987,7 +1088,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                             rs.getString("status"),
                             fromJson(rs.getString("payload_json")),
                             fromJson(rs.getString("result_payload_json")),
-                            rs.getInt("retry_count")
+                            rs.getInt("retry_count"),
+                            rs.getString("assigned_peer_id"),
+                            rs.getLong("started_at"),
+                            rs.getString("lease_owner_id"),
+                            rs.getLong("lease_expires_at")
                     ));
                 }
             }
@@ -1359,9 +1464,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     rs.getString("assigned_peer_id"),
                     rs.getString("status"),
                     rs.getLong("started_at"),
-                    rs.getLong("completed_at"),
-                    rs.getLong("duration_ms"),
-                    rs.getInt("retry_count")
+                        rs.getLong("completed_at"),
+                        rs.getLong("duration_ms"),
+                        rs.getInt("retry_count"),
+                        rs.getString("lease_owner_id"),
+                        rs.getLong("lease_expires_at")
                 ));
             }
         } catch (SQLException e) {
@@ -1508,7 +1615,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         long startedAt,
         long completedAt,
         long durationMs,
-        int retryCount
+        int retryCount,
+        String leaseOwnerId,
+        long leaseExpiresAt
     ) {}
 
     private record TaskResultSnapshot(String taskId, Object resultPayload) {

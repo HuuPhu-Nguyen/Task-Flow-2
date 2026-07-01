@@ -47,6 +47,8 @@ Task assignment, retry, and failure:
 - `task_completed` records accepted successful task results.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
   attempts with `retry_count` and `terminal_failure`.
+- `task_lease_expired` records assigned work whose persisted lease expired
+  before a result was accepted.
 - `peer_unavailable_tasks_released` records how many tasks were returned for
   retry or made terminal after peer disconnect or heartbeat timeout.
 - `task_dispatch_failed` records failed assignment sends before work reaches a
@@ -107,7 +109,8 @@ provide stable dashboard contracts.
 
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and
-restart release. TaskFlow still does not provide lease ownership timelines,
+restart release. SQLite task rows also record lease owner and expiry for
+assigned work. TaskFlow still does not provide promoted lease dashboards,
 outbox replay state, DLQ review decisions, or redrive counts. Those remaining
 behaviors are deferred in the recovery and RabbitMQ scope documents.
 
@@ -116,7 +119,7 @@ behaviors are deferred in the recovery and RabbitMQ scope documents.
 A dedicated metrics backend is deferred until at least one of these behavior
 tracks is implemented and needs promoted operational visibility:
 
-- recovery leases or promoted attempt-history dashboards;
+- promoted lease or attempt-history dashboards;
 - RabbitMQ durable outbox and replay;
 - TaskFlow DLQ inspection, quarantine, discard, and redrive.
 
@@ -124,14 +127,14 @@ Before adding a metrics exporter, define:
 
 - metric names, units, and label cardinality;
 - which log events remain canonical and which become metrics;
-- persistence-backed lease semantics and any promoted attempt-history metric contracts;
+- promoted lease and attempt-history metric contracts;
 - outbox and DLQ state transitions for RabbitMQ metrics;
 - focused tests that prove emitted metrics match scheduler and broker state.
 
 ## Public Claim Rule
 
 Public docs should describe current observability as structured logs,
-log-based scheduler metrics, and SQLite task-attempt audit rows. Avoid claiming
-built-in dashboards, alerting, tracing, lease observability, outbox
-observability, or DLQ workflow visibility until those systems exist and are
-tested.
+log-based scheduler metrics, SQLite task-attempt audit rows, and SQLite task
+lease fields. Avoid claiming built-in dashboards, alerting, tracing, promoted
+lease timelines, outbox observability, or DLQ workflow visibility until those
+systems exist and are tested.

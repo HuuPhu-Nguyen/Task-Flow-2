@@ -99,12 +99,14 @@ The SQLite state store also guards these persisted transitions so terminal task/
 ## Retry and Timeout Policy
 
 - **Timeout per assigned task:** 60 seconds.
+- **Lease per assigned task:** 120 seconds.
 - **Maximum retries per task:** 20 attempts.
-- On timeout or explicit peer execution failure:
+- During active scheduler operation, on timeout, lease expiry, or explicit peer execution failure:
   - the attempt is counted as failed,
   - the task is retried if attempts remain,
   - otherwise the task moves to terminal `FAILED`.
-- When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment/timing fields are cleared, and `retry_count` is incremented.
+- When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment/timing/lease fields are cleared, and `retry_count` is incremented.
+- During startup recovery, an expired or missing lease is released to `PENDING` without incrementing `retry_count`; the next runtime attempt receives a new attempt-history row.
 
 ## Capability-Aware Assignment
 
@@ -146,7 +148,8 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Schema version 5 stores peer registry metadata for last-known peer state across coordinator restart.
 - Schema version 6 stores the completed job's final semantic result payload.
 - Schema version 7 stores task attempt history rows for assignment, success, retry, terminal failure, dispatch failure, startup reconciliation, and restart release.
-- Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, closes running attempt rows for reset assignments with a restart reason, and resets assigned tasks to `PENDING` because leases are not implemented.
+- Schema version 8 stores task lease owner and expiry for assigned work.
+- Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks with unexpired leases, and releases assigned tasks with expired or missing leases to `PENDING` with a `lease_expired` attempt reason.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to a peer.
@@ -154,7 +157,7 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
 - `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
-- Lease-based recovery and PostgreSQL/Flyway are not implemented. `docs/RECOVERY_SCOPE.md` records lease behavior as accepted future scope, with PostgreSQL/Flyway deferred until there is a concrete external database requirement.
+- PostgreSQL/Flyway is not implemented. `docs/RECOVERY_SCOPE.md` records the SQLite lease behavior and keeps PostgreSQL/Flyway deferred until there is a concrete external database requirement.
 
 ## Heartbeat and Peer Liveness
 
@@ -178,4 +181,4 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 
 These metrics are intended for immediate operational visibility in Phase 1 and as migration inputs to dedicated metrics backends in later phases.
 
-`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until recovery leases, RabbitMQ outbox/replay, or TaskFlow DLQ workflow work needs promoted operational visibility.
+`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox/replay, or TaskFlow DLQ workflow work needs operational visibility.

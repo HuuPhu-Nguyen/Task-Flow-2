@@ -19,6 +19,7 @@ class SchedulerConfigTest {
         SchedulerConfig config = SchedulerConfig.defaults();
 
         assertEquals(60_000L, config.taskTimeoutMillis());
+        assertEquals(120_000L, config.taskLeaseMillis());
         assertEquals(3, config.maxTasksPerPeer());
         assertEquals(20, config.maxTaskRetries());
         assertEquals(1000, config.inboundQueueCapacity());
@@ -37,6 +38,7 @@ class SchedulerConfigTest {
     void readsEnvironmentOverrides() {
         SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.ofEntries(
                 Map.entry("TASKFLOW_TASK_TIMEOUT_MS", "120000"),
+                Map.entry("TASKFLOW_TASK_LEASE_MS", "180000"),
                 Map.entry("TASKFLOW_MAX_TASKS_PER_PEER", "7"),
                 Map.entry("TASKFLOW_MAX_TASK_RETRIES", "5"),
                 Map.entry("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "77"),
@@ -52,6 +54,7 @@ class SchedulerConfigTest {
         ));
 
         assertEquals(120_000L, config.taskTimeoutMillis());
+        assertEquals(180_000L, config.taskLeaseMillis());
         assertEquals(7, config.maxTasksPerPeer());
         assertEquals(5, config.maxTaskRetries());
         assertEquals(77, config.inboundQueueCapacity());
@@ -71,6 +74,8 @@ class SchedulerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASKS_PER_PEER", "0")));
         assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_TASK_LEASE_MS", "0")));
+        assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "0")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "0")));
@@ -86,6 +91,7 @@ class SchedulerConfigTest {
         Files.writeString(configPath, """
                 scheduler:
                   taskTimeoutMs: 90000
+                  taskLeaseMs: 150000
                   maxTasksPerPeer: 4
                   maxTaskRetries: 6
                   inboundQueueCapacity: 123
@@ -104,6 +110,7 @@ class SchedulerConfigTest {
         SchedulerConfig config = SchedulerConfig.fromFile(configPath);
 
         assertEquals(90_000L, config.taskTimeoutMillis());
+        assertEquals(150_000L, config.taskLeaseMillis());
         assertEquals(4, config.maxTasksPerPeer());
         assertEquals(6, config.maxTaskRetries());
         assertEquals(123, config.inboundQueueCapacity());

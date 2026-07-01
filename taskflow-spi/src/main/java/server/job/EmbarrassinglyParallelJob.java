@@ -62,6 +62,18 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
                                                      TaskUnit.TaskStatus status,
                                                      Object rawResultData,
                                                      int retryCount) {
+        return restoreTaskForResume(taskId, status, rawResultData, retryCount, "", 0L, "", 0L);
+    }
+
+    @SuppressWarnings("unchecked")
+    public synchronized boolean restoreTaskForResume(String taskId,
+                                                     TaskUnit.TaskStatus status,
+                                                     Object rawResultData,
+                                                     int retryCount,
+                                                     String assignedPeerId,
+                                                     long startedAt,
+                                                     String leaseOwnerId,
+                                                     long leaseExpiresAt) {
         TaskUnit<T> task = tasks.get(taskId);
         if (task == null || status == null) {
             return false;
@@ -80,6 +92,14 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
 
         if (status == TaskUnit.TaskStatus.FAILED) {
             task.restoreFailedForResume(retryCount);
+            return true;
+        }
+
+        if (status == TaskUnit.TaskStatus.ASSIGNED) {
+            if (assignedPeerId == null || assignedPeerId.isBlank()) {
+                return false;
+            }
+            task.restoreAssignedForResume(assignedPeerId, startedAt, leaseOwnerId, leaseExpiresAt, retryCount);
             return true;
         }
 

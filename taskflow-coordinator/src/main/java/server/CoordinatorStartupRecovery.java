@@ -56,7 +56,7 @@ final class CoordinatorStartupRecovery {
 
         for (JobStateStore.ResumableJobState persistedJob : persistedJobs) {
             try {
-                EmbarrassinglyParallelJob<?, ?> restored = restoreJob(store, persistedJob);
+                EmbarrassinglyParallelJob<?, ?> restored = restoreJob(store, persistedJob, completedAt);
                 if (restored == null) {
                     if (!store.markRunningJobFailedOnStartup(persistedJob.jobId(), completedAt)) {
                         successful = false;
@@ -94,7 +94,8 @@ final class CoordinatorStartupRecovery {
     }
 
     private static EmbarrassinglyParallelJob<?, ?> restoreJob(JobStateStore store,
-                                                              JobStateStore.ResumableJobState persistedJob) {
+                                                              JobStateStore.ResumableJobState persistedJob,
+                                                              long recoveredAt) {
         if (!RequesterTokens.hasTokenHash(persistedJob.requesterTokenHash())) {
             LOGGER.warn("event=running_job_not_resumable job_id={} reason=missing_requester_token_hash",
                     persistedJob.jobId());
@@ -136,18 +137,35 @@ final class CoordinatorStartupRecovery {
                         persistedJob.jobId(), taskState.taskId());
                 return null;
             }
+
+            TaskUnit.TaskStatus restoreStatus = status;
+            boolean releaseExpiredLease = false;
+            if (status == TaskUnit.TaskStatus.ASSIGNED && !hasUnexpiredLease(taskState, recoveredAt)) {
+                restoreStatus = TaskUnit.TaskStatus.PENDING;
+                releaseExpiredLease = true;
+            }
+
             if (!job.restoreTaskForResume(
                     taskState.taskId(),
-                    status,
+                    restoreStatus,
                     taskState.resultPayload(),
-                    taskState.retryCount()
+                    taskState.retryCount(),
+                    taskState.assignedPeerId(),
+                    taskState.startedAt(),
+                    taskState.leaseOwnerId(),
+                    taskState.leaseExpiresAt()
             )) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_restore_failed",
                         persistedJob.jobId(), taskState.taskId());
                 return null;
             }
-            if ((status == TaskUnit.TaskStatus.PENDING || status == TaskUnit.TaskStatus.ASSIGNED)
-                    && !store.resetTaskForResume(taskState.taskId())) {
+            if (releaseExpiredLease) {
+                if (!store.releaseExpiredTaskLeaseForResume(taskState.taskId(), recoveredAt)) {
+                    LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_lease_release_failed",
+                            persistedJob.jobId(), taskState.taskId());
+                    return null;
+                }
+            } else if (status == TaskUnit.TaskStatus.PENDING && !store.resetTaskForResume(taskState.taskId())) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_reset_failed",
                         persistedJob.jobId(), taskState.taskId());
                 return null;
@@ -158,6 +176,12 @@ final class CoordinatorStartupRecovery {
 
     private static boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private static boolean hasUnexpiredLease(JobStateStore.ResumableTaskState taskState, long recoveredAt) {
+        return hasText(taskState.assignedPeerId())
+                && hasText(taskState.leaseOwnerId())
+                && taskState.leaseExpiresAt() > recoveredAt;
     }
 
     record RecoveryResult(boolean successful,

@@ -74,12 +74,85 @@ class CoordinatorStartupRecoveryTest {
         assertEquals(TOKEN_HASH, result.requesterTokenHashes().get("job-resume"));
         assertEquals(IDENTITY_KEY, result.requesterIdentityKeys().get("job-resume"));
         assertEquals(0, result.failedJobs());
-        assertEquals(List.of("task-job-resume-0"), store.resetTasks());
+        assertEquals(List.of("task-job-resume-0:123"), store.releasedLeases());
 
         EmbarrassinglyParallelJob<?, ?> job = result.resumedJobs().getFirst();
         TaskUnit<?> task = job.getTasks().get("task-job-resume-0");
         assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
         assertEquals(2, task.getRetryCount());
+    }
+
+    @Test
+    void preservesAssignedTasksWithUnexpiredLeasesOnResume() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-assigned-lease",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                TOKEN_HASH,
+                "",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-assigned-lease-0",
+                        "ASSIGNED",
+                        "payload",
+                        null,
+                        1,
+                        "peer-1",
+                        100L,
+                        "COORDINATOR_old",
+                        500L
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 250L);
+
+        assertTrue(result.successful());
+        assertEquals(1, result.resumedJobs().size());
+        assertEquals(List.of(), store.resetTasks());
+        assertEquals(List.of(), store.releasedLeases());
+
+        TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get("task-job-assigned-lease-0");
+        assertEquals(TaskUnit.TaskStatus.ASSIGNED, task.getStatus());
+        assertEquals("peer-1", task.getAssignedPeerId());
+        assertEquals(100L, task.getStartTime());
+        assertEquals("COORDINATOR_old", task.getLeaseOwnerId());
+        assertEquals(500L, task.getLeaseExpiresAtMillis());
+        assertEquals(1, task.getRetryCount());
+    }
+
+    @Test
+    void releasesExpiredAssignedLeasesOnResume() {
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-expired-lease",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                TOKEN_HASH,
+                "",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        "task-job-expired-lease-0",
+                        "ASSIGNED",
+                        "payload",
+                        null,
+                        3,
+                        "peer-1",
+                        100L,
+                        "COORDINATOR_old",
+                        200L
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 250L);
+
+        assertTrue(result.successful());
+        assertEquals(1, result.resumedJobs().size());
+        assertEquals(List.of("task-job-expired-lease-0:250"), store.releasedLeases());
+
+        TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get("task-job-expired-lease-0");
+        assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
+        assertEquals(3, task.getRetryCount());
     }
 
     @Test
@@ -243,6 +316,7 @@ class CoordinatorStartupRecoveryTest {
     private static class ResumeStore implements JobStateStore {
         private final List<ResumableJobState> runningJobs;
         private final List<String> resetTasks = new ArrayList<>();
+        private final List<String> releasedLeases = new ArrayList<>();
         private final List<String> failedJobs = new ArrayList<>();
 
         private ResumeStore(List<ResumableJobState> runningJobs) {
@@ -315,6 +389,12 @@ class CoordinatorStartupRecoveryTest {
         }
 
         @Override
+        public boolean releaseExpiredTaskLeaseForResume(String taskId, long releasedAt) {
+            releasedLeases.add(taskId + ":" + releasedAt);
+            return true;
+        }
+
+        @Override
         public boolean markRunningJobFailedOnStartup(String jobId, long completedAt) {
             failedJobs.add(jobId + ":" + completedAt);
             return true;
@@ -322,6 +402,10 @@ class CoordinatorStartupRecoveryTest {
 
         private List<String> resetTasks() {
             return List.copyOf(resetTasks);
+        }
+
+        private List<String> releasedLeases() {
+            return List.copyOf(releasedLeases);
         }
 
         private List<String> failedJobs() {

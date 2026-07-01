@@ -80,6 +80,9 @@ class TaskSchedulerPersistenceTest {
             assertEquals("peer-1", attempt.peerId());
             assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempt.outcome());
             assertEquals("", attempt.failureReason());
+            assertNotNull(store.lastLeaseOwnerId());
+            assertFalse(store.lastLeaseOwnerId().isBlank());
+            assertTrue(store.lastLeaseExpiresAt() > attempt.startedAt());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1260,6 +1263,8 @@ class TaskSchedulerPersistenceTest {
         private JobStateStore.CompletedJobResultState completedResult;
         private String lastRequesterIdentityKey = "";
         private Object lastCompletedResultPayload;
+        private String lastLeaseOwnerId = "";
+        private long lastLeaseExpiresAt;
 
         private RecordingJobStateStore() {
             this(true);
@@ -1332,8 +1337,19 @@ class TaskSchedulerPersistenceTest {
 
         @Override
         public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
+            return markTaskAssigned(taskId, peerId, startedAt, "", 0L);
+        }
+
+        @Override
+        public synchronized boolean markTaskAssigned(String taskId,
+                                                    String peerId,
+                                                    long startedAt,
+                                                    String leaseOwnerId,
+                                                    long leaseExpiresAt) {
             events.add("markTaskAssigned:" + taskId + ":" + peerId);
             if (succeeds("markTaskAssigned")) {
+                lastLeaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
+                lastLeaseExpiresAt = leaseExpiresAt;
                 String jobId = taskJobIds.getOrDefault(taskId, "");
                 Deque<TaskAttemptRecord> attempts = attemptsByJobId.computeIfAbsent(jobId, ignored -> new ArrayDeque<>());
                 attempts.addLast(new TaskAttemptRecord(
@@ -1490,6 +1506,14 @@ class TaskSchedulerPersistenceTest {
 
         synchronized Object lastCompletedResultPayload() {
             return lastCompletedResultPayload;
+        }
+
+        synchronized String lastLeaseOwnerId() {
+            return lastLeaseOwnerId;
+        }
+
+        synchronized long lastLeaseExpiresAt() {
+            return lastLeaseExpiresAt;
         }
 
         synchronized void setCompletedResult(JobStateStore.CompletedJobResultState completedResult) {

@@ -10,6 +10,8 @@ public abstract class TaskUnit<T> {
 
     private long startTime;
     private long pendingSinceMillis;
+    private String leaseOwnerId = "";
+    private long leaseExpiresAtMillis;
 
     private int retryCount;
 
@@ -48,16 +50,27 @@ public abstract class TaskUnit<T> {
         this.status = TaskStatus.COMPLETED;
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = -1L;
         return duration;
     }
 
     public synchronized boolean markAssigned(String peerId, long startAtMillis) {
+        return markAssigned(peerId, startAtMillis, "", 0L);
+    }
+
+    public synchronized boolean markAssigned(String peerId,
+                                             long startAtMillis,
+                                             String leaseOwnerId,
+                                             long leaseExpiresAtMillis) {
         if (this.status != TaskStatus.PENDING) {
             return false;
         }
         this.assignedPeerId = peerId;
         this.startTime = startAtMillis;
+        this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
+        this.leaseExpiresAtMillis = Math.max(0L, leaseExpiresAtMillis);
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.ASSIGNED;
         return true;
@@ -69,6 +82,8 @@ public abstract class TaskUnit<T> {
         }
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = System.currentTimeMillis();
         this.status = TaskStatus.PENDING;
     }
@@ -83,6 +98,8 @@ public abstract class TaskUnit<T> {
         this.retryCount++;
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
 
         if (this.retryCount >= maxRetries) {
             this.status = TaskStatus.FAILED;
@@ -105,6 +122,14 @@ public abstract class TaskUnit<T> {
 
     public synchronized long getStartTime() { return this.startTime; }
     public synchronized long getPendingSinceMillis() { return this.pendingSinceMillis; }
+    public synchronized String getLeaseOwnerId() { return this.leaseOwnerId; }
+    public synchronized long getLeaseExpiresAtMillis() { return this.leaseExpiresAtMillis; }
+
+    public synchronized boolean isLeaseExpired(long nowMillis) {
+        return this.status == TaskStatus.ASSIGNED
+                && this.leaseExpiresAtMillis > 0L
+                && nowMillis >= this.leaseExpiresAtMillis;
+    }
 
     public T getPayload() {
         return payload;
@@ -122,14 +147,32 @@ public abstract class TaskUnit<T> {
         this.retryCount = Math.max(0, retryCount);
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = System.currentTimeMillis();
         this.status = TaskStatus.PENDING;
+    }
+
+    public synchronized void restoreAssignedForResume(String assignedPeerId,
+                                                      long startedAt,
+                                                      String leaseOwnerId,
+                                                      long leaseExpiresAtMillis,
+                                                      int retryCount) {
+        this.retryCount = Math.max(0, retryCount);
+        this.assignedPeerId = assignedPeerId;
+        this.startTime = Math.max(0L, startedAt);
+        this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
+        this.leaseExpiresAtMillis = Math.max(0L, leaseExpiresAtMillis);
+        this.pendingSinceMillis = -1L;
+        this.status = TaskStatus.ASSIGNED;
     }
 
     public synchronized void restoreCompletedForResume(int retryCount) {
         this.retryCount = Math.max(0, retryCount);
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.COMPLETED;
     }
@@ -138,6 +181,8 @@ public abstract class TaskUnit<T> {
         this.retryCount = Math.max(0, retryCount);
         this.assignedPeerId = null;
         this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.FAILED;
     }

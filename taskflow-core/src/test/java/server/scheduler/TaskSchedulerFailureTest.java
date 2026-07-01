@@ -485,6 +485,58 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_TASK_TIMEOUT_MS", "100000",
+                "TASKFLOW_TASK_LEASE_MS", "150",
+                "TASKFLOW_MAX_TASK_RETRIES", "2"
+        ));
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        registry.register("peer-1", new PeerInfo(
+                "peer-1",
+                config,
+                List.of("TEST_TASK")
+        ));
+        MultiAssignmentOutput output = new MultiAssignmentOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-expired-lease-retry-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-expired-lease-retry", List.of("payload")), "requester-1"));
+
+            MultiAssignmentOutput.Assignment first = output.awaitAssignment();
+            assertNotNull(first);
+            assertEquals("peer-1", first.peerId());
+
+            registry.remove("peer-1");
+            registry.register("peer-2", new PeerInfo(
+                    "peer-2",
+                    config,
+                    List.of("TEST_TASK")
+            ));
+
+            MultiAssignmentOutput.Assignment retry = output.awaitAssignment();
+            assertNotNull(retry);
+            assertEquals("peer-2", retry.peerId());
+            assertEquals(first.task().getTaskId(), retry.task().getTaskId());
+
+            mailbox.put(new MessageEnvelope(successResult(first.task(), "stale-result"), "peer-1"));
+            mailbox.put(new MessageEnvelope(successResult(retry.task(), "accepted-result"), "peer-2"));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertTrue(result.isSuccessful());
+            assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void peerDisconnectAtRetryLimitReturnsFailedJobResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();

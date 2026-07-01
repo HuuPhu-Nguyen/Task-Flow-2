@@ -4,7 +4,7 @@ This demo exercises one supported failure path: TCP peer disconnect retry.
 
 It uses the scheduler test harness instead of launching desktop GUI or RabbitMQ
 processes, so it is repeatable on a clean development machine and does not rely
-on unimplemented leases, outbox replay, or DLQ redrive.
+on restart-lease recovery, outbox replay, or DLQ redrive.
 
 ## Scenario
 
@@ -55,9 +55,9 @@ This demo proves the implemented scheduler behavior for peer disconnect while a
 task is assigned. It does not claim:
 
 - coordinator restart recovery for assigned tasks;
-- lease-based ownership of in-flight work;
+- restart-lease ownership of in-flight work;
 - RabbitMQ durable outbox replay;
 - TaskFlow DLQ inspection or redrive.
 
-Those deferred areas remain documented in `docs/RECOVERY_SCOPE.md` and
+Those separate areas remain documented in `docs/RECOVERY_SCOPE.md` and
 `docs/RABBITMQ_SCOPE.md`.

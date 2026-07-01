@@ -20,6 +20,7 @@ public class TaskScheduler implements Runnable {
     private final JobStateStore db;
     private final SchedulerOutput output;
     private final SchedulerConfig config;
+    private final String leaseOwnerId;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final Map<String, PendingJobCompletion> pendingJobCompletions = new LinkedHashMap<>();
     private final Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
@@ -48,6 +49,7 @@ public class TaskScheduler implements Runnable {
         this.db = db;
         this.output = output;
         this.config = config == null ? SchedulerConfig.defaults() : config;
+        this.leaseOwnerId = "COORDINATOR_" + UUID.randomUUID();
     }
 
     @Override
@@ -61,6 +63,7 @@ public class TaskScheduler implements Runnable {
                 }
                 //Check for stale tasks (Watchdog)
                 checkTimeouts();
+                checkLeaseExpirations();
                 // Dispatch pending work
                 dispatchPendingTasks();
                 retryPendingJobResults();
@@ -464,6 +467,14 @@ public class TaskScheduler implements Runnable {
             return;
         }
 
+        LeaseExpiryResult leaseExpiry = expireTaskLeaseIfNeeded(job, task, System.currentTimeMillis());
+        if (leaseExpiry.handled()) {
+            if (leaseExpiry.jobFailureReason() != null) {
+                failJob(job, leaseExpiry.jobFailureReason());
+            }
+            return;
+        }
+
         if (!result.isSuccessful()) {
             TaskUnit.FailureOutcome outcome = task.failAttemptBy(envelope.fromNodeId(), config.maxTaskRetries());
             if (outcome == TaskUnit.FailureOutcome.IGNORED) {
@@ -549,6 +560,69 @@ public class TaskScheduler implements Runnable {
         }
     }
 
+    private void checkLeaseExpirations() {
+        long now = System.currentTimeMillis();
+        Map<String, String> jobsToFail = new LinkedHashMap<>();
+
+        for (EmbarrassinglyParallelJob<?, ?> job : activeJobs.values()) {
+            for (TaskUnit<?> task : job.getTasks().values()) {
+                LeaseExpiryResult result = expireTaskLeaseIfNeeded(job, task, now);
+                if (result.jobFailureReason() != null) {
+                    jobsToFail.putIfAbsent(job.getJobId(), result.jobFailureReason());
+                }
+            }
+        }
+
+        for (Map.Entry<String, String> entry : jobsToFail.entrySet()) {
+            EmbarrassinglyParallelJob<?, ?> job = activeJobs.get(entry.getKey());
+            if (job != null) {
+                failJob(job, entry.getValue());
+            }
+        }
+    }
+
+    private LeaseExpiryResult expireTaskLeaseIfNeeded(EmbarrassinglyParallelJob<?, ?> job,
+                                                      TaskUnit<?> task,
+                                                      long now) {
+        if (task.getStatus() != TaskUnit.TaskStatus.ASSIGNED || !task.isLeaseExpired(now)) {
+            return LeaseExpiryResult.notHandled();
+        }
+
+        String assignedPeerId = task.getAssignedPeerId();
+        if (assignedPeerId == null || assignedPeerId.isBlank()) {
+            return LeaseExpiryResult.notHandled();
+        }
+
+        long leaseExpiresAt = task.getLeaseExpiresAtMillis();
+        TaskUnit.FailureOutcome outcome = task.failAttemptBy(assignedPeerId, config.maxTaskRetries());
+        if (outcome == TaskUnit.FailureOutcome.IGNORED) {
+            return LeaseExpiryResult.notHandled();
+        }
+
+        if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
+            metrics.recordRetry();
+        }
+        onAttemptFailure(assignedPeerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
+        boolean persisted = persistTaskFailure(task, outcome, "lease_expired", now);
+        logErrorEvent("task_lease_expired", fields(
+                "job_id", job.getJobId(),
+                "task_id", task.getTaskId(),
+                "assigned_peer_id", assignedPeerId,
+                "lease_expires_at", leaseExpiresAt,
+                "retry_count", task.getRetryCount(),
+                "terminal_failure", outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE
+        ));
+
+        if (!persisted) {
+            return LeaseExpiryResult.handled(persistenceFailureReason(taskFailurePersistenceOperation(outcome)));
+        }
+        if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+            return LeaseExpiryResult.handled(
+                    "Task " + task.getTaskId() + " lease expired before completion.");
+        }
+        return LeaseExpiryResult.handled(null);
+    }
+
     private void dispatchPendingTasks() {
         //Process jobs in order
         for (EmbarrassinglyParallelJob<?,?> job : List.copyOf(activeJobs.values())) {
@@ -589,7 +663,8 @@ public class TaskScheduler implements Runnable {
     private void assign(EmbarrassinglyParallelJob<?,?> job, TaskUnit<?> task, PeerInfo peer) {
         long pendingSince = task.getPendingSinceMillis();
         long startedAt = System.currentTimeMillis();
-        if (!task.markAssigned(peer.getNodeId(), startedAt)) {
+        long leaseExpiresAt = leaseExpiresAt(startedAt);
+        if (!task.markAssigned(peer.getNodeId(), startedAt, leaseOwnerId, leaseExpiresAt)) {
             return;
         }
         long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
@@ -599,7 +674,7 @@ public class TaskScheduler implements Runnable {
                     "markTaskAssigned",
                     job.getJobId(),
                     task.getTaskId(),
-                    db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt)
+                    db.markTaskAssigned(task.getTaskId(), peer.getNodeId(), startedAt, leaseOwnerId, leaseExpiresAt)
             );
             if (!persisted) {
                 task.resetToPending();
@@ -643,6 +718,14 @@ public class TaskScheduler implements Runnable {
                 "peer_id", peer.getNodeId(),
                 "dispatch_latency_ms", dispatchLatencyMs
         ));
+    }
+
+    private long leaseExpiresAt(long startedAt) {
+        long leaseMillis = config.taskLeaseMillis();
+        if (Long.MAX_VALUE - startedAt < leaseMillis) {
+            return Long.MAX_VALUE;
+        }
+        return startedAt + leaseMillis;
     }
 
     private List<PeerInfo> getAvailablePeers(String taskType) {
@@ -1157,6 +1240,16 @@ public class TaskScheduler implements Runnable {
             this.response = response;
             this.success = success;
             this.reason = reason;
+        }
+    }
+
+    private record LeaseExpiryResult(boolean handled, String jobFailureReason) {
+        private static LeaseExpiryResult notHandled() {
+            return new LeaseExpiryResult(false, null);
+        }
+
+        private static LeaseExpiryResult handled(String jobFailureReason) {
+            return new LeaseExpiryResult(true, jobFailureReason);
         }
     }
 }
