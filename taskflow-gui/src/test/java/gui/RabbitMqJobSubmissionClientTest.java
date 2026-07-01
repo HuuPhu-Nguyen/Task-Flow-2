@@ -24,6 +24,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqJobSubmissionClientTest {
     @Test
+    void newJobIdIncludesSanitizedPeerIdAndFullUuid() {
+        RabbitMqJobSubmissionClient client = new RabbitMqJobSubmissionClient(
+                "gui peer/1",
+                new RecordingRequesterTokenStore());
+
+        String jobId = client.newJobId();
+
+        assertTrue(jobId.matches(
+                "JOB_gui_peer_1_\\d+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
+    }
+
+    @Test
     void publishesSignedJobSubmitWithRequesterToken() {
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         RecordingRequesterTokenStore tokenStore = new RecordingRequesterTokenStore();

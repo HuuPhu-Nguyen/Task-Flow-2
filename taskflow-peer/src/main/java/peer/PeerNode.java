@@ -9,7 +9,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.google.gson.Gson;
@@ -28,6 +27,17 @@ public class PeerNode {
 
     private final Set<String> myActiveJobIds = ConcurrentHashMap.newKeySet();
     private static final String TRANSPORT_ENV = "TASKFLOW_TRANSPORT";
+    private static final String TCP_PEER_ID_PREFIX = "TCP_PEER";
+
+    private final String nodeId;
+
+    public PeerNode() {
+        this(PeerIdentity.configuredOrGenerated(TCP_PEER_ID_PREFIX));
+    }
+
+    PeerNode(String nodeId) {
+        this.nodeId = PeerIdentity.require(nodeId);
+    }
 
     public static void main(String[] args) throws Exception {
         if (isRabbitMqTransportSelected()) {
@@ -42,26 +52,34 @@ public class PeerNode {
         String host = args[0];
         int port = Integer.parseInt(args[1]);
 
-        PeerExecutionEngine engine = new PeerExecutionEngine("PEER");
-        runTcpPeer(host, port, engine);
+        String nodeId = PeerIdentity.configuredOrGenerated(TCP_PEER_ID_PREFIX);
+        PeerExecutionEngine engine = new PeerExecutionEngine(nodeId);
+        runTcpPeer(host, port, engine, nodeId);
     }
 
     static void runTcpPeer(String host, int port, PeerExecutionEngine engine) {
+        runTcpPeer(host, port, engine, engine.nodeId());
+    }
+
+    static void runTcpPeer(String host, int port, PeerExecutionEngine engine, String nodeId) {
         Objects.requireNonNull(engine, "engine");
+        String peerId = PeerIdentity.require(nodeId);
         Gson gson = new Gson();
 
-        LOGGER.info("event=peer_processors_registered task_types={}", engine.getRegisteredTaskTypes());
+        LOGGER.info("event=peer_processors_registered peer_id={} task_types={}",
+                peerId, engine.getRegisteredTaskTypes());
 
         MessageFactory factory = createFactory(gson);
 
-        LOGGER.info("event=peer_connecting host={} port={}", host, port);
+        LOGGER.info("event=peer_connecting peer_id={} host={} port={}", peerId, host, port);
 
         try (Socket socket = new Socket(host, port);
              PrintWriter out = new PrintWriter(socket.getOutputStream(), true);
              BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
-            MessageDispatcher dispatcher = createDispatcher(engine, out);
+            MessageDispatcher dispatcher = createDispatcher(peerId, engine, out);
 
-            LOGGER.info("event=peer_connected local_address={}", socket.getLocalSocketAddress());
+            LOGGER.info("event=peer_connected peer_id={} local_address={}",
+                    peerId, socket.getLocalSocketAddress());
 
             String incomingJson;
             while ((incomingJson = in.readLine()) != null) {
@@ -91,13 +109,13 @@ public class PeerNode {
     }
 
     public String submitJob(String taskType, List<?> payloads, String parameter, PrintWriter out) {
-        String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String jobId = JobIds.newJobId(nodeId);
         RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
         String requesterToken = RequesterTokens.newToken();
         String time = java.time.Instant.now().toString();
         String signature = RequesterIdentity.signJobSubmit(
                 identity.privateKey(),
-                "CLIENT",
+                nodeId,
                 time,
                 jobId,
                 taskType,
@@ -108,7 +126,7 @@ public class PeerNode {
         List<Object> taskPayloads = payloads == null ? List.of() : new ArrayList<>(payloads);
 
         JobSubmitMessage msg = new JobSubmitMessage(
-                "CLIENT",
+                nodeId,
                 time,
                 jobId,
                 taskType,
@@ -136,10 +154,10 @@ public class PeerNode {
         return factory;
     }
 
-    private static MessageDispatcher createDispatcher(PeerExecutionEngine engine, PrintWriter out) {
+    private static MessageDispatcher createDispatcher(String nodeId, PeerExecutionEngine engine, PrintWriter out) {
         MessageDispatcher dispatcher = new MessageDispatcher();
         // Static handler for immediate responses (PING)
-        dispatcher.register(MessageType.PING, new PingHandler(() -> engine.getRegisteredTaskTypes()));
+        dispatcher.register(MessageType.PING, new PingHandler(nodeId, () -> engine.getRegisteredTaskTypes()));
         // TASK_ASSIGN -> Background Engine
         // prevents the networking thread from blocking during task execution
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) -> {

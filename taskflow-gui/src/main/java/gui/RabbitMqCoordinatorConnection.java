@@ -4,6 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
 import protocol.Message;
+import protocol.PeerIdentity;
 import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
@@ -62,7 +63,7 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
         if (peerId == null || peerId.isBlank()) {
             throw new IllegalArgumentException("peerId is required.");
         }
-        this.peerId = peerId;
+        this.peerId = PeerIdentity.require(peerId);
         this.host = Objects.requireNonNull(host, "host");
         this.port = port;
         this.workerRuntime = Objects.requireNonNull(workerRuntime, "workerRuntime");

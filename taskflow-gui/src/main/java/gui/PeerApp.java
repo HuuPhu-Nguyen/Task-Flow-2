@@ -15,7 +15,7 @@ import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
-import transport.rabbitmq.RabbitMqRuntimeDefaults;
+import protocol.PeerIdentity;
 
 import java.io.*;
 import java.nio.file.*;
@@ -50,9 +50,7 @@ public class PeerApp extends Application {
             // Generate unique folders for this GUI instance
             this.sessionId = "PEER_" + (System.currentTimeMillis() % 100000);
             this.transportMode = GuiTransportMode.fromEnvironment();
-            this.peerNodeId = transportMode == GuiTransportMode.RABBITMQ
-                    ? resolveRabbitMqPeerId(sessionId)
-                    : sessionId;
+            this.peerNodeId = PeerIdentity.configuredOrGenerated("GUI_PEER");
             inputStagingService = GuiInputStagingService.forSession(sessionId);
             inputStagingService.prepareDirectories();
 
@@ -66,7 +64,10 @@ public class PeerApp extends Application {
                                 new RabbitMqCoordinatorConnection(peerNodeId, host, port, runtime, listener));
             } else {
                 jobSubmissionClient = new TcpJobSubmissionClient(peerNodeId, tokenStore);
-                connectionService = new GuiCoordinatorConnectionService(workerRuntime);
+                connectionService = new GuiCoordinatorConnectionService(
+                        workerRuntime,
+                        (host, port, runtime, listener) ->
+                                new TcpCoordinatorConnection(peerNodeId, host, port, runtime, listener));
             }
             jobSubmissionService = new GuiJobSubmissionService(jobSubmissionClient, myActiveJobIds);
             LOGGER.info("event=gui_processors_registered transport={} peer_id={} task_types={}",
@@ -460,14 +461,6 @@ public class PeerApp extends Application {
 
     public static void main(String[] args) {
         launch(args);
-    }
-
-    private static String resolveRabbitMqPeerId(String fallback) {
-        String configured = System.getenv(RabbitMqRuntimeDefaults.PEER_ID_ENV);
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
-        }
-        return fallback;
     }
 
 }

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import protocol.PeerIdentity;
 import protocol.TaskResultMessage;
 import protocol.TaskAssignMessage;
 import java.io.PrintWriter;
@@ -22,8 +23,12 @@ public class PeerExecutionEngine implements AutoCloseable {
     private final Map<String, TaskProcessor<?>> processors = new ConcurrentHashMap<>();
 
     public PeerExecutionEngine(String nodeId) {
-        this.nodeId = nodeId;
+        this.nodeId = PeerIdentity.require(nodeId);
         registerDiscoveredProcessors();
+    }
+
+    public String nodeId() {
+        return nodeId;
     }
 
     public void registerProcessor(String type, TaskProcessor<?> processor) {

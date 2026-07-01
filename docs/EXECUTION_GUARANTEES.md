@@ -10,6 +10,11 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## Job Submission Validation
 
+- GUI and command-line submitters generate peer-scoped job IDs with the
+  sanitized submitting peer ID, a timestamp, and a full UUID suffix.
+- The scheduler rejects duplicate submitted job IDs that are already active.
+  When persistence is enabled, it also rejects IDs already present in persisted
+  job history.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, and invalid Base64 file data.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work.
@@ -17,12 +22,17 @@ This document defines the current runtime guarantees of TaskFlow.
 ## Peer Submitter and Result Handling
 
 - Peers may combine submitter, executor, and result-handler capabilities depending on their runtime profile and transport.
+- TCP, RabbitMQ, command-line peers, and JavaFX GUI peers use explicit sanitized peer IDs. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
+- TCP coordinator registration uses the peer-declared ID from heartbeat or first peer message, not the server-side socket address. Active duplicate TCP peer IDs are rejected without replacing the existing peer.
+- Current RabbitMQ peer routes are keyed by peer ID; duplicate active RabbitMQ peers with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
+- When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Live sockets, connection handles, broker consumers, and channels are not persisted.
 - Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.saveResults(...)` in the JavaFX GUI and the RabbitMQ command-line submitter.
 - The JavaFX GUI is the supported peer UI for TCP submit, execute, receive-result, and save-result behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
 - The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
 - `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
+- `docs/PEER_IDENTITY.md` records the peer identity contract, sanitization, duplicate-ID behavior, and generated fallback limits.
 
 ## Runtime Direction
 
@@ -133,6 +143,7 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Schema version 2 stores job parameters plus task payload/result snapshots used for startup recovery.
 - Schema version 3 stores requester token hashes used to authorize result requests across reconnects.
 - Schema version 4 stores requester identity public keys used to require signed result requests for identity-bound jobs.
+- Schema version 5 stores peer registry metadata for last-known peer state across coordinator restart.
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, and resets assigned tasks to `PENDING` because leases are not implemented.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
@@ -146,7 +157,10 @@ The SQLite state store also guards these persisted transitions so terminal task/
 ## Heartbeat and Peer Liveness
 
 - Coordinator sends periodic `PING` and expects `PONG`.
-- Missing heartbeats beyond timeout mark the peer stale and it is removed.
+- TCP peers answer `PING` with their explicit peer ID and supported task types.
+- Missing heartbeats beyond timeout mark the peer stale, remove it from the
+  live registry, and persist a disconnected last-known peer status when the
+  peer registry store is available.
 
 ## Core Scheduler Metrics
 

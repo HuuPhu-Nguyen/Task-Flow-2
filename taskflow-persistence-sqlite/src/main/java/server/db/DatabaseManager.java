@@ -3,21 +3,28 @@ package server.db;
 import com.google.gson.Gson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import server.registry.PeerMetricsSnapshot;
+import server.registry.PeerRegistryRecord;
+import server.registry.PeerRegistryStore;
+import server.registry.PeerStatus;
+import server.registry.PeerTransport;
 
 import java.sql.*;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
-public class DatabaseManager implements JobStateStore {
+public class DatabaseManager implements JobStateStore, PeerRegistryStore {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 4;
+    public static final int CURRENT_SCHEMA_VERSION = 5;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -74,6 +81,7 @@ public class DatabaseManager implements JobStateStore {
             } else {
                 createTasksTable();
             }
+            createPeerRegistryTable();
 
             writeSchemaVersion(CURRENT_SCHEMA_VERSION);
             validateCurrentSchema();
@@ -132,6 +140,27 @@ public class DatabaseManager implements JobStateStore {
                     payload_json     TEXT,
                     result_payload_json TEXT,
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+                )
+            """);
+        }
+    }
+
+    private void createPeerRegistryTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS peer_registry (
+                    peer_id                   TEXT    PRIMARY KEY,
+                    runtime_type              TEXT    NOT NULL DEFAULT 'PEER',
+                    transport                 TEXT    NOT NULL DEFAULT 'UNKNOWN',
+                    supported_task_types_json TEXT    NOT NULL DEFAULT '[]',
+                    first_seen_at             INTEGER NOT NULL,
+                    last_heartbeat_at         INTEGER NOT NULL DEFAULT 0,
+                    last_disconnected_at      INTEGER NOT NULL DEFAULT 0,
+                    status                    TEXT    NOT NULL,
+                    completed_tasks           INTEGER NOT NULL DEFAULT 0,
+                    failed_tasks              INTEGER NOT NULL DEFAULT 0,
+                    latency_ewma_ms           INTEGER NOT NULL DEFAULT 0,
+                    task_duration_ewma_ms     INTEGER NOT NULL DEFAULT 0
                 )
             """);
         }
@@ -317,6 +346,22 @@ public class DatabaseManager implements JobStateStore {
         if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
         }
+        if (!tableExists("peer_registry")) {
+            throw new SQLException("Database schema is missing peer_registry table.");
+        }
+        if (!columnExists("peer_registry", "runtime_type")
+                || !columnExists("peer_registry", "transport")
+                || !columnExists("peer_registry", "supported_task_types_json")
+                || !columnExists("peer_registry", "first_seen_at")
+                || !columnExists("peer_registry", "last_heartbeat_at")
+                || !columnExists("peer_registry", "last_disconnected_at")
+                || !columnExists("peer_registry", "status")
+                || !columnExists("peer_registry", "completed_tasks")
+                || !columnExists("peer_registry", "failed_tasks")
+                || !columnExists("peer_registry", "latency_ewma_ms")
+                || !columnExists("peer_registry", "task_duration_ewma_ms")) {
+            throw new SQLException("Database schema is missing peer registry metadata columns.");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -447,6 +492,23 @@ public class DatabaseManager implements JobStateStore {
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             logSqlFailure("insertTask", e);
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized boolean hasJob(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return false;
+        }
+        String sql = "SELECT 1 FROM jobs WHERE job_id=? LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            logSqlFailure("hasJob", e);
             return false;
         }
     }
@@ -771,6 +833,100 @@ public class DatabaseManager implements JobStateStore {
         return tasks;
     }
 
+    @Override
+    public synchronized boolean upsertPeerRecord(PeerRegistryRecord record) {
+        if (record == null) {
+            return false;
+        }
+        String sql = """
+                INSERT INTO peer_registry(
+                    peer_id,
+                    runtime_type,
+                    transport,
+                    supported_task_types_json,
+                    first_seen_at,
+                    last_heartbeat_at,
+                    last_disconnected_at,
+                    status,
+                    completed_tasks,
+                    failed_tasks,
+                    latency_ewma_ms,
+                    task_duration_ewma_ms
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(peer_id) DO UPDATE SET
+                    runtime_type=excluded.runtime_type,
+                    transport=excluded.transport,
+                    supported_task_types_json=excluded.supported_task_types_json,
+                    first_seen_at=CASE
+                        WHEN peer_registry.first_seen_at > 0 THEN peer_registry.first_seen_at
+                        ELSE excluded.first_seen_at
+                    END,
+                    last_heartbeat_at=MAX(peer_registry.last_heartbeat_at, excluded.last_heartbeat_at),
+                    last_disconnected_at=CASE
+                        WHEN excluded.last_disconnected_at > 0 THEN excluded.last_disconnected_at
+                        ELSE peer_registry.last_disconnected_at
+                    END,
+                    status=excluded.status,
+                    completed_tasks=excluded.completed_tasks,
+                    failed_tasks=excluded.failed_tasks,
+                    latency_ewma_ms=excluded.latency_ewma_ms,
+                    task_duration_ewma_ms=excluded.task_duration_ewma_ms
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            bindPeerRecord(ps, record);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            logSqlFailure("upsertPeerRecord", e);
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized List<PeerRegistryRecord> loadPeerRecords() {
+        List<PeerRegistryRecord> peers = new ArrayList<>();
+        String sql = """
+                SELECT
+                    peer_id,
+                    runtime_type,
+                    transport,
+                    supported_task_types_json,
+                    first_seen_at,
+                    last_heartbeat_at,
+                    last_disconnected_at,
+                    status,
+                    completed_tasks,
+                    failed_tasks,
+                    latency_ewma_ms,
+                    task_duration_ewma_ms
+                FROM peer_registry
+                ORDER BY first_seen_at ASC, peer_id ASC
+                """;
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                peers.add(new PeerRegistryRecord(
+                        rs.getString("peer_id"),
+                        rs.getString("runtime_type"),
+                        peerTransportFromDb(rs.getString("transport")),
+                        taskTypesFromJson(rs.getString("supported_task_types_json")),
+                        rs.getLong("first_seen_at"),
+                        rs.getLong("last_heartbeat_at"),
+                        rs.getLong("last_disconnected_at"),
+                        peerStatusFromDb(rs.getString("status")),
+                        new PeerMetricsSnapshot(
+                                rs.getLong("completed_tasks"),
+                                rs.getLong("failed_tasks"),
+                                rs.getLong("latency_ewma_ms"),
+                                rs.getLong("task_duration_ewma_ms")
+                        )
+                ));
+            }
+        } catch (SQLException e) {
+            logSqlFailure("loadPeerRecords", e);
+        }
+        return peers;
+    }
+
     // -------------------------------------------------------------------------
     // Read methods (called from GUI process via its own connection)
     // -------------------------------------------------------------------------
@@ -826,6 +982,65 @@ public class DatabaseManager implements JobStateStore {
 
     private static void logSqlFailure(String operation, SQLException e) {
         LOGGER.warn("event=db_operation_failed operation={} error={}", operation, e.getMessage(), e);
+    }
+
+    private static void bindPeerRecord(PreparedStatement ps, PeerRegistryRecord record) throws SQLException {
+        PeerMetricsSnapshot metrics = record.metricsSnapshot();
+        ps.setString(1, record.peerId());
+        ps.setString(2, record.runtimeType());
+        ps.setString(3, record.transport().name());
+        ps.setString(4, taskTypesToJson(record.supportedTaskTypes()));
+        ps.setLong(5, record.firstSeenAtMillis());
+        ps.setLong(6, record.lastHeartbeatAtMillis());
+        ps.setLong(7, record.lastDisconnectedAtMillis());
+        ps.setString(8, record.status().name());
+        ps.setLong(9, metrics.completedTasks());
+        ps.setLong(10, metrics.failedTasks());
+        ps.setLong(11, metrics.latencyEwmaMs());
+        ps.setLong(12, metrics.taskDurationEwmaMs());
+    }
+
+    private static String taskTypesToJson(Collection<String> taskTypes) {
+        List<String> normalized = PeerRegistryRecord.normalizeTaskTypes(taskTypes).stream()
+                .sorted()
+                .toList();
+        return GSON.toJson(normalized);
+    }
+
+    private static Set<String> taskTypesFromJson(String json) {
+        if (json == null || json.isBlank()) {
+            return Set.of();
+        }
+        try {
+            String[] values = GSON.fromJson(json, String[].class);
+            return values == null
+                    ? Set.of()
+                    : PeerRegistryRecord.normalizeTaskTypes(Arrays.asList(values));
+        } catch (RuntimeException ignored) {
+            return Set.of();
+        }
+    }
+
+    private static PeerTransport peerTransportFromDb(String value) {
+        if (value == null || value.isBlank()) {
+            return PeerTransport.UNKNOWN;
+        }
+        try {
+            return PeerTransport.valueOf(value);
+        } catch (IllegalArgumentException ignored) {
+            return PeerTransport.UNKNOWN;
+        }
+    }
+
+    private static PeerStatus peerStatusFromDb(String value) {
+        if (value == null || value.isBlank()) {
+            return PeerStatus.DISCONNECTED;
+        }
+        try {
+            return PeerStatus.valueOf(value);
+        } catch (IllegalArgumentException ignored) {
+            return PeerStatus.DISCONNECTED;
+        }
     }
 
     private static String toJson(Object payload) {

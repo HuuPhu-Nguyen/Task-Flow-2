@@ -5,9 +5,11 @@ import org.junit.jupiter.api.Test;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PeerDisconnectedMessage;
+import protocol.PongMessage;
 import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
+import server.registry.PeerInfo;
 import server.scheduler.SchedulerConfig;
 
 import java.io.BufferedReader;
@@ -17,6 +19,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -26,11 +29,84 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PeerHandlerTest {
     private final Gson gson = new Gson();
+
+    @Test
+    void tcpHandshakeRegistersExplicitPeerIdFromPong() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new ArrayBlockingQueue<>(10);
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        Thread handlerThread = null;
+
+        try (ServerSocket server = new ServerSocket(0);
+             Socket client = new Socket("localhost", server.getLocalPort());
+             Socket accepted = server.accept();
+             BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+             PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+            client.setSoTimeout(2_000);
+            handlerThread = new Thread(
+                    new PeerHandler(accepted, registry, mailbox, SchedulerConfig.defaults()),
+                    "peer-handler-explicit-id-test");
+            handlerThread.start();
+
+            assertNotNull(in.readLine());
+            out.println(gson.toJson(new PongMessage(
+                    "peer-explicit",
+                    Instant.EPOCH.toString(),
+                    List.of("text_analysis"))));
+
+            PeerInfo peer = awaitPeer(registry, "peer-explicit");
+            assertNotNull(peer);
+            assertEquals("peer-explicit", peer.getNodeId());
+            assertEquals(Set.of("TEXT_ANALYSIS"), peer.getSupportedTaskTypes());
+        } finally {
+            if (handlerThread != null) {
+                handlerThread.interrupt();
+                handlerThread.join(2_000);
+                assertFalse(handlerThread.isAlive());
+            }
+        }
+    }
+
+    @Test
+    void tcpHandshakeRejectsDuplicatePeerIdWithoutReplacingExistingPeer() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new ArrayBlockingQueue<>(10);
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo existing = new PeerInfo("peer-duplicate");
+        assertTrue(registry.registerIfAbsent("peer-duplicate", existing));
+        Thread handlerThread = null;
+
+        try (ServerSocket server = new ServerSocket(0);
+             Socket client = new Socket("localhost", server.getLocalPort());
+             Socket accepted = server.accept();
+             BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+             PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+            client.setSoTimeout(2_000);
+            handlerThread = new Thread(
+                    new PeerHandler(accepted, registry, mailbox, SchedulerConfig.defaults()),
+                    "peer-handler-duplicate-id-test");
+            handlerThread.start();
+
+            assertNotNull(in.readLine());
+            out.println(gson.toJson(new PongMessage(
+                    "peer-duplicate",
+                    Instant.EPOCH.toString(),
+                    List.of("TEXT_ANALYSIS"))));
+
+            assertNull(in.readLine());
+            assertSame(existing, registry.get("peer-duplicate"));
+        } finally {
+            if (handlerThread != null) {
+                handlerThread.interrupt();
+                handlerThread.join(2_000);
+                assertFalse(handlerThread.isAlive());
+            }
+        }
+    }
 
     @Test
     void tcpJobSubmissionsWaitForSchedulerMailboxCapacity() throws Exception {
@@ -112,5 +188,17 @@ class PeerHandlerTest {
                 assertFalse(handlerThread.isAlive());
             }
         }
+    }
+
+    private PeerInfo awaitPeer(InMemoryPeerRegistry registry, String peerId) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            PeerInfo peer = registry.get(peerId);
+            if (peer != null) {
+                return peer;
+            }
+            Thread.sleep(10);
+        }
+        return registry.get(peerId);
     }
 }

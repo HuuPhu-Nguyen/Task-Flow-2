@@ -14,8 +14,8 @@ RabbitMQ path is completed, documented, and verified.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
 documented as transitional in `docs/RABBITMQ_SCOPE.md` because durable
-outbox/replay, TaskFlow DLQ workflow, stable peer identity, peer-scoped job
-IDs, broker-backed CI, and desktop GUI evidence gates are not complete.
+outbox/replay, TaskFlow DLQ workflow, broker-backed CI, and desktop GUI
+evidence gates are not complete.
 
 ## Rationale
 
@@ -38,6 +38,18 @@ compatibility while the identity, recovery, and operational gaps are closed.
   through TCP by default or RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq`.
 - RabbitMQ is selected explicitly with `TASKFLOW_TRANSPORT=rabbitmq` for the
   coordinator, command-line peer, and JavaFX GUI.
+- TCP and RabbitMQ peers share the explicit peer identity contract in
+  `docs/PEER_IDENTITY.md`: `TASKFLOW_PEER_ID` provides stable configured IDs,
+  generated fallback IDs are runtime-scoped, and TCP no longer uses remote
+  socket addresses as peer IDs.
+- The coordinator persists durable peer registry metadata in SQLite when
+  persistence is available: peer ID, runtime type, transport, capabilities,
+  heartbeat/disconnect times, status, and scheduling metric snapshots. Live
+  connection objects and broker consumers remain in memory only.
+- GUI and command-line submitters generate peer-scoped, collision-resistant job
+  IDs with the sanitized peer ID, a timestamp, and a full UUID. The scheduler
+  rejects duplicate job IDs that are already active or present in persisted job
+  history when persistence is enabled.
 - RabbitMQ command-line peers can register with peer IDs, send heartbeats,
   execute assigned work, submit jobs, receive `JOB_RESULT`, and save successful
   final results through `ClientJobPlugin`.
@@ -59,10 +71,6 @@ runtime, or start TCP deprecation until all of these are complete:
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- Stable peer identity shared by GUI and command-line peers, including
-  configured or locally generated peer IDs and duplicate-ID behavior.
-- Peer-scoped, collision-resistant job IDs used by GUI, command-line submitters,
-  and RabbitMQ submitters.
 - Durable RabbitMQ outbox/replay for coordinator publications, with idempotent
   replay of task assignments and final job results.
 - TaskFlow DLQ inspection, quarantine/discard decisions, and redrive back to the

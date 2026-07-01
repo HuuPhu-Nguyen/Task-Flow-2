@@ -196,6 +196,11 @@ public class TaskScheduler implements Runnable {
                             "Job id is already active: " + submit.getJobId());
                     return;
                 }
+                if (db != null && db.hasJob(submit.getJobId())) {
+                    sendJobStartFailure(envelope.fromNodeId(), submit,
+                            "Job id already exists in persisted history: " + submit.getJobId());
+                    return;
+                }
                 String requesterTokenHash = RequesterTokens.hashToken(submit.getRequesterToken());
                 if (!RequesterTokens.hasTokenHash(requesterTokenHash)) {
                     throw new IllegalArgumentException("Requester token is required.");
@@ -638,6 +643,7 @@ public class TaskScheduler implements Runnable {
         }
         peer.recordTaskSuccess(durationMs);
         peer.decrementTasks();
+        registry.updateMetricsSnapshot(peerId);
     }
 
     private void onAttemptFailure(String peerId, boolean terminalFailure) {
@@ -648,6 +654,7 @@ public class TaskScheduler implements Runnable {
         }
         peer.recordTaskFailure();
         peer.decrementTasks();
+        registry.updateMetricsSnapshot(peerId);
     }
 
     private boolean persistTaskFailure(TaskUnit<?> task, TaskUnit.FailureOutcome outcome) {

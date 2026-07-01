@@ -1,6 +1,8 @@
 package gui;
 
+import protocol.JobIds;
 import protocol.JobSubmitMessage;
+import protocol.PeerIdentity;
 import protocol.RequesterIdentity;
 import transport.OutboundTransportMessage;
 import transport.TransportRoute;
@@ -9,7 +11,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 
 final class RabbitMqJobSubmissionClient implements JobSubmissionClient {
     private final String nodeId;
@@ -23,14 +24,13 @@ final class RabbitMqJobSubmissionClient implements JobSubmissionClient {
         if (nodeId == null || nodeId.isBlank()) {
             throw new IllegalArgumentException("nodeId is required.");
         }
-        this.nodeId = nodeId;
+        this.nodeId = PeerIdentity.require(nodeId);
         this.requesterTokenStore = Objects.requireNonNull(requesterTokenStore, "requesterTokenStore");
     }
 
     @Override
     public String newJobId() {
-        return "JOB_" + System.currentTimeMillis() + "_"
-                + UUID.randomUUID().toString().substring(0, 8);
+        return JobIds.newJobId(nodeId);
     }
 
     @Override

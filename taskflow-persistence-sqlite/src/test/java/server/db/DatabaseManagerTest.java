@@ -3,6 +3,10 @@ package server.db;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import protocol.RequesterTokens;
+import server.registry.PeerMetricsSnapshot;
+import server.registry.PeerRegistryRecord;
+import server.registry.PeerStatus;
+import server.registry.PeerTransport;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -11,6 +15,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.ResultSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -36,6 +41,8 @@ class DatabaseManagerTest {
             db.markJobCompleted("job-1");
 
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
+            assertTrue(db.hasJob("job-1"));
+            assertFalse(db.hasJob("missing-job"));
 
             List<DatabaseManager.JobRecord> jobs = db.getJobHistory();
             assertEquals(1, jobs.size());
@@ -59,6 +66,209 @@ class DatabaseManagerTest {
             assertEquals(0, task.retryCount());
         } finally {
             db.close();
+        }
+    }
+
+    @Test
+    void persistsPeerRegistryMetadataAcrossRestart() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-peer-registry-restart-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "TCP_PEER",
+                    PeerTransport.TCP,
+                    Set.of("image_conversion", "text_analysis"),
+                    100L,
+                    150L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    new PeerMetricsSnapshot(2L, 1L, 30L, 250L)
+            )));
+        } finally {
+            db.close();
+        }
+
+        DatabaseManager reopened = new DatabaseManager(dbPath.toString());
+        try {
+            List<PeerRegistryRecord> peers = reopened.loadPeerRecords();
+            assertEquals(1, peers.size());
+            PeerRegistryRecord peer = peers.getFirst();
+            assertEquals("peer-1", peer.peerId());
+            assertEquals("TCP_PEER", peer.runtimeType());
+            assertEquals(PeerTransport.TCP, peer.transport());
+            assertEquals(Set.of("IMAGE_CONVERSION", "TEXT_ANALYSIS"), peer.supportedTaskTypes());
+            assertEquals(100L, peer.firstSeenAtMillis());
+            assertEquals(150L, peer.lastHeartbeatAtMillis());
+            assertEquals(0L, peer.lastDisconnectedAtMillis());
+            assertEquals(PeerStatus.CONNECTED, peer.status());
+            assertEquals(new PeerMetricsSnapshot(2L, 1L, 30L, 250L), peer.metricsSnapshot());
+        } finally {
+            reopened.close();
+        }
+    }
+
+    @Test
+    void peerRegistryUpsertPreservesFirstSeenAndUpdatesHeartbeatCapabilities() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-peer-registry-heartbeat-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "TCP_PEER",
+                    PeerTransport.TCP,
+                    Set.of("image_conversion"),
+                    100L,
+                    150L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    PeerMetricsSnapshot.empty()
+            )));
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "TCP_PEER",
+                    PeerTransport.TCP,
+                    Set.of("text_analysis"),
+                    999L,
+                    300L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    new PeerMetricsSnapshot(4L, 0L, 45L, 500L)
+            )));
+
+            PeerRegistryRecord peer = db.loadPeerRecords().getFirst();
+            assertEquals(100L, peer.firstSeenAtMillis());
+            assertEquals(300L, peer.lastHeartbeatAtMillis());
+            assertEquals(Set.of("TEXT_ANALYSIS"), peer.supportedTaskTypes());
+            assertEquals(PeerStatus.CONNECTED, peer.status());
+            assertEquals(new PeerMetricsSnapshot(4L, 0L, 45L, 500L), peer.metricsSnapshot());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void peerRegistryUpsertMarksPeerDisconnected() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-peer-registry-disconnect-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
+                    Set.of("image_conversion"),
+                    100L,
+                    200L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    PeerMetricsSnapshot.empty()
+            )));
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
+                    Set.of("image_conversion"),
+                    100L,
+                    200L,
+                    450L,
+                    PeerStatus.DISCONNECTED,
+                    new PeerMetricsSnapshot(1L, 1L, 25L, 120L)
+            )));
+
+            PeerRegistryRecord peer = db.loadPeerRecords().getFirst();
+            assertEquals(PeerStatus.DISCONNECTED, peer.status());
+            assertEquals(450L, peer.lastDisconnectedAtMillis());
+            assertEquals(200L, peer.lastHeartbeatAtMillis());
+            assertEquals(new PeerMetricsSnapshot(1L, 1L, 25L, 120L), peer.metricsSnapshot());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void peerRegistryDuplicatePeerIdUpdatesSingleDurableRecord() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-peer-registry-duplicate-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "TCP_PEER",
+                    PeerTransport.TCP,
+                    Set.of("image_conversion"),
+                    100L,
+                    150L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    PeerMetricsSnapshot.empty()
+            )));
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-1",
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
+                    Set.of("text_analysis"),
+                    50L,
+                    175L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    PeerMetricsSnapshot.empty()
+            )));
+
+            List<PeerRegistryRecord> peers = db.loadPeerRecords();
+            assertEquals(1, peers.size());
+            PeerRegistryRecord peer = peers.getFirst();
+            assertEquals("peer-1", peer.peerId());
+            assertEquals(100L, peer.firstSeenAtMillis());
+            assertEquals(PeerTransport.RABBITMQ, peer.transport());
+            assertEquals(Set.of("TEXT_ANALYSIS"), peer.supportedTaskTypes());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void peerRegistryMetadataCoexistsWithTaskRetryHistoryRows() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-peer-registry-task-state-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
+                    "peer-lease",
+                    "TCP_PEER",
+                    PeerTransport.TCP,
+                    Set.of("test_task"),
+                    100L,
+                    150L,
+                    0L,
+                    PeerStatus.CONNECTED,
+                    PeerMetricsSnapshot.empty()
+            )));
+            db.insertJob("job-retry", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-retry", "job-retry");
+            assertTrue(db.markTaskAssigned("task-retry", "peer-lease", 200L));
+            assertTrue(db.markTaskRetried("task-retry", 1));
+        } finally {
+            db.close();
+        }
+
+        DatabaseManager reopened = new DatabaseManager(dbPath.toString());
+        try {
+            List<PeerRegistryRecord> peers = reopened.loadPeerRecords();
+            assertEquals(1, peers.size());
+            assertEquals("peer-lease", peers.getFirst().peerId());
+            assertEquals(PeerStatus.CONNECTED, peers.getFirst().status());
+
+            List<DatabaseManager.TaskRecord> tasks = reopened.getTasksForJob("job-retry");
+            assertEquals(1, tasks.size());
+            DatabaseManager.TaskRecord task = tasks.getFirst();
+            assertEquals("PENDING", task.status());
+            assertNull(task.assignedPeerId());
+            assertEquals(1, task.retryCount());
+        } finally {
+            reopened.close();
         }
     }
 

@@ -39,7 +39,7 @@ class PeerNodeTest {
 
     @Test
     void submitJobWritesJobSubmitMessage() {
-        PeerNode node = new PeerNode();
+        PeerNode node = new PeerNode("peer-submit");
         StringWriter buffer = new StringWriter();
         PrintWriter out = new PrintWriter(buffer);
 
@@ -47,15 +47,18 @@ class PeerNodeTest {
 
         String json = buffer.toString();
         assertFalse(jobId.isBlank());
+        assertTrue(jobId.matches(
+                "JOB_peer-submit_\\d+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
         assertTrue(json.contains("\"type\":\"JOB_SUBMIT\""));
         assertTrue(json.contains("\"jobId\":\"" + jobId + "\""));
+        assertTrue(json.contains("\"nodeId\":\"peer-submit\""));
         assertTrue(json.contains("\"taskType\":\"TEXT_ANALYSIS\""));
         assertTrue(RequesterIdentity.verifyJobSubmit(new Gson().fromJson(json, JobSubmitMessage.class)));
     }
 
     @Test
     void submitJobFailsFastWhenMessageCannotBeWritten() {
-        PeerNode node = new PeerNode();
+        PeerNode node = new PeerNode("peer-submit");
         PrintWriter out = new PrintWriter(new FailingWriter());
 
         assertThrows(IllegalStateException.class,
@@ -105,6 +108,8 @@ class PeerNodeTest {
         );
 
         assertFalse(jobId.isBlank());
+        assertTrue(jobId.matches(
+                "JOB_peer-submit_\\d+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
         assertEquals(List.of(Path.of("notes-one.txt"), Path.of("notes-two.txt")), plugin.inputPaths);
         assertEquals("CSV", plugin.parameter);
         assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());

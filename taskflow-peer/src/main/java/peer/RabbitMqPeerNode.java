@@ -6,8 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import peer.engine.PeerExecutionEngine;
 import protocol.JobResultMessage;
+import protocol.JobIds;
 import protocol.JobSubmitMessage;
 import protocol.Message;
+import protocol.PeerIdentity;
 import protocol.PongMessage;
 import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
@@ -28,7 +30,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -196,7 +197,7 @@ public class RabbitMqPeerNode {
         }
         List<Object> payloads = plugin.buildPayloads(inputPaths, parameter);
 
-        String jobId = "JOB_" + System.currentTimeMillis() + "_" + UUID.randomUUID().toString().substring(0, 8);
+        String jobId = JobIds.newJobId(nodeId);
         RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
         String requesterToken = RequesterTokens.newToken();
         String time = Instant.now().toString();
@@ -301,11 +302,7 @@ public class RabbitMqPeerNode {
     }
 
     private static String resolveNodeId() {
-        String configured = System.getenv(RabbitMqRuntimeDefaults.PEER_ID_ENV);
-        if (configured != null && !configured.isBlank()) {
-            return configured.trim();
-        }
-        return RabbitMqRuntimeDefaults.PEER_ID_PREFIX + "_" + UUID.randomUUID().toString().substring(0, 8);
+        return PeerIdentity.configuredOrGenerated(RabbitMqRuntimeDefaults.PEER_ID_PREFIX);
     }
 
     private static boolean isSubmitCommand(String[] args) {

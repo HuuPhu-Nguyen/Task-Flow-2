@@ -2,6 +2,7 @@ package server.registry;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import protocol.PeerIdentity;
 import server.scheduler.SchedulerConfig;
 import transport.TransportConnection;
 
@@ -18,8 +19,11 @@ public class PeerInfo {
     private final String nodeId;
     private final TransportConnection connection;
     private final SchedulerConfig config;
+    private final PeerTransport transport;
+    private final String runtimeType;
     private volatile Set<String> supportedTaskTypes;
 
+    private final long firstSeenAtMillis;
     private final AtomicLong lastHeartbeatReceivedAtMillis;
     private final AtomicInteger activeTasks = new AtomicInteger(0);
 
@@ -52,11 +56,38 @@ public class PeerInfo {
                     TransportConnection connection,
                     SchedulerConfig config,
                     Collection<String> supportedTaskTypes) {
-        this.nodeId = nodeId;
+        this(nodeId, connection, config, supportedTaskTypes, PeerTransport.UNKNOWN);
+    }
+
+    public PeerInfo(String nodeId,
+                    SchedulerConfig config,
+                    Collection<String> supportedTaskTypes,
+                    PeerTransport transport) {
+        this(nodeId, new NoopTransportConnection(nodeId), config, supportedTaskTypes, transport);
+    }
+
+    public PeerInfo(String nodeId,
+                    TransportConnection connection,
+                    SchedulerConfig config,
+                    Collection<String> supportedTaskTypes,
+                    PeerTransport transport) {
+        this(nodeId, connection, config, supportedTaskTypes, transport, null);
+    }
+
+    public PeerInfo(String nodeId,
+                    TransportConnection connection,
+                    SchedulerConfig config,
+                    Collection<String> supportedTaskTypes,
+                    PeerTransport transport,
+                    String runtimeType) {
+        this.nodeId = PeerIdentity.require(nodeId);
         this.connection = connection;
         this.config = config == null ? SchedulerConfig.defaults() : config;
+        this.transport = transport == null ? PeerTransport.UNKNOWN : transport;
+        this.runtimeType = normalizeRuntimeType(runtimeType, this.transport);
         this.supportedTaskTypes = normalizeTaskTypes(supportedTaskTypes);
-        this.lastHeartbeatReceivedAtMillis = new AtomicLong(System.currentTimeMillis());
+        this.firstSeenAtMillis = System.currentTimeMillis();
+        this.lastHeartbeatReceivedAtMillis = new AtomicLong(firstSeenAtMillis);
     }
 
     public boolean send(protocol.Message message) {
@@ -84,6 +115,12 @@ public class PeerInfo {
     public long getLastHeartbeatReceivedAtMillis() {return lastHeartbeatReceivedAtMillis.get();}
 
     public void updateHeartbeatReceivedNow() {lastHeartbeatReceivedAtMillis.set(System.currentTimeMillis());}
+
+    public long getFirstSeenAtMillis() {return firstSeenAtMillis;}
+
+    public PeerTransport getTransport() {return transport;}
+
+    public String getRuntimeType() {return runtimeType;}
 
     public int getActiveTasks() {return activeTasks.get();}
 
@@ -132,6 +169,15 @@ public class PeerInfo {
     public long getFailedTasks() { return failedTasks.get(); }
     public long getCompletedTasks() { return completedTasks.get(); }
 
+    public PeerMetricsSnapshot metricsSnapshot() {
+        return new PeerMetricsSnapshot(
+                completedTasks.get(),
+                failedTasks.get(),
+                latencyEwmaMs,
+                taskDurationEwmaMs
+        );
+    }
+
     public double getSelectionScore() {
         double loadScore = activeTasks.get() / (double) config.maxTasksPerPeer();
         double latencyScore = normalize(latencyEwmaMs, config.peerScoreLatencyBaselineMillis());
@@ -176,11 +222,22 @@ public class PeerInfo {
         return taskType.trim().toUpperCase(Locale.ROOT);
     }
 
+    private static String normalizeRuntimeType(String runtimeType, PeerTransport transport) {
+        if (runtimeType != null && !runtimeType.isBlank()) {
+            return runtimeType.trim();
+        }
+        return switch (transport == null ? PeerTransport.UNKNOWN : transport) {
+            case TCP -> "TCP_PEER";
+            case RABBITMQ -> "RABBITMQ_PEER";
+            case UNKNOWN -> "PEER";
+        };
+    }
+
     private static class NoopTransportConnection implements TransportConnection {
         private final String nodeId;
 
         NoopTransportConnection(String nodeId) {
-            this.nodeId = nodeId;
+            this.nodeId = PeerIdentity.require(nodeId);
         }
 
         @Override

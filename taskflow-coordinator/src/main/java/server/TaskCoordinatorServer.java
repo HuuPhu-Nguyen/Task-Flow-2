@@ -44,7 +44,6 @@ public class TaskCoordinatorServer {
 
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
-        PeerRegistry registry = new InMemoryPeerRegistry();
 
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
@@ -73,6 +72,7 @@ public class TaskCoordinatorServer {
                     DatabaseManager.DB_PATH, e.getMessage(), e);
         }
 
+        PeerRegistry registry = new InMemoryPeerRegistry(db);
         TaskScheduler schedulerLogic = new TaskScheduler(
                 inboundMailbox,
                 registry,

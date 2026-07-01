@@ -137,6 +137,36 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
+    void persistedJobIdCollisionReturnsFailureWithoutStartupWrite() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.addExistingJobId("job-persisted-duplicate");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-persisted-duplicate-job-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-persisted-duplicate", List.of("payload")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            JobResultMessage result = output.result();
+            assertFalse(result.isSuccessful());
+            assertEquals("job-persisted-duplicate", result.getJobId());
+            assertTrue(result.getErrorMessage().contains("already exists in persisted history"));
+            assertNull(output.task());
+            assertEquals(List.of(), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void assignmentPersistenceFailureReturnsFailureWithoutDispatchingTask() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
@@ -1014,6 +1044,7 @@ class TaskSchedulerPersistenceTest {
         private final CountDownLatch taskAssigned = new CountDownLatch(1);
         private final CountDownLatch jobCompleted = new CountDownLatch(1);
         private final CountDownLatch jobFailed = new CountDownLatch(1);
+        private final java.util.Set<String> existingJobIds = new java.util.LinkedHashSet<>();
         private final boolean jobStartupPersists;
         private final String failingOperation;
         private JobStateStore.CompletedJobResultState completedResult;
@@ -1060,13 +1091,22 @@ class TaskSchedulerPersistenceTest {
                                                        Collection<String> taskIds) {
             events.add("insertJobWithTasks:" + jobId + ":" + taskType + ":" + requesterId + ":"
                     + fileCount + ":" + String.join(",", taskIds));
+            if (jobStartupPersists) {
+                existingJobIds.add(jobId);
+            }
             return jobStartupPersists;
         }
 
         @Override
         public synchronized boolean insertJob(String jobId, String taskType, String requesterId, int fileCount) {
             events.add("insertJob:" + jobId + ":" + taskType + ":" + requesterId + ":" + fileCount);
+            existingJobIds.add(jobId);
             return true;
+        }
+
+        @Override
+        public synchronized boolean hasJob(String jobId) {
+            return existingJobIds.contains(jobId);
         }
 
         @Override
@@ -1156,6 +1196,10 @@ class TaskSchedulerPersistenceTest {
 
         synchronized void setCompletedResult(JobStateStore.CompletedJobResultState completedResult) {
             this.completedResult = completedResult;
+        }
+
+        synchronized void addExistingJobId(String jobId) {
+            existingJobIds.add(jobId);
         }
 
         private boolean succeeds(String operation) {

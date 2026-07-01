@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
 import protocol.Message;
 import protocol.MessageType;
+import protocol.PeerIdentity;
 import protocol.PingMessage;
 import protocol.TaskAssignMessage;
 
@@ -23,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
     private static final Logger LOGGER = LoggerFactory.getLogger(TcpCoordinatorConnection.class);
 
+    private final String peerId;
     private final String host;
     private final int port;
     private final GuiWorkerRuntime workerRuntime;
@@ -39,6 +41,15 @@ final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
                              int port,
                              GuiWorkerRuntime workerRuntime,
                              CoordinatorConnectionListener listener) {
+        this(PeerIdentity.configuredOrGenerated("GUI_PEER"), host, port, workerRuntime, listener);
+    }
+
+    TcpCoordinatorConnection(String peerId,
+                             String host,
+                             int port,
+                             GuiWorkerRuntime workerRuntime,
+                             CoordinatorConnectionListener listener) {
+        this.peerId = PeerIdentity.require(peerId);
         this.host = Objects.requireNonNull(host, "host");
         this.port = port;
         this.workerRuntime = Objects.requireNonNull(workerRuntime, "workerRuntime");
@@ -145,7 +156,7 @@ final class TcpCoordinatorConnection implements StartableCoordinatorConnection {
 
     private MessageDispatcher createDispatcher(PrintWriter out) {
         MessageDispatcher dispatcher = new MessageDispatcher();
-        dispatcher.register(MessageType.PING, new PingHandler(workerRuntime::supportedTaskTypes));
+        dispatcher.register(MessageType.PING, new PingHandler(peerId, workerRuntime::supportedTaskTypes));
         dispatcher.register(MessageType.TASK_ASSIGN, (message, writer) ->
                 workerRuntime.submitTask((TaskAssignMessage) message, out));
         dispatcher.register(MessageType.JOB_RESULT, (message, writer) ->

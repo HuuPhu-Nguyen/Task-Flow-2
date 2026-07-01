@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.PingMessage;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
@@ -35,7 +36,7 @@ class TcpCoordinatorConnectionTest {
 
         try (ServerSocket server = new ServerSocket(0)) {
             TcpCoordinatorConnection connection =
-                    new TcpCoordinatorConnection("localhost", server.getLocalPort(), worker, listener);
+                    new TcpCoordinatorConnection("gui-peer-1", "localhost", server.getLocalPort(), worker, listener);
             connection.start();
 
             try (Socket socket = server.accept();
@@ -48,8 +49,9 @@ class TcpCoordinatorConnectionTest {
 
                 String response = in.readLine();
                 assertNotNull(response);
-                assertTrue(response.contains("\"type\":\"PONG\""));
-                assertTrue(response.contains("TEXT_ANALYSIS"));
+                PongMessage pong = gson.fromJson(response, PongMessage.class);
+                assertEquals("gui-peer-1", pong.getNodeId());
+                assertEquals(List.of("TEXT_ANALYSIS"), pong.getSupportedTaskTypes());
             } finally {
                 connection.close();
             }

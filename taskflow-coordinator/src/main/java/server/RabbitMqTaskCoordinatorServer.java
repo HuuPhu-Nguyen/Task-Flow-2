@@ -3,6 +3,7 @@ package server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
+import protocol.PeerIdentity;
 import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
@@ -13,6 +14,7 @@ import server.rabbitmq.RabbitMqSchedulerOutput;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
+import server.registry.PeerTransport;
 import server.scheduler.SchedulerConfig;
 import server.scheduler.SchedulerMailbox;
 import server.scheduler.TaskScheduler;
@@ -37,7 +39,6 @@ public class RabbitMqTaskCoordinatorServer {
 
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
-        PeerRegistry registry = new InMemoryPeerRegistry();
 
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
@@ -66,6 +67,7 @@ public class RabbitMqTaskCoordinatorServer {
                     DatabaseManager.DB_PATH, e.getMessage(), e);
         }
 
+        PeerRegistry registry = new InMemoryPeerRegistry(db);
         TaskScheduler schedulerLogic = new TaskScheduler(
                 inboundMailbox,
                 registry,
@@ -141,20 +143,32 @@ public class RabbitMqTaskCoordinatorServer {
         if (!(message instanceof PongMessage pong)) {
             return;
         }
-        String peerNodeId = delivery.fromNodeId();
-        if (peerNodeId == null || peerNodeId.isBlank()) {
-            peerNodeId = message.getNodeId();
+        String envelopePeerId = delivery.fromNodeId();
+        String messagePeerId = message.getNodeId();
+        if (envelopePeerId != null
+                && !envelopePeerId.isBlank()
+                && messagePeerId != null
+                && !messagePeerId.isBlank()
+                && !PeerIdentity.require(envelopePeerId).equals(PeerIdentity.require(messagePeerId))) {
+            LOGGER.warn("event=rabbitmq_heartbeat_identity_mismatch envelope_peer_id={} message_peer_id={}",
+                    envelopePeerId, messagePeerId);
+            return;
         }
+        String peerNodeId = envelopePeerId == null || envelopePeerId.isBlank()
+                ? messagePeerId
+                : envelopePeerId;
         if (peerNodeId == null || peerNodeId.isBlank()) {
             return;
         }
+        peerNodeId = PeerIdentity.require(peerNodeId);
 
         PeerInfo peer = registry.get(peerNodeId);
         if (peer == null) {
-            registry.register(peerNodeId, new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes()));
+            registry.registerIfAbsent(
+                    peerNodeId,
+                    new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes(), PeerTransport.RABBITMQ));
         } else {
-            registry.updateHeartbeat(peerNodeId);
-            peer.setSupportedTaskTypes(pong.getSupportedTaskTypes());
+            registry.updateHeartbeat(peerNodeId, pong.getSupportedTaskTypes());
         }
     }
 }

@@ -3,6 +3,7 @@ package server.transport;
 import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
 import protocol.Message;
+import protocol.PeerIdentity;
 import transport.TransportConnection;
 
 import java.io.IOException;
@@ -16,7 +17,7 @@ public class TcpPeerConnection implements TransportConnection {
     private final Gson gson;
 
     public TcpPeerConnection(String nodeId, Socket socket, PrintWriter out, Gson gson) {
-        this.nodeId = nodeId;
+        this.nodeId = PeerIdentity.require(nodeId);
         this.socket = socket;
         this.out = out;
         this.gson = gson;

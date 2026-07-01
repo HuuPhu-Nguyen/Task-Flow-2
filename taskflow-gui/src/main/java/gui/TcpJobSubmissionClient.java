@@ -2,8 +2,10 @@ package gui;
 
 import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
+import protocol.JobIds;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.PeerIdentity;
 import protocol.RequesterIdentity;
 
 import java.io.PrintWriter;
@@ -11,7 +13,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.UUID;
 
 final class TcpJobSubmissionClient implements JobSubmissionClient {
     private final String nodeId;
@@ -26,14 +27,13 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
         if (nodeId == null || nodeId.isBlank()) {
             throw new IllegalArgumentException("nodeId is required.");
         }
-        this.nodeId = nodeId;
+        this.nodeId = PeerIdentity.require(nodeId);
         this.requesterTokenStore = Objects.requireNonNull(requesterTokenStore, "requesterTokenStore");
     }
 
     @Override
     public String newJobId() {
-        return "JOB_" + System.currentTimeMillis() + "_"
-                + UUID.randomUUID().toString().substring(0, 8);
+        return JobIds.newJobId(nodeId);
     }
 
     @Override

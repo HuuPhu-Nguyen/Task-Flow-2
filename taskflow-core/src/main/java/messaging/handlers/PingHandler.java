@@ -20,6 +20,7 @@ public class PingHandler implements MessageHandler {
     private static final Logger LOGGER = LoggerFactory.getLogger(PingHandler.class);
 
     private final Gson gson = new Gson();
+    private final Supplier<String> nodeIdSupplier;
     private final Supplier<Collection<String>> supportedTaskTypesSupplier;
 
     public PingHandler() {
@@ -27,6 +28,16 @@ public class PingHandler implements MessageHandler {
     }
 
     public PingHandler(Supplier<Collection<String>> supportedTaskTypesSupplier) {
+        this(() -> "", supportedTaskTypesSupplier);
+    }
+
+    public PingHandler(String nodeId, Supplier<Collection<String>> supportedTaskTypesSupplier) {
+        this(() -> nodeId, supportedTaskTypesSupplier);
+    }
+
+    public PingHandler(Supplier<String> nodeIdSupplier,
+                       Supplier<Collection<String>> supportedTaskTypesSupplier) {
+        this.nodeIdSupplier = nodeIdSupplier == null ? () -> "" : nodeIdSupplier;
         this.supportedTaskTypesSupplier = supportedTaskTypesSupplier == null
                 ? Collections::emptyList
                 : supportedTaskTypesSupplier;
@@ -36,8 +47,12 @@ public class PingHandler implements MessageHandler {
     public void handle(Message message, PrintWriter out) {
 
         PingMessage ping = (PingMessage) message;
+        String responseNodeId = nodeIdSupplier.get();
+        if (responseNodeId == null || responseNodeId.isBlank()) {
+            responseNodeId = ping.getNodeId();
+        }
         PongMessage response = new PongMessage(
-                ping.getNodeId(),
+                responseNodeId,
                 Instant.now().toString(),
                 supportedTaskTypesSupplier.get()
         );

@@ -26,6 +26,19 @@ class TcpJobSubmissionClientTest {
     Path tempDir;
 
     @Test
+    void newJobIdIncludesSanitizedPeerIdAndFullUuid() {
+        TcpJobSubmissionClient client = new TcpJobSubmissionClient(
+                "gui peer/1",
+                new FileGuiRequesterTokenStore(tempDir.resolve("requester-tokens.properties"))
+        );
+
+        String jobId = client.newJobId();
+
+        assertTrue(jobId.matches(
+                "JOB_gui_peer_1_\\d+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
+    }
+
+    @Test
     void requestJobResultUsesTokenLoadedFromPersistentStore() {
         Path storePath = tempDir.resolve("requester-tokens.properties");
         TcpJobSubmissionClient submitClient = new TcpJobSubmissionClient(

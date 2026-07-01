@@ -32,14 +32,16 @@ removed.
    classpath.
 2. The selected client plugin validates local options, reads local inputs, and
    builds JSON-serializable job payloads.
-3. The peer sends `JOB_SUBMIT` with a job id, requester token, and requester
-   identity signature when supported by that path.
-4. Execute-capable peers advertise supported task types through heartbeat
+3. The peer sends `JOB_SUBMIT` with a peer-scoped job id, requester token, and
+   requester identity signature when supported by that path.
+4. Peers use the explicit peer ID contract in `docs/PEER_IDENTITY.md`; set
+   `TASKFLOW_PEER_ID` for stable identity across restarts.
+5. Execute-capable peers advertise supported task types through heartbeat
    metadata and process `TASK_ASSIGN` messages with peer processor plugins.
-5. The coordinator validates submissions and aggregates task results through
+6. The coordinator validates submissions and aggregates task results through
    server-side task plugins.
-6. The coordinator returns a terminal `JOB_RESULT` to the submitting peer.
-7. The submitter-side result handler checks whether the job id is one it is
+7. The coordinator returns a terminal `JOB_RESULT` to the submitting peer.
+8. The submitter-side result handler checks whether the job id is one it is
    tracking, then routes successful final results by task type to
    `ClientJobPlugin.saveResults(...)`.
 
@@ -92,9 +94,10 @@ by a broad refactor in isolation:
   `ClientJobPlugin` by final result task type and call `saveResults(...)`.
   A future shared peer-facing result service should accept transport/UI policy
   for output location, failed-save behavior, and acknowledgement timing.
-- GUI and command-line peers both generate job ids locally. Peer-scoped,
-  collision-resistant job ids should wait for the explicit peer identity slice
-  so new ids can include a canonical peer id.
+- GUI and command-line peers now share `protocol.JobIds` for peer-scoped,
+  collision-resistant job IDs. A future shared submitter service should avoid
+  duplicating the surrounding requester-token, requester-signature, and send
+  failure cleanup policy.
 
 Keep these candidates separate from semantic final-result payload work. The
 later result-contract slice should decide whether `resultsByTaskId` remains a
@@ -117,5 +120,14 @@ Current focused coverage includes:
   peer-route subscription, task assignment execution, task-result publish
   acknowledgement/requeue behavior, job-result routing, malformed-result
   rejection, and startup failure handling.
+- `PeerIdentityTest`, `PingHandlerTest`, and `PeerHandlerTest` for shared peer
+  ID normalization, TCP heartbeat identity, and duplicate TCP peer rejection.
+- `InMemoryPeerRegistryTest` and `DatabaseManagerTest` for peer metadata
+  persistence hooks, SQLite restart reload, heartbeat capability updates,
+  disconnect status updates, duplicate peer ID handling, and task retry state
+  coexistence.
+- `JobIdsTest`, `PeerNodeTest`, `TcpJobSubmissionClientTest`, and
+  `RabbitMqJobSubmissionClientTest` for shared peer-scoped job ID generation
+  across command-line and GUI submit paths.
 - `PeerNodeTest` for RabbitMQ command-line payload creation, publish-confirm
   failure, and result saving through `ClientJobPlugin`.

@@ -89,6 +89,10 @@ public interface JobStateStore {
 
     boolean insertTask(String taskId, String jobId);
 
+    default boolean hasJob(String jobId) {
+        return false;
+    }
+
     boolean markTaskAssigned(String taskId, String peerId, long startedAt);
 
     boolean markTaskCompleted(String taskId, long completedAt, long durationMs);
