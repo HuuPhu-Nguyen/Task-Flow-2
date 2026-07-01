@@ -28,7 +28,15 @@ public interface JobStateStore {
                                    String taskType,
                                    String requesterTokenHash,
                                    String requesterIdentityKey,
+                                   Object resultPayload,
                                    List<Object> resultsByTaskId) {
+        public CompletedJobResultState(String jobId,
+                                       String taskType,
+                                       String requesterTokenHash,
+                                       String requesterIdentityKey,
+                                       List<Object> resultsByTaskId) {
+            this(jobId, taskType, requesterTokenHash, requesterIdentityKey, resultsByTaskId, resultsByTaskId);
+        }
     }
 
     boolean insertJobWithTasks(String jobId,
@@ -109,6 +117,10 @@ public interface JobStateStore {
     boolean markTaskFailed(String taskId);
 
     boolean markJobCompleted(String jobId);
+
+    default boolean markJobCompleted(String jobId, Object resultPayload) {
+        return markJobCompleted(jobId);
+    }
 
     boolean markJobFailed(String jobId);
 

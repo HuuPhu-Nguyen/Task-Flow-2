@@ -9,6 +9,7 @@ import server.job.TaskUnit;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class TestTaskPlugin implements TaskPlugin {
     static final String TASK_TYPE = "TEST_TASK";
@@ -27,14 +28,16 @@ public class TestTaskPlugin implements TaskPlugin {
 
     @Override
     public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
-        return new TestJob(message.getJobId(), requesterId);
+        return new TestJob(message.getJobId(), requesterId, "SEMANTIC_RESULT".equals(message.getParameter()));
     }
 
     private static class TestJob extends EmbarrassinglyParallelJob<String, String> {
         private final List<Object> results = new ArrayList<>();
+        private final boolean semanticResult;
 
-        TestJob(String jobId, String requesterNodeId) {
+        TestJob(String jobId, String requesterNodeId, boolean semanticResult) {
             super(jobId, requesterNodeId, TASK_TYPE);
+            this.semanticResult = semanticResult;
         }
 
         @Override
@@ -57,6 +60,16 @@ public class TestTaskPlugin implements TaskPlugin {
         @Override
         public List<Object> aggregateAndSendResult() {
             return List.copyOf(results);
+        }
+
+        @Override
+        public Object aggregateResultPayload() {
+            if (!semanticResult) {
+                return super.aggregateResultPayload();
+            }
+            return Map.of(
+                    "resultCount", results.size(),
+                    "joined", String.join(",", results.stream().map(String::valueOf).toList()));
         }
 
         @Override

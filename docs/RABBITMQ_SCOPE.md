@@ -33,12 +33,12 @@ The current RabbitMQ path includes:
   sanitized peer ID, a timestamp, and a full UUID.
 - JSON protocol serialization through the same protocol message types used by
   TCP.
-- Command-line peer submit mode builds payloads and saves successful final
-  results through `ClientJobPlugin`.
+- Command-line peer submit mode builds payloads and handles successful final
+  results through `ClientJobPlugin.handleResult(...)`.
 - JavaFX GUI mode can select RabbitMQ with `TASKFLOW_TRANSPORT=rabbitmq`,
   publish signed job submissions, send heartbeats, consume peer-specific task
   assignments and job results, publish task results, and route successful final
-  results through `ClientJobPlugin`.
+  results through `ClientJobPlugin.handleResult(...)`.
 - Publisher confirms for broker publishes.
 - Mandatory-return detection for unroutable peer-targeted publishes.
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject

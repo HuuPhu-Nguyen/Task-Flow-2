@@ -27,7 +27,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - Current RabbitMQ peer routes are keyed by peer ID; duplicate active RabbitMQ peers with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
 - When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Live sockets, connection handles, broker consumers, and channels are not persisted.
 - Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling.
-- Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.saveResults(...)` in the JavaFX GUI and the RabbitMQ command-line submitter.
+- Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
 - The JavaFX GUI is the supported peer UI for TCP submit, execute, receive-result, and save-result behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
 - The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
@@ -144,13 +144,14 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Schema version 3 stores requester token hashes used to authorize result requests across reconnects.
 - Schema version 4 stores requester identity public keys used to require signed result requests for identity-bound jobs.
 - Schema version 5 stores peer registry metadata for last-known peer state across coordinator restart.
+- Schema version 6 stores the completed job's final semantic result payload.
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, and resets assigned tasks to `PENDING` because leases are not implemented.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to a peer.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
 - Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
-- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists.
+- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
 - Explicit attempt history, lease-based recovery, and PostgreSQL/Flyway are not implemented. `docs/RECOVERY_SCOPE.md` records attempt history and leases as accepted future behavior scope, with PostgreSQL/Flyway deferred until there is a concrete external database requirement.
 

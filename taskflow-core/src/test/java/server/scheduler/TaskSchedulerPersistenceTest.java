@@ -75,6 +75,43 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
+    void successfulJobDeliversAndPersistsSemanticResultPayload() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-semantic-result-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-semantic-result", List.of("payload"), "SEMANTIC_RESULT"),
+                    "requester-1"));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "alpha"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobCompleted());
+            JobResultMessage result = output.result();
+            Map<String, Object> expectedPayload = Map.of(
+                    "resultCount", 1,
+                    "joined", "alpha");
+            assertTrue(result.isSuccessful());
+            assertEquals(expectedPayload, result.getResultPayload());
+            assertEquals(List.of("alpha"), result.getResultsByTaskId());
+            assertEquals(expectedPayload, store.lastCompletedResultPayload());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void terminalTaskFailurePersistsFailedTaskAndJob() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
@@ -857,13 +894,17 @@ class TaskSchedulerPersistenceTest {
     }
 
     private static JobSubmitMessage testJob(String jobId, List<Object> payloads) {
+        return testJob(jobId, payloads, "");
+    }
+
+    private static JobSubmitMessage testJob(String jobId, List<Object> payloads, String parameter) {
         return new JobSubmitMessage(
                 "requester-1",
                 "2026-06-12T00:00:00Z",
                 jobId,
                 "TEST_TASK",
                 payloads,
-                "",
+                parameter,
                 "token-" + jobId
         );
     }
@@ -1049,6 +1090,7 @@ class TaskSchedulerPersistenceTest {
         private final String failingOperation;
         private JobStateStore.CompletedJobResultState completedResult;
         private String lastRequesterIdentityKey = "";
+        private Object lastCompletedResultPayload;
 
         private RecordingJobStateStore() {
             this(true);
@@ -1151,6 +1193,12 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized boolean markJobCompleted(String jobId, Object resultPayload) {
+            lastCompletedResultPayload = resultPayload;
+            return markJobCompleted(jobId);
+        }
+
+        @Override
         public synchronized boolean markJobFailed(String jobId) {
             events.add("markJobFailed:" + jobId);
             if (succeeds("markJobFailed")) {
@@ -1192,6 +1240,10 @@ class TaskSchedulerPersistenceTest {
 
         synchronized String lastRequesterIdentityKey() {
             return lastRequesterIdentityKey;
+        }
+
+        synchronized Object lastCompletedResultPayload() {
+            return lastCompletedResultPayload;
         }
 
         synchronized void setCompletedResult(JobStateStore.CompletedJobResultState completedResult) {

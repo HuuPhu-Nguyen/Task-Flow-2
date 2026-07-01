@@ -24,7 +24,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 5;
+    public static final int CURRENT_SCHEMA_VERSION = 6;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -119,7 +119,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     submitted_at     INTEGER NOT NULL,
                     completed_at     INTEGER,
                     file_count       INTEGER NOT NULL,
-                    parameter        TEXT    NOT NULL DEFAULT ''
+                    parameter        TEXT    NOT NULL DEFAULT '',
+                    result_payload_json TEXT
                 )
             """);
         }
@@ -180,6 +181,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         if (!columnExists("jobs", "requester_identity_key")) {
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("ALTER TABLE jobs ADD COLUMN requester_identity_key TEXT NOT NULL DEFAULT ''");
+            }
+        }
+        if (!columnExists("jobs", "result_payload_json")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE jobs ADD COLUMN result_payload_json TEXT");
             }
         }
     }
@@ -342,6 +348,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         }
         if (!columnExists("jobs", "requester_identity_key")) {
             throw new SQLException("Database schema is missing jobs.requester_identity_key.");
+        }
+        if (!columnExists("jobs", "result_payload_json")) {
+            throw new SQLException("Database schema is missing jobs.result_payload_json.");
         }
         if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
@@ -600,10 +609,22 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized boolean markJobCompleted(String jobId) {
-        String sql = "UPDATE jobs SET status='COMPLETED', completed_at=? WHERE job_id=? AND status='RUNNING'";
+        return markJobCompleted(jobId, null);
+    }
+
+    @Override
+    public synchronized boolean markJobCompleted(String jobId, Object resultPayload) {
+        String sql = """
+                UPDATE jobs
+                SET status='COMPLETED',
+                    completed_at=?,
+                    result_payload_json=?
+                WHERE job_id=? AND status='RUNNING'
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, System.currentTimeMillis());
-            ps.setString(2, jobId);
+            ps.setString(2, toJson(resultPayload));
+            ps.setString(3, jobId);
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
             logSqlFailure("markJobCompleted", e);
@@ -768,7 +789,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         }
 
         String jobSql = """
-                SELECT task_type, file_count, requester_token_hash, requester_identity_key
+                SELECT task_type, file_count, requester_token_hash, requester_identity_key, result_payload_json
                 FROM jobs
                 WHERE job_id=? AND status='COMPLETED'
                 """;
@@ -795,6 +816,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                         taskType,
                         jobResult.getString("requester_token_hash"),
                         jobResult.getString("requester_identity_key"),
+                        completedResultPayload(jobResult.getString("result_payload_json"), taskResults),
                         taskResults.stream()
                                 .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
                                 .map(TaskResultSnapshot::resultPayload)
@@ -805,6 +827,17 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             logSqlFailure("loadCompletedJobResult", e);
             return Optional.empty();
         }
+    }
+
+    private Object completedResultPayload(String resultPayloadJson, List<TaskResultSnapshot> taskResults) {
+        Object resultPayload = fromJson(resultPayloadJson);
+        if (resultPayload != null) {
+            return resultPayload;
+        }
+        return taskResults.stream()
+                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                .map(TaskResultSnapshot::resultPayload)
+                .toList();
     }
 
     private List<TaskResultSnapshot> loadCompletedTaskResults(String jobId) throws SQLException {

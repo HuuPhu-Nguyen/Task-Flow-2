@@ -38,6 +38,30 @@ class GuiResultSaverTest {
     }
 
     @Test
+    void dispatchesWholeResultToPluginHandler() {
+        HandlingClientJobPlugin plugin = new HandlingClientJobPlugin();
+        JobResultMessage result = new JobResultMessage(
+                "coordinator",
+                Instant.EPOCH.toString(),
+                "job-1",
+                "TEXT_ANALYSIS",
+                true,
+                Map.of("totalWords", 42),
+                List.of("task-result"),
+                null);
+
+        GuiResultSaver.SaveResult saveResult = GuiResultSaver.save(
+                result,
+                tempDir.toString(),
+                Map.of("TEXT_ANALYSIS", plugin));
+
+        assertTrue(saveResult.successful());
+        assertEquals(Map.of("totalWords", 42), plugin.handledPayload.get());
+        assertEquals(tempDir.toAbsolutePath().normalize(), plugin.outputDir.get());
+        assertNull(plugin.savedResults.get());
+    }
+
+    @Test
     void nullResultPayloadsAreSavedAsEmptyList() {
         RecordingClientJobPlugin plugin = new RecordingClientJobPlugin();
 
@@ -89,9 +113,9 @@ class GuiResultSaverTest {
                 payloads);
     }
 
-    private static final class RecordingClientJobPlugin implements ClientJobPlugin {
-        private final AtomicReference<List<Object>> savedResults = new AtomicReference<>();
-        private final AtomicReference<Path> outputDir = new AtomicReference<>();
+    private static class RecordingClientJobPlugin implements ClientJobPlugin {
+        protected final AtomicReference<List<Object>> savedResults = new AtomicReference<>();
+        protected final AtomicReference<Path> outputDir = new AtomicReference<>();
         private RuntimeException saveFailure;
 
         @Override
@@ -130,6 +154,16 @@ class GuiResultSaverTest {
                 throw saveFailure;
             }
             this.savedResults.set(List.copyOf(results));
+            this.outputDir.set(outputDir);
+        }
+    }
+
+    private static final class HandlingClientJobPlugin extends RecordingClientJobPlugin {
+        private final AtomicReference<Object> handledPayload = new AtomicReference<>();
+
+        @Override
+        public void handleResult(JobResultMessage result, Path outputDir) {
+            handledPayload.set(result.getResultPayload());
             this.outputDir.set(outputDir);
         }
     }

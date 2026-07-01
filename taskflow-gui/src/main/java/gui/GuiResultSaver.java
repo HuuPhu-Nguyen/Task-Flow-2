@@ -6,7 +6,6 @@ import protocol.JobResultMessage;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -28,11 +27,8 @@ final class GuiResultSaver {
                     outputDir);
         }
 
-        List<Object> payloads = result.getResultsByTaskId() == null
-                ? List.of()
-                : result.getResultsByTaskId();
         try {
-            plugin.saveResults(payloads, outputDir);
+            plugin.handleResult(result, outputDir);
             return SaveResult.success(outputDir);
         } catch (Exception ex) {
             return SaveResult.failure("Could not save files: " + ex.getMessage(), outputDir, ex);

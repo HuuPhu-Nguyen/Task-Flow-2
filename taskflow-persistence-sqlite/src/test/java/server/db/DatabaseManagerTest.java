@@ -15,6 +15,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.ResultSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -402,6 +403,42 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void loadsCompletedJobSemanticResultPayload() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-completed-semantic-result-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            assertTrue(db.insertJobWithTasks(
+                    "job-semantic-result",
+                    "TEXT_ANALYSIS",
+                    "requester-1",
+                    RequesterTokens.hashToken("completed-token"),
+                    "",
+                    "csv",
+                    List.of(
+                            new JobStateStore.TaskStartupState("task-job-semantic-result-0", "payload-alpha"),
+                            new JobStateStore.TaskStartupState("task-job-semantic-result-1", "payload-beta")
+                    )
+            ));
+            assertTrue(db.markTaskAssigned("task-job-semantic-result-0", "peer-1", 123L));
+            assertTrue(db.markTaskCompleted("task-job-semantic-result-0", 456L, 333L, "result-alpha"));
+            assertTrue(db.markTaskAssigned("task-job-semantic-result-1", "peer-2", 789L));
+            assertTrue(db.markTaskCompleted("task-job-semantic-result-1", 987L, 198L, "result-beta"));
+            assertTrue(db.markJobCompleted("job-semantic-result", Map.of(
+                    "documentCount", 2,
+                    "totalWords", 42)));
+
+            var result = db.loadCompletedJobResult("job-semantic-result");
+
+            assertTrue(result.isPresent());
+            assertEquals(Map.of("documentCount", 2.0, "totalWords", 42.0), result.get().resultPayload());
+            assertEquals(List.of("result-alpha", "result-beta"), result.get().resultsByTaskId());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
     void completedJobResultLookupRejectsMissingTaskResults() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-incomplete-result-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
@@ -535,6 +572,7 @@ class DatabaseManagerTest {
             assertTrue(columnExists(dbPath, "jobs", "parameter"));
             assertTrue(columnExists(dbPath, "jobs", "requester_token_hash"));
             assertTrue(columnExists(dbPath, "jobs", "requester_identity_key"));
+            assertTrue(columnExists(dbPath, "jobs", "result_payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());

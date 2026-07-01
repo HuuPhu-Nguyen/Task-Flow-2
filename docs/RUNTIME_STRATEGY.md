@@ -51,11 +51,11 @@ compatibility while the identity, recovery, and operational gaps are closed.
   rejects duplicate job IDs that are already active or present in persisted job
   history when persistence is enabled.
 - RabbitMQ command-line peers can register with peer IDs, send heartbeats,
-  execute assigned work, submit jobs, receive `JOB_RESULT`, and save successful
-  final results through `ClientJobPlugin`.
+  execute assigned work, submit jobs, receive `JOB_RESULT`, and handle
+  successful final results through `ClientJobPlugin.handleResult(...)`.
 - RabbitMQ JavaFX peers use GUI service adapters for signed job submission,
   peer-specific task assignment, task-result publication, live `JOB_RESULT`
-  routing, and plugin-backed result saving. RabbitMQ GUI result-request replay
+  routing, and plugin-backed result handling. RabbitMQ GUI result-request replay
   after restart is not implemented.
 - RabbitMQ has focused live broker coverage and a Docker Compose demo, but live
   broker tests are still opt-in.
@@ -66,7 +66,7 @@ Do not flip the default transport, describe RabbitMQ as the primary supported
 runtime, or start TCP deprecation until all of these are complete:
 
 - JavaFX RabbitMQ desktop smoke or automation evidence for job submission,
-  assigned-task execution, `JOB_RESULT` reception, result saving, and
+  assigned-task execution, `JOB_RESULT` reception, result handling, and
   disconnect/broker-failure handling.
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live

@@ -22,7 +22,7 @@ or handle successful final results.
 
 RabbitMQ is the planned primary runtime for these peer roles. The GUI now has
 RabbitMQ service adapters for live broker-backed submit, execute, result
-routing, and result saving, while TCP remains the default. `docs/RUNTIME_STRATEGY.md`
+routing, and result handling, while TCP remains the default. `docs/RUNTIME_STRATEGY.md`
 records the runtime direction and the gates before TCP can be deprecated or
 removed.
 
@@ -43,7 +43,7 @@ removed.
 7. The coordinator returns a terminal `JOB_RESULT` to the submitting peer.
 8. The submitter-side result handler checks whether the job id is one it is
    tracking, then routes successful final results by task type to
-   `ClientJobPlugin.saveResults(...)`.
+   `ClientJobPlugin.handleResult(...)`.
 
 Failed `JOB_RESULT` messages are terminal user-visible outcomes, not payloads
 for client plugins to save.
@@ -65,7 +65,7 @@ The JavaFX GUI path is implemented through GUI-facing services:
   `JOB_RESULT_REQUEST`; RabbitMQ GUI result-request replay is not implemented.
 - `GuiJobResultRouter` ignores results for untracked job ids and routes active
   failed or successful results.
-- `GuiResultSaveService` saves successful results with the matching
+- `GuiResultSaveService` handles successful final results with the matching
   `ClientJobPlugin`.
 
 The RabbitMQ command-line peer path is implemented in `RabbitMqPeerNode`:
@@ -74,8 +74,8 @@ The RabbitMQ command-line peer path is implemented in `RabbitMqPeerNode`:
   and waits on the submitting peer's `JOB_RESULT` route.
 - While using the default `combined-runtime` profile, the same process also
   remains available for assigned task execution.
-- Successful results are written under `target/rabbitmq-results/<jobId>` by
-  calling `ClientJobPlugin.saveResults(...)`.
+- Successful results are handled under `target/rabbitmq-results/<jobId>` by
+  calling `ClientJobPlugin.handleResult(...)`.
 - A `JOB_RESULT` for another job id is acknowledged and ignored while the
   submitter waits for its own job.
 
@@ -91,17 +91,17 @@ The audit found two pieces of intentional duplication that should not be solved
 by a broad refactor in isolation:
 
 - GUI and RabbitMQ command-line result handlers both resolve a
-  `ClientJobPlugin` by final result task type and call `saveResults(...)`.
+  `ClientJobPlugin` by final result task type and call `handleResult(...)`.
   A future shared peer-facing result service should accept transport/UI policy
-  for output location, failed-save behavior, and acknowledgement timing.
+  for output location, failed-handler behavior, and acknowledgement timing.
 - GUI and command-line peers now share `protocol.JobIds` for peer-scoped,
   collision-resistant job IDs. A future shared submitter service should avoid
   duplicating the surrounding requester-token, requester-signature, and send
   failure cleanup policy.
 
-Keep these candidates separate from semantic final-result payload work. The
-later result-contract slice should decide whether `resultsByTaskId` remains a
-compatibility shape or becomes a plugin-defined final payload.
+Keep these candidates separate from semantic final-result payload work.
+`JobResultMessage.resultPayload` is now the semantic final payload, while
+`resultsByTaskId` remains a compatibility list for existing list-based plugins.
 
 ## Evidence
 
@@ -112,7 +112,7 @@ Current focused coverage includes:
   result-request construction.
 - `GuiJobResultRouterTest` for active, failed, successful, and foreign
   `JOB_RESULT` routing.
-- `GuiResultSaverTest` and `GuiResultSaveServiceTest` for GUI result saving
+- `GuiResultSaverTest` and `GuiResultSaveServiceTest` for GUI final-result handling
   through `ClientJobPlugin`.
 - `RabbitMqJobSubmissionClientTest` for RabbitMQ GUI publish-confirm behavior,
   requester-token cleanup, and signed job submission.
@@ -130,4 +130,4 @@ Current focused coverage includes:
   `RabbitMqJobSubmissionClientTest` for shared peer-scoped job ID generation
   across command-line and GUI submit paths.
 - `PeerNodeTest` for RabbitMQ command-line payload creation, publish-confirm
-  failure, and result saving through `ClientJobPlugin`.
+  failure, and result handling through `ClientJobPlugin`.

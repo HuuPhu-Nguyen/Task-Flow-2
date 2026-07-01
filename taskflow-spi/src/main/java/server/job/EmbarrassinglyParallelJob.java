@@ -97,6 +97,10 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
 
     public abstract List<Object> aggregateAndSendResult();
 
+    public Object aggregateResultPayload() {
+        return aggregateAndSendResult();
+    }
+
     protected abstract R parseResult(Object payloads);
 
     public List<TaskUnit<T>> getPendingTasks() {

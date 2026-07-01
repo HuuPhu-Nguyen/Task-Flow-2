@@ -17,9 +17,15 @@ class EmbarrassinglyParallelJobResultTest {
 
     private static class DummyJob extends EmbarrassinglyParallelJob<String, String> {
         private final Map<String, String> results = new ConcurrentHashMap<>();
+        private final boolean semanticReport;
 
         DummyJob(String jobId, String requesterNodeId) {
+            this(jobId, requesterNodeId, false);
+        }
+
+        DummyJob(String jobId, String requesterNodeId, boolean semanticReport) {
             super(jobId, requesterNodeId, "DUMMY");
+            this.semanticReport = semanticReport;
         }
 
         @Override
@@ -35,6 +41,16 @@ class EmbarrassinglyParallelJobResultTest {
         @Override
         public List<Object> aggregateAndSendResult() {
             return new ArrayList<>(results.values());
+        }
+
+        @Override
+        public Object aggregateResultPayload() {
+            if (!semanticReport) {
+                return super.aggregateResultPayload();
+            }
+            return Map.of(
+                    "taskCount", tasks.size(),
+                    "acceptedResults", results.size());
         }
 
         @Override
@@ -77,5 +93,18 @@ class EmbarrassinglyParallelJobResultTest {
         EmbarrassinglyParallelJob.TaskCompletion duplicate = job.recordResult("task-1", "peer-a", "other");
         assertFalse(duplicate.accepted());
         assertEquals(1, job.aggregateAndSendResult().size());
+    }
+
+    @Test
+    void semanticAggregationCanReturnPluginDefinedPayload() {
+        DummyJob job = new DummyJob("job-1", "requester", true);
+        job.initializeTasks(new JobSubmitMessage());
+
+        TaskUnit<String> task = (TaskUnit<String>) job.getTasks().get("task-1");
+        assertTrue(task.markAssigned("peer-a", System.currentTimeMillis() - 10));
+        assertTrue(job.recordResult("task-1", "peer-a", "result").accepted());
+
+        assertEquals(List.of("result"), job.aggregateAndSendResult());
+        assertEquals(Map.of("taskCount", 1, "acceptedResults", 1), job.aggregateResultPayload());
     }
 }

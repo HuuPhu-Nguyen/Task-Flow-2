@@ -7,7 +7,7 @@ TaskFlow discovers job behavior through Java `ServiceLoader` providers on the
 runtime classpath:
 
 - `server.job.TaskPlugin` for coordinator-side validation and job construction.
-- `client.ClientJobPlugin` for client-side payload creation and result saving.
+- `client.ClientJobPlugin` for client-side payload creation and final-result handling.
 - `peer.engine.PeerProcessorPlugin` for peer-side task execution.
 
 The existing `plugins/conversion` and `plugins/text` bundles are the reference
@@ -30,12 +30,12 @@ plugins/<domain>/
 
 Use the modules this way:
 
-- `model`: Shared task type constants plus payload/result records used by more
+- `model`: Shared task type constants plus payload, task-result, and final-result records used by more
   than one role. Keep it free of runtime-heavy dependencies.
 - `server`: Coordinator-side `TaskPlugin`, `EmbarrassinglyParallelJob`,
   `TaskUnit`, and submission validation.
 - `client`: `ClientJobPlugin` implementations that turn local files into
-  payload objects and save final results to disk.
+  payload objects and handle final results.
 - `peer`: `PeerProcessorPlugin` implementations and `TaskProcessor` classes that
   execute assigned tasks. Heavy processor-only dependencies belong here.
 
@@ -72,7 +72,8 @@ Implement `server.job.TaskPlugin`:
   payloads, malformed payload objects, unsupported file extensions or formats,
   and invalid encoded data before tasks are created.
 - `createJob(JobSubmitMessage, String requesterId)` returns a job that can split
-  the submission into task units and aggregate typed results.
+  the submission into task units and aggregate typed task results into a
+  semantic final result payload.
 
 Register the provider in:
 
@@ -98,6 +99,10 @@ into independent tasks. A job should:
 - Accept results only through `recordResult`; the base class already rejects
   stale results from peers that no longer own the task.
 - Aggregate final results in deterministic order when ordering matters.
+- Override `aggregateResultPayload()` when the final job result should be a
+  report, summary, ranking, reduction, preview model, or another semantic
+  object instead of the compatibility `List<Object>` returned by
+  `aggregateAndSendResult()`.
 - Include the same task type and parameter in `TaskAssignMessage` that the peer
   processor expects.
 
@@ -108,8 +113,8 @@ submitters and the JavaFX GUI.
 
 This is the shared local submit/result contract. The JavaFX GUI and the
 RabbitMQ command-line submitter both use `ClientJobPlugin` to build local
-payloads and save successful final results; transport and UI code decide where
-results are shown or written and how save failures are reported.
+payloads and handle successful final results; transport and UI code decide
+where results are shown or written and how handling failures are reported.
 
 Implement `client.ClientJobPlugin`:
 
@@ -120,8 +125,12 @@ Implement `client.ClientJobPlugin`:
 - `parameterOptions()` and `defaultParameter()` define the task option set.
 - `buildPayloads(List<Path>, String)` reads local inputs and returns payload
   objects suitable for JSON serialization.
-- `saveResults(List<Object>, Path)` writes final results into the selected
-  output directory.
+- `handleResult(JobResultMessage, Path)` receives the complete final result
+  message and can save files, write reports, print summaries, render previews,
+  or apply plugin-specific failure policy. The default implementation calls
+  `saveResults(result.getResultPayloadList(), outputDir)` for compatibility.
+- `saveResults(List<Object>, Path)` remains the compatibility file-save method
+  for plugins whose final payload is still an ordered result list.
 
 Register the provider in:
 
@@ -207,9 +216,9 @@ Client module tests should cover:
 - Unsupported input extensions are rejected.
 - `PayloadLimits` failures are surfaced for input count, input bytes, and total
   job payload bytes.
-- Result saving writes the expected files, stays inside the selected output
-  directory, handles duplicate names safely, and enforces result-size limits when
-  the result contains file data.
+- Result handling writes or presents the expected final payload, stays inside
+  the selected output directory when writing files, handles duplicate names
+  safely, and enforces result-size limits when the result contains file data.
 
 Peer module tests should cover:
 
@@ -231,7 +240,7 @@ Use this checklist for each new task type:
    `plugins/<domain>/model`.
 2. Add a server `TaskPlugin`, job, task unit, validation helper, and
    `META-INF/services/server.job.TaskPlugin` entry.
-3. Add a client `ClientJobPlugin`, payload/result file handling, payload-limit
+3. Add a client `ClientJobPlugin`, payload/final-result handling, payload-limit
    checks, safe output naming, and `META-INF/services/client.ClientJobPlugin`
    entry.
 4. Add a peer `PeerProcessorPlugin`, processor implementation, and
@@ -241,7 +250,7 @@ Use this checklist for each new task type:
 7. Add client and peer artifacts to `taskflow-peer` and `taskflow-gui` profiles
    according to `combined-runtime`, `submitter-runtime`, and `executor-runtime`.
 8. Add focused server, client, and peer tests for discovery, validation,
-   payload creation, result saving, processing, and aggregation.
+   payload creation, final-result handling, processing, and aggregation.
 9. Run the focused tests for the new plugin modules.
 10. Run `git diff --check`; run broader Maven and dependency-tree gates if the
     plugin changed runtime classpaths or packaged runtime behavior.

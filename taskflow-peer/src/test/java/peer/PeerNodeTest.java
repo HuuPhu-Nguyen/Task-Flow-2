@@ -159,6 +159,29 @@ class PeerNodeTest {
     }
 
     @Test
+    void rabbitMqResultHandlingDispatchesWholeResultToClientPlugin() throws Exception {
+        SemanticClientPlugin plugin = new SemanticClientPlugin();
+        JobResultMessage result = new JobResultMessage(
+                "coordinator",
+                Instant.EPOCH.toString(),
+                "job-result",
+                "TEXT_ANALYSIS",
+                true,
+                Map.of("totalWords", 42),
+                List.of("task-result"),
+                null);
+
+        Path outputDir = RabbitMqPeerNode.writeJobResults(
+                result,
+                Map.of("TEXT_ANALYSIS", plugin));
+
+        assertEquals(Path.of("target", "rabbitmq-results", "job-result"), outputDir);
+        assertEquals(Map.of("totalWords", 42), plugin.handledPayload);
+        assertEquals(outputDir, plugin.outputDir);
+        assertNull(plugin.savedResults);
+    }
+
+    @Test
     void tcpRuntimeShutsDownEngineWhenServerClosesConnection() throws Exception {
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         AtomicReference<Exception> serverFailure = new AtomicReference<>();
@@ -319,6 +342,54 @@ class PeerNodeTest {
         @Override
         public void saveResults(List<Object> results, Path outputDir) {
             this.savedResults = List.copyOf(results);
+            this.outputDir = outputDir;
+        }
+    }
+
+    private static final class SemanticClientPlugin implements ClientJobPlugin {
+        private Object handledPayload;
+        private List<Object> savedResults;
+        private Path outputDir;
+
+        @Override
+        public String taskType() {
+            return "TEXT_ANALYSIS";
+        }
+
+        @Override
+        public String displayName() {
+            return "Text";
+        }
+
+        @Override
+        public List<String> supportedInputExtensions() {
+            return List.of("txt");
+        }
+
+        @Override
+        public List<String> parameterOptions() {
+            return List.of("CSV");
+        }
+
+        @Override
+        public String defaultParameter() {
+            return "CSV";
+        }
+
+        @Override
+        public List<Object> buildPayloads(List<Path> inputPaths, String parameter) {
+            return List.of();
+        }
+
+        @Override
+        public void saveResults(List<Object> results, Path outputDir) {
+            this.savedResults = List.copyOf(results);
+            this.outputDir = outputDir;
+        }
+
+        @Override
+        public void handleResult(JobResultMessage result, Path outputDir) {
+            this.handledPayload = result.getResultPayload();
             this.outputDir = outputDir;
         }
     }

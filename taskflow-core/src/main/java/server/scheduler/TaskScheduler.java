@@ -337,6 +337,7 @@ public class TaskScheduler implements Runnable {
                     completed.jobId(),
                     completed.taskType(),
                     true,
+                    completed.resultPayload(),
                     completed.resultsByTaskId()
             ));
             return;
@@ -684,14 +685,16 @@ public class TaskScheduler implements Runnable {
     }
 
     private void completeJob(EmbarrassinglyParallelJob<?, ?> job, boolean success, String reason) {
-        List<Object> finalData = job.aggregateAndSendResult();
+        Object finalPayload = job.aggregateResultPayload();
+        List<Object> compatibilityResults = compatibilityResults(job, finalPayload);
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
                 java.time.Instant.now().toString(),
                 job.getJobId(),
                 job.getTaskType(),
                 success,
-                finalData,
+                finalPayload,
+                compatibilityResults,
                 success ? null : reason
         );
 
@@ -810,7 +813,7 @@ public class TaskScheduler implements Runnable {
                         "markJobCompleted",
                         job.getJobId(),
                         "",
-                        db.markJobCompleted(job.getJobId())
+                        db.markJobCompleted(job.getJobId(), completion.response.getResultPayload())
                 );
             } else {
                 persisted &= recordPersistence("markJobFailed", job.getJobId(), "", db.markJobFailed(job.getJobId()));
@@ -828,9 +831,7 @@ public class TaskScheduler implements Runnable {
                 "job_id", job.getJobId(),
                 "requester_id", job.getRequesterNodeId(),
                 "success", completion.success,
-                "result_count", completion.response.getResultsByTaskId() == null
-                        ? 0
-                        : completion.response.getResultsByTaskId().size()
+                "result_count", completion.response.getResultPayloadList().size()
         ));
 
         if (!completion.success && completion.reason != null && !completion.reason.isBlank()) {
@@ -916,6 +917,15 @@ public class TaskScheduler implements Runnable {
                 authorization.errorMessage()
         ));
         return false;
+    }
+
+    private List<Object> compatibilityResults(EmbarrassinglyParallelJob<?, ?> job, Object finalPayload) {
+        if (finalPayload instanceof List<?> list) {
+            return list.stream()
+                    .map(Object.class::cast)
+                    .toList();
+        }
+        return job.aggregateAndSendResult();
     }
 
     public SchedulerMetrics.Snapshot getMetricsSnapshot() {

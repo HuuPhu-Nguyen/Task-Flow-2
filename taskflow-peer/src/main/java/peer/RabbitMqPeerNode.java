@@ -275,7 +275,7 @@ public class RabbitMqPeerNode {
                                 Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         Path outputDir = Path.of("target", "rabbitmq-results", result.getJobId());
         ClientJobPlugin plugin = resolveClientPlugin(result.getTaskType(), clientPlugins);
-        plugin.saveResults(result.getResultsByTaskId(), outputDir);
+        plugin.handleResult(result, outputDir);
         return outputDir;
     }
 

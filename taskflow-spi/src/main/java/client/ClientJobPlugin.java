@@ -1,5 +1,7 @@
 package client;
 
+import protocol.JobResultMessage;
+
 import java.nio.file.Path;
 import java.util.List;
 
@@ -40,4 +42,11 @@ public interface ClientJobPlugin {
     List<Object> buildPayloads(List<Path> inputPaths, String parameter) throws Exception;
 
     void saveResults(List<Object> results, Path outputDir) throws Exception;
+
+    default void handleResult(JobResultMessage result, Path outputDir) throws Exception {
+        List<Object> payloads = result == null
+                ? List.of()
+                : result.getResultPayloadList();
+        saveResults(payloads, outputDir);
+    }
 }
