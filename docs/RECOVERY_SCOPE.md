@@ -10,26 +10,30 @@ SQLite remains the default and only implemented `JobStateStore`.
 
 Current startup recovery can rebuild resumable `RUNNING` jobs from persisted job
 and task snapshots, restore completed task results when result payload snapshots
-exist, reset assigned tasks to `PENDING`, and mark legacy or otherwise
-non-resumable running jobs failed. Task leases, durable attempt rows, and
-PostgreSQL/Flyway are not implemented.
+exist, reset assigned tasks to `PENDING`, close running attempt rows for reset
+assignments with a restart reason, and mark legacy or otherwise non-resumable
+running jobs failed. Durable attempt rows exist in SQLite schema version 7.
+Task leases and PostgreSQL/Flyway are not implemented.
 
 ## Decision
 
-- Explicit attempt history: accepted as future recovery behavior.
+- Explicit attempt history: implemented for the SQLite state store.
 - Lease-based restart recovery: accepted as future recovery behavior.
 - PostgreSQL plus Flyway: deferred until there is a real multi-process,
   operator-managed, or external database requirement.
 
 The behavior work comes first. A new database technology should not be added
 just to make recovery sound stronger. PostgreSQL/Flyway can be reconsidered
-after the attempt and lease contracts are defined and there is a concrete reason
-SQLite is no longer enough for the project goal.
+after the lease contract is defined and there is a concrete reason SQLite is no
+longer enough for the project goal.
 
 ## Attempt History Scope
 
-Attempt history should be implemented before claiming detailed retry audit or
-restart attribution. The contract should define:
+Attempt history now records a durable audit row for each task assignment made
+through SQLite-backed persistence. It is an audit trail, not a lease or
+ownership model.
+
+The implemented contract records:
 
 - A persisted attempt identity per task attempt.
 - Attempt sequence number.
@@ -38,9 +42,11 @@ restart attribution. The contract should define:
 - Completion, failure, timeout, or release time.
 - Failure reason when available.
 - Whether the attempt ended terminally or left work eligible for retry.
-- How existing `retry_count` maps to attempt rows during migration.
+- Existing `retry_count` remains task-row state; attempt numbers are assigned
+  from the existing rows for that task instead of being inferred from
+  `retry_count`.
 
-Minimum tests before implementation:
+Covered behavior:
 
 - Assignment creates a new attempt row before dispatch.
 - Successful completion closes only the current attempt.
@@ -49,7 +55,8 @@ Minimum tests before implementation:
 - Processor failure records a failed attempt.
 - Stale or duplicate task results do not mutate a closed or superseded attempt.
 - Startup recovery preserves completed attempt rows and resumes retryable work
-  without inventing false successes.
+  without inventing false successes; assigned tasks reset to `PENDING` still
+  close their running attempt with `coordinator_restart`.
 
 ## Lease-Based Restart Recovery Scope
 
@@ -90,14 +97,13 @@ Reconsider it only when at least one of these requirements exists:
   model for the intended deployment.
 
 If PostgreSQL/Flyway is accepted later, it should implement the same
-`JobStateStore` recovery contract as SQLite plus any attempt-history and lease
-extensions already accepted. It should not change public recovery guarantees by
-itself.
+`JobStateStore` recovery contract as SQLite, including attempt history and any
+lease extensions already accepted. It should not change public recovery
+guarantees by itself.
 
 ## Public Claim Rule
 
-Until attempt history and leases are implemented and tested, public docs should
-continue to say that assigned tasks are reset to `PENDING` on startup because
-leases are not implemented. They should also keep PostgreSQL/Flyway described as
-deferred infrastructure work, not as an implemented or required recovery
-guarantee.
+Until leases are implemented and tested, public docs should continue to say that
+assigned tasks are reset to `PENDING` on startup because leases are not
+implemented. They should also keep PostgreSQL/Flyway described as deferred
+infrastructure work, not as an implemented or required recovery guarantee.

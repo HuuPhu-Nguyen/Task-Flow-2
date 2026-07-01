@@ -24,7 +24,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 6;
+    public static final int CURRENT_SCHEMA_VERSION = 7;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -81,6 +81,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             } else {
                 createTasksTable();
             }
+            createTaskAttemptsTable();
             createPeerRegistryTable();
 
             writeSchemaVersion(CURRENT_SCHEMA_VERSION);
@@ -162,6 +163,28 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     failed_tasks              INTEGER NOT NULL DEFAULT 0,
                     latency_ewma_ms           INTEGER NOT NULL DEFAULT 0,
                     task_duration_ewma_ms     INTEGER NOT NULL DEFAULT 0
+                )
+            """);
+        }
+    }
+
+    private void createTaskAttemptsTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS task_attempts (
+                    attempt_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id         TEXT    NOT NULL,
+                    task_id        TEXT    NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    peer_id        TEXT    NOT NULL,
+                    started_at     INTEGER NOT NULL,
+                    finished_at    INTEGER,
+                    duration_ms    INTEGER,
+                    outcome        TEXT    NOT NULL DEFAULT 'RUNNING',
+                    failure_reason TEXT    NOT NULL DEFAULT '',
+                    UNIQUE(task_id, attempt_number),
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
                 )
             """);
         }
@@ -355,6 +378,20 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         if (!columnExists("tasks", "payload_json") || !columnExists("tasks", "result_payload_json")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
         }
+        if (!tableExists("task_attempts")) {
+            throw new SQLException("Database schema is missing task_attempts table.");
+        }
+        if (!columnExists("task_attempts", "job_id")
+                || !columnExists("task_attempts", "task_id")
+                || !columnExists("task_attempts", "attempt_number")
+                || !columnExists("task_attempts", "peer_id")
+                || !columnExists("task_attempts", "started_at")
+                || !columnExists("task_attempts", "finished_at")
+                || !columnExists("task_attempts", "duration_ms")
+                || !columnExists("task_attempts", "outcome")
+                || !columnExists("task_attempts", "failure_reason")) {
+            throw new SQLException("Database schema is missing task attempt history columns.");
+        }
         if (!tableExists("peer_registry")) {
             throw new SQLException("Database schema is missing peer_registry table.");
         }
@@ -523,18 +560,33 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
-        String sql = """
+        String updateTaskSql = """
                 UPDATE tasks
                 SET status='ASSIGNED',
                     assigned_peer_id=?,
                     started_at=?
                 WHERE task_id=? AND status='PENDING'
                 """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, peerId);
-            ps.setLong(2, startedAt);
-            ps.setString(3, taskId);
-            return ps.executeUpdate() > 0;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
+                ps.setString(1, peerId);
+                ps.setLong(2, startedAt);
+                ps.setString(3, taskId);
+                if (ps.executeUpdate() <= 0 || !insertTaskAttempt(taskId, peerId, startedAt)) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
             logSqlFailure("markTaskAssigned", e);
             return false;
@@ -558,12 +610,38 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     result_payload_json=?
                 WHERE task_id=? AND status='ASSIGNED'
                 """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, completedAt);
-            ps.setLong(2, durationMs);
-            ps.setString(3, toJson(resultPayload));
-            ps.setString(4, taskId);
-            return ps.executeUpdate() > 0;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                long normalizedDuration = Math.max(0L, durationMs);
+                if (!finishRunningAttempt(
+                        taskId,
+                        completedAt,
+                        normalizedDuration,
+                        TaskAttemptOutcome.SUCCEEDED,
+                        ""
+                )) {
+                    conn.rollback();
+                    return false;
+                }
+                ps.setLong(1, completedAt);
+                ps.setLong(2, normalizedDuration);
+                ps.setString(3, toJson(resultPayload));
+                ps.setString(4, taskId);
+                if (ps.executeUpdate() <= 0) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
             logSqlFailure("markTaskCompleted", e);
             return false;
@@ -571,6 +649,21 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized boolean markTaskRetried(String taskId, int retryCount) {
+        return markTaskRetried(
+                taskId,
+                retryCount,
+                TaskAttemptOutcome.RETRY_SCHEDULED,
+                "",
+                System.currentTimeMillis()
+        );
+    }
+
+    @Override
+    public synchronized boolean markTaskRetried(String taskId,
+                                               int retryCount,
+                                               TaskAttemptOutcome outcome,
+                                               String failureReason,
+                                               long finishedAt) {
         String sql = """
                 UPDATE tasks
                 SET status='PENDING',
@@ -581,10 +674,35 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     retry_count=?
                 WHERE task_id=? AND status='ASSIGNED'
                 """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setInt(1, retryCount);
-            ps.setString(2, taskId);
-            return ps.executeUpdate() > 0;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                if (!finishRunningAttempt(
+                        taskId,
+                        finishedAt,
+                        attemptDuration(taskId, finishedAt),
+                        normalizeFailureOutcome(outcome, TaskAttemptOutcome.RETRY_SCHEDULED),
+                        failureReason
+                )) {
+                    conn.rollback();
+                    return false;
+                }
+                ps.setInt(1, retryCount);
+                ps.setString(2, taskId);
+                if (ps.executeUpdate() <= 0) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
             logSqlFailure("markTaskRetried", e);
             return false;
@@ -592,16 +710,55 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized boolean markTaskFailed(String taskId) {
+        return markTaskFailed(
+                taskId,
+                TaskAttemptOutcome.TERMINAL_FAILURE,
+                "",
+                System.currentTimeMillis()
+        );
+    }
+
+    @Override
+    public synchronized boolean markTaskFailed(String taskId,
+                                              TaskAttemptOutcome outcome,
+                                              String failureReason,
+                                              long finishedAt) {
         String sql = """
                 UPDATE tasks
                 SET status='FAILED',
                     completed_at=?
                 WHERE task_id=? AND status NOT IN ('COMPLETED', 'FAILED')
                 """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, System.currentTimeMillis());
-            ps.setString(2, taskId);
-            return ps.executeUpdate() > 0;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                if (hasRunningAttempt(taskId)
+                        && !finishRunningAttempt(
+                        taskId,
+                        finishedAt,
+                        attemptDuration(taskId, finishedAt),
+                        normalizeFailureOutcome(outcome, TaskAttemptOutcome.TERMINAL_FAILURE),
+                        failureReason
+                )) {
+                    conn.rollback();
+                    return false;
+                }
+                ps.setLong(1, finishedAt);
+                ps.setString(2, taskId);
+                if (ps.executeUpdate() <= 0) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
             logSqlFailure("markTaskFailed", e);
             return false;
@@ -645,6 +802,15 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
     }
 
     public synchronized int markRunningJobsFailedOnStartup(long completedAt) {
+        String failAttemptsSql = """
+                UPDATE task_attempts
+                SET outcome='JOB_FAILED',
+                    finished_at=?,
+                    duration_ms=MAX(0, ? - started_at),
+                    failure_reason='coordinator_startup_reconciliation'
+                WHERE outcome='RUNNING'
+                  AND job_id IN (SELECT job_id FROM jobs WHERE status='RUNNING')
+                """;
         String failTasksSql = """
                 UPDATE tasks
                 SET status='FAILED', completed_at=?
@@ -656,8 +822,13 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement failTasks = conn.prepareStatement(failTasksSql);
+            try (PreparedStatement failAttempts = conn.prepareStatement(failAttemptsSql);
+                 PreparedStatement failTasks = conn.prepareStatement(failTasksSql);
                  PreparedStatement failJobs = conn.prepareStatement(failJobsSql)) {
+                failAttempts.setLong(1, completedAt);
+                failAttempts.setLong(2, completedAt);
+                failAttempts.executeUpdate();
+
                 failTasks.setLong(1, completedAt);
                 failTasks.executeUpdate();
 
@@ -679,6 +850,15 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
 
     @Override
     public synchronized boolean markRunningJobFailedOnStartup(String jobId, long completedAt) {
+        String failAttemptsSql = """
+                UPDATE task_attempts
+                SET outcome='JOB_FAILED',
+                    finished_at=?,
+                    duration_ms=MAX(0, ? - started_at),
+                    failure_reason='coordinator_startup_reconciliation'
+                WHERE outcome='RUNNING'
+                  AND job_id=?
+                """;
         String failTasksSql = """
                 UPDATE tasks
                 SET status='FAILED', completed_at=?
@@ -690,8 +870,14 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement failTasks = conn.prepareStatement(failTasksSql);
+            try (PreparedStatement failAttempts = conn.prepareStatement(failAttemptsSql);
+                 PreparedStatement failTasks = conn.prepareStatement(failTasksSql);
                  PreparedStatement failJob = conn.prepareStatement(failJobSql)) {
+                failAttempts.setLong(1, completedAt);
+                failAttempts.setLong(2, completedAt);
+                failAttempts.setString(3, jobId);
+                failAttempts.executeUpdate();
+
                 failTasks.setLong(1, completedAt);
                 failTasks.setString(2, jobId);
                 failTasks.executeUpdate();
@@ -724,9 +910,38 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     duration_ms=NULL
                 WHERE task_id=? AND status IN ('PENDING', 'ASSIGNED')
                 """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, taskId);
-            return ps.executeUpdate() > 0;
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                String priorStatus = taskStatus(taskId);
+                long resetAt = System.currentTimeMillis();
+                if ("ASSIGNED".equals(priorStatus)
+                        && hasRunningAttempt(taskId)
+                        && !finishRunningAttempt(
+                        taskId,
+                        resetAt,
+                        attemptDuration(taskId, resetAt),
+                        TaskAttemptOutcome.RETRY_SCHEDULED,
+                        "coordinator_restart"
+                )) {
+                    conn.rollback();
+                    return false;
+                }
+                ps.setString(1, taskId);
+                if (ps.executeUpdate() <= 0) {
+                    conn.rollback();
+                    return false;
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
             logSqlFailure("resetTaskForResume", e);
             return false;
@@ -864,6 +1079,152 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             }
         }
         return tasks;
+    }
+
+    @Override
+    public synchronized List<TaskAttemptRecord> loadTaskAttempts(String jobId) {
+        if (jobId == null || jobId.isBlank()) {
+            return List.of();
+        }
+        List<TaskAttemptRecord> attempts = new ArrayList<>();
+        String sql = """
+                SELECT
+                    job_id,
+                    task_id,
+                    attempt_number,
+                    peer_id,
+                    started_at,
+                    finished_at,
+                    duration_ms,
+                    outcome,
+                    failure_reason
+                FROM task_attempts
+                WHERE job_id=?
+                ORDER BY task_id ASC, attempt_number ASC
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    attempts.add(new TaskAttemptRecord(
+                            rs.getString("job_id"),
+                            rs.getString("task_id"),
+                            rs.getInt("attempt_number"),
+                            rs.getString("peer_id"),
+                            rs.getLong("started_at"),
+                            rs.getLong("finished_at"),
+                            rs.getLong("duration_ms"),
+                            attemptOutcomeFromDb(rs.getString("outcome")),
+                            rs.getString("failure_reason")
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            logSqlFailure("loadTaskAttempts", e);
+        }
+        return attempts;
+    }
+
+    private boolean insertTaskAttempt(String taskId, String peerId, long startedAt) throws SQLException {
+        String sql = """
+                INSERT INTO task_attempts(
+                    job_id,
+                    task_id,
+                    attempt_number,
+                    peer_id,
+                    started_at,
+                    outcome,
+                    failure_reason
+                )
+                SELECT
+                    job_id,
+                    task_id,
+                    COALESCE((
+                        SELECT MAX(attempt_number) + 1
+                        FROM task_attempts
+                        WHERE task_attempts.task_id=tasks.task_id
+                    ), 1),
+                    ?,
+                    ?,
+                    'RUNNING',
+                    ''
+                FROM tasks
+                WHERE task_id=?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, peerId);
+            ps.setLong(2, startedAt);
+            ps.setString(3, taskId);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    private boolean finishRunningAttempt(String taskId,
+                                         long finishedAt,
+                                         long durationMs,
+                                         TaskAttemptOutcome outcome,
+                                         String failureReason) throws SQLException {
+        String sql = """
+                UPDATE task_attempts
+                SET outcome=?,
+                    finished_at=?,
+                    duration_ms=?,
+                    failure_reason=?
+                WHERE attempt_id=(
+                    SELECT attempt_id
+                    FROM task_attempts
+                    WHERE task_id=? AND outcome='RUNNING'
+                    ORDER BY attempt_number DESC
+                    LIMIT 1
+                )
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, normalizeFinishedOutcome(outcome).name());
+            ps.setLong(2, finishedAt);
+            ps.setLong(3, Math.max(0L, durationMs));
+            ps.setString(4, failureReason == null ? "" : failureReason);
+            ps.setString(5, taskId);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    private boolean hasRunningAttempt(String taskId) throws SQLException {
+        String sql = "SELECT 1 FROM task_attempts WHERE task_id=? AND outcome='RUNNING' LIMIT 1";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private long attemptDuration(String taskId, long finishedAt) throws SQLException {
+        String sql = """
+                SELECT started_at
+                FROM task_attempts
+                WHERE task_id=? AND outcome='RUNNING'
+                ORDER BY attempt_number DESC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return 0L;
+                }
+                return Math.max(0L, finishedAt - rs.getLong("started_at"));
+            }
+        }
+    }
+
+    private String taskStatus(String taskId) throws SQLException {
+        String sql = "SELECT status FROM tasks WHERE task_id=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("status") : "";
+            }
+        }
     }
 
     @Override
@@ -1074,6 +1435,32 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         } catch (IllegalArgumentException ignored) {
             return PeerStatus.DISCONNECTED;
         }
+    }
+
+    private static TaskAttemptOutcome attemptOutcomeFromDb(String value) {
+        if (value == null || value.isBlank()) {
+            return TaskAttemptOutcome.JOB_FAILED;
+        }
+        try {
+            return TaskAttemptOutcome.valueOf(value);
+        } catch (IllegalArgumentException ignored) {
+            return TaskAttemptOutcome.JOB_FAILED;
+        }
+    }
+
+    private static TaskAttemptOutcome normalizeFailureOutcome(TaskAttemptOutcome outcome,
+                                                             TaskAttemptOutcome fallback) {
+        if (outcome == null || outcome == TaskAttemptOutcome.RUNNING || outcome == TaskAttemptOutcome.SUCCEEDED) {
+            return fallback;
+        }
+        return outcome;
+    }
+
+    private static TaskAttemptOutcome normalizeFinishedOutcome(TaskAttemptOutcome outcome) {
+        if (outcome == null || outcome == TaskAttemptOutcome.RUNNING) {
+            return TaskAttemptOutcome.JOB_FAILED;
+        }
+        return outcome;
     }
 
     private static String toJson(Object payload) {

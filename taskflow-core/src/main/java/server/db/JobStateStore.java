@@ -5,7 +5,27 @@ import java.util.Collection;
 import java.util.Optional;
 
 public interface JobStateStore {
+    enum TaskAttemptOutcome {
+        RUNNING,
+        SUCCEEDED,
+        RETRY_SCHEDULED,
+        TERMINAL_FAILURE,
+        DISPATCH_FAILED,
+        JOB_FAILED
+    }
+
     record TaskStartupState(String taskId, Object payload) {
+    }
+
+    record TaskAttemptRecord(String jobId,
+                             String taskId,
+                             int attemptNumber,
+                             String peerId,
+                             long startedAt,
+                             long finishedAt,
+                             long durationMs,
+                             TaskAttemptOutcome outcome,
+                             String failureReason) {
     }
 
     record ResumableTaskState(String taskId,
@@ -114,7 +134,22 @@ public interface JobStateStore {
 
     boolean markTaskRetried(String taskId, int retryCount);
 
+    default boolean markTaskRetried(String taskId,
+                                    int retryCount,
+                                    TaskAttemptOutcome outcome,
+                                    String failureReason,
+                                    long finishedAt) {
+        return markTaskRetried(taskId, retryCount);
+    }
+
     boolean markTaskFailed(String taskId);
+
+    default boolean markTaskFailed(String taskId,
+                                   TaskAttemptOutcome outcome,
+                                   String failureReason,
+                                   long finishedAt) {
+        return markTaskFailed(taskId);
+    }
 
     boolean markJobCompleted(String jobId);
 
@@ -132,6 +167,10 @@ public interface JobStateStore {
 
     default Optional<CompletedJobResultState> loadCompletedJobResult(String jobId) {
         return Optional.empty();
+    }
+
+    default List<TaskAttemptRecord> loadTaskAttempts(String jobId) {
+        return List.of();
     }
 
     default boolean resetTaskForResume(String taskId) {

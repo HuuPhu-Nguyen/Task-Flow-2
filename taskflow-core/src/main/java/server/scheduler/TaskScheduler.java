@@ -156,7 +156,7 @@ public class TaskScheduler implements Runnable {
                     metrics.recordRetry();
                 }
                 onAttemptFailure(assignedPeerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-                boolean persisted = persistTaskFailure(task, outcome);
+                boolean persisted = persistTaskFailure(task, outcome, "task_timeout", now);
                 logErrorEvent("task_timeout", fields(
                         "job_id", job.getJobId(),
                         "task_id", task.getTaskId(),
@@ -386,7 +386,12 @@ public class TaskScheduler implements Runnable {
                 }
 
                 onAttemptFailure(peerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-                boolean persisted = persistTaskFailure(task, outcome);
+                boolean persisted = persistTaskFailure(
+                        task,
+                        outcome,
+                        normalizedReason,
+                        System.currentTimeMillis()
+                );
                 logErrorEvent("task_peer_unavailable", fields(
                         "job_id", job.getJobId(),
                         "task_id", task.getTaskId(),
@@ -469,7 +474,12 @@ public class TaskScheduler implements Runnable {
                 metrics.recordRetry();
             }
             onAttemptFailure(envelope.fromNodeId(), outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-            boolean persisted = persistTaskFailure(task, outcome);
+            boolean persisted = persistTaskFailure(
+                    task,
+                    outcome,
+                    result.getErrorMessage(),
+                    System.currentTimeMillis()
+            );
             logErrorEvent("task_failed", fields(
                     "job_id", job.getJobId(),
                     "task_id", task.getTaskId(),
@@ -514,7 +524,12 @@ public class TaskScheduler implements Runnable {
                         "markTaskFailed",
                         job.getJobId(),
                         task.getTaskId(),
-                        db.markTaskFailed(task.getTaskId())
+                        db.markTaskFailed(
+                                task.getTaskId(),
+                                JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                persistenceFailureReason("markTaskCompleted"),
+                                System.currentTimeMillis()
+                        )
                 );
                 failJob(job, persistenceFailureReason("markTaskCompleted"));
                 return;
@@ -603,7 +618,13 @@ public class TaskScheduler implements Runnable {
                     "markTaskRetried",
                     job.getJobId(),
                     task.getTaskId(),
-                    db.markTaskRetried(task.getTaskId(), task.getRetryCount())
+                    db.markTaskRetried(
+                            task.getTaskId(),
+                            task.getRetryCount(),
+                            JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
+                            e.getMessage(),
+                            System.currentTimeMillis()
+                    )
             )) {
                 failJob(job, persistenceFailureReason("markTaskRetried"));
                 return;
@@ -658,23 +679,38 @@ public class TaskScheduler implements Runnable {
         registry.updateMetricsSnapshot(peerId);
     }
 
-    private boolean persistTaskFailure(TaskUnit<?> task, TaskUnit.FailureOutcome outcome) {
+    private boolean persistTaskFailure(TaskUnit<?> task,
+                                       TaskUnit.FailureOutcome outcome,
+                                       String failureReason,
+                                       long finishedAt) {
         if (db == null) {
             return true;
         }
+        String reason = failureReason == null || failureReason.isBlank() ? "task_failed" : failureReason;
         if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
             return recordPersistence(
                     "markTaskFailed",
                     task.getJobId(),
                     task.getTaskId(),
-                    db.markTaskFailed(task.getTaskId())
+                    db.markTaskFailed(
+                            task.getTaskId(),
+                            JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE,
+                            reason,
+                            finishedAt
+                    )
             );
         } else if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
             return recordPersistence(
                     "markTaskRetried",
                     task.getJobId(),
                     task.getTaskId(),
-                    db.markTaskRetried(task.getTaskId(), task.getRetryCount())
+                    db.markTaskRetried(
+                            task.getTaskId(),
+                            task.getRetryCount(),
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            reason,
+                            finishedAt
+                    )
             );
         }
         return true;
@@ -753,6 +789,7 @@ public class TaskScheduler implements Runnable {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
         boolean persisted = true;
         if (db != null) {
+            long failedAt = System.currentTimeMillis();
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
@@ -760,7 +797,12 @@ public class TaskScheduler implements Runnable {
                             "markTaskFailed",
                             job.getJobId(),
                             task.getTaskId(),
-                            db.markTaskFailed(task.getTaskId())
+                            db.markTaskFailed(
+                                    task.getTaskId(),
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    "result_delivery_abandoned",
+                                    failedAt
+                            )
                     );
                 }
             }
@@ -789,6 +831,7 @@ public class TaskScheduler implements Runnable {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
         boolean persisted = true;
         if (!completion.success && db != null) {
+            long failedAt = System.currentTimeMillis();
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
@@ -796,7 +839,14 @@ public class TaskScheduler implements Runnable {
                             "markTaskFailed",
                             job.getJobId(),
                             task.getTaskId(),
-                            db.markTaskFailed(task.getTaskId())
+                            db.markTaskFailed(
+                                    task.getTaskId(),
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    completion.reason == null || completion.reason.isBlank()
+                                            ? "job_failed"
+                                            : completion.reason,
+                                    failedAt
+                            )
                     );
                 }
             }

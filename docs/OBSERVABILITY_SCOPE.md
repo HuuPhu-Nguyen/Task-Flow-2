@@ -105,8 +105,10 @@ Current observability is log-based. Operators can grep logs for structured
 events, but TaskFlow does not aggregate those events into a metrics backend or
 provide stable dashboard contracts.
 
-The logs also do not provide durable attempt-history records, lease ownership
-timelines, outbox replay state, DLQ review decisions, or redrive counts. Those
+SQLite persistence now records durable task-attempt history rows for assignment,
+success, retry, terminal failure, dispatch failure, startup reconciliation, and
+restart release. TaskFlow still does not provide lease ownership timelines,
+outbox replay state, DLQ review decisions, or redrive counts. Those remaining
 behaviors are deferred in the recovery and RabbitMQ scope documents.
 
 ## Metrics Backend Deferral
@@ -114,7 +116,7 @@ behaviors are deferred in the recovery and RabbitMQ scope documents.
 A dedicated metrics backend is deferred until at least one of these behavior
 tracks is implemented and needs promoted operational visibility:
 
-- recovery leases and explicit attempt history;
+- recovery leases or promoted attempt-history dashboards;
 - RabbitMQ durable outbox and replay;
 - TaskFlow DLQ inspection, quarantine, discard, and redrive.
 
@@ -122,13 +124,14 @@ Before adding a metrics exporter, define:
 
 - metric names, units, and label cardinality;
 - which log events remain canonical and which become metrics;
-- persistence-backed attempt and lease semantics for retry/recovery metrics;
+- persistence-backed lease semantics and any promoted attempt-history metric contracts;
 - outbox and DLQ state transitions for RabbitMQ metrics;
 - focused tests that prove emitted metrics match scheduler and broker state.
 
 ## Public Claim Rule
 
-Public docs should describe current observability as structured logs and
-log-based scheduler metrics. Avoid claiming built-in dashboards, alerting,
-tracing, durable retry audit, outbox observability, or DLQ workflow visibility
-until those systems exist and are tested.
+Public docs should describe current observability as structured logs,
+log-based scheduler metrics, and SQLite task-attempt audit rows. Avoid claiming
+built-in dashboards, alerting, tracing, lease observability, outbox
+observability, or DLQ workflow visibility until those systems exist and are
+tested.

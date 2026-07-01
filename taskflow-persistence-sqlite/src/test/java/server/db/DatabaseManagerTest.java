@@ -65,6 +65,19 @@ class DatabaseManagerTest {
             assertEquals(456L, task.completedAt());
             assertEquals(333L, task.durationMs());
             assertEquals(0, task.retryCount());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-1");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals("job-1", attempt.jobId());
+            assertEquals("task-1", attempt.taskId());
+            assertEquals(1, attempt.attemptNumber());
+            assertEquals("peer-1", attempt.peerId());
+            assertEquals(123L, attempt.startedAt());
+            assertEquals(456L, attempt.finishedAt());
+            assertEquals(333L, attempt.durationMs());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempt.outcome());
+            assertEquals("", attempt.failureReason());
         } finally {
             db.close();
         }
@@ -308,6 +321,106 @@ class DatabaseManagerTest {
             assertEquals(0L, task.startedAt());
             assertEquals(0L, task.completedAt());
             assertEquals(0L, task.durationMs());
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void persistsTaskAttemptHistoryAcrossRetryAndRestart() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-attempt-history-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-attempts", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-attempts", "job-attempts");
+            assertTrue(db.markTaskAssigned("task-attempts", "peer-1", 100L));
+            assertTrue(db.markTaskRetried(
+                    "task-attempts",
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "processor failed",
+                    175L));
+            assertTrue(db.markTaskAssigned("task-attempts", "peer-2", 220L));
+            assertTrue(db.markTaskCompleted("task-attempts", 280L, 60L, "result"));
+        } finally {
+            db.close();
+        }
+
+        DatabaseManager reopened = new DatabaseManager(dbPath.toString());
+        try {
+            List<JobStateStore.TaskAttemptRecord> attempts = reopened.loadTaskAttempts("job-attempts");
+            assertEquals(2, attempts.size());
+
+            JobStateStore.TaskAttemptRecord first = attempts.getFirst();
+            assertEquals(1, first.attemptNumber());
+            assertEquals("peer-1", first.peerId());
+            assertEquals(100L, first.startedAt());
+            assertEquals(175L, first.finishedAt());
+            assertEquals(75L, first.durationMs());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, first.outcome());
+            assertEquals("processor failed", first.failureReason());
+
+            JobStateStore.TaskAttemptRecord second = attempts.get(1);
+            assertEquals(2, second.attemptNumber());
+            assertEquals("peer-2", second.peerId());
+            assertEquals(220L, second.startedAt());
+            assertEquals(280L, second.finishedAt());
+            assertEquals(60L, second.durationMs());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, second.outcome());
+            assertEquals("", second.failureReason());
+        } finally {
+            reopened.close();
+        }
+    }
+
+    @Test
+    void resetTaskForResumeRecordsRestartReleaseAttempt() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-restart-release-attempt-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-restart-release", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-restart-release", "job-restart-release");
+            assertTrue(db.markTaskAssigned("task-restart-release", "peer-1", 123L));
+            assertTrue(db.resetTaskForResume("task-restart-release"));
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-restart-release").getFirst();
+            assertEquals("PENDING", task.status());
+            assertNull(task.assignedPeerId());
+            assertEquals(0, task.retryCount());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-restart-release");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals("peer-1", attempt.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, attempt.outcome());
+            assertEquals("coordinator_restart", attempt.failureReason());
+            assertTrue(attempt.finishedAt() >= 123L);
+        } finally {
+            db.close();
+        }
+    }
+
+    @Test
+    void markRunningJobsFailedOnStartupClosesRunningAttempts() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-startup-failed-attempt-test.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+
+        try {
+            db.insertJob("job-startup-fail", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-startup-fail", "job-startup-fail");
+            assertTrue(db.markTaskAssigned("task-startup-fail", "peer-1", 100L));
+
+            assertEquals(1, db.markRunningJobsFailedOnStartup(250L));
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-startup-fail");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals(JobStateStore.TaskAttemptOutcome.JOB_FAILED, attempt.outcome());
+            assertEquals("coordinator_startup_reconciliation", attempt.failureReason());
+            assertEquals(250L, attempt.finishedAt());
+            assertEquals(150L, attempt.durationMs());
         } finally {
             db.close();
         }
@@ -575,6 +688,7 @@ class DatabaseManagerTest {
             assertTrue(columnExists(dbPath, "jobs", "result_payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
+            assertTrue(tableExists(dbPath, "task_attempts"));
             assertEquals(1, db.getTasksForJob("legacy-job").size());
             assertFalse(db.insertTask("orphan-task", "missing-job"));
         } finally {
@@ -747,5 +861,15 @@ class DatabaseManagerTest {
             }
         }
         return false;
+    }
+
+    private static boolean tableExists(Path dbPath, String tableName) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             var ps = conn.prepareStatement("SELECT name FROM sqlite_master WHERE type='table' AND name=?")) {
+            ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
     }
 }

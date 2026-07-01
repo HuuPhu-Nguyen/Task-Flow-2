@@ -17,7 +17,10 @@ import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Collection;
+import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -30,6 +33,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -68,6 +72,14 @@ class TaskSchedulerPersistenceTest {
                     "markTaskCompleted:task-job-success-0",
                     "markJobCompleted:job-success"
             ), store.events());
+            List<JobStateStore.TaskAttemptRecord> attempts = store.loadTaskAttempts("job-success");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals("task-job-success-0", attempt.taskId());
+            assertEquals(1, attempt.attemptNumber());
+            assertEquals("peer-1", attempt.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempt.outcome());
+            assertEquals("", attempt.failureReason());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -139,6 +151,127 @@ class TaskSchedulerPersistenceTest {
                     "markTaskFailed:task-job-failure-0",
                     "markJobFailed:job-failure"
             ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void peerReportedFailurePersistsRetryAttemptHistory() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        MultiTaskOutput output = new MultiTaskOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "2"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-attempt-retry-history-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-retry-history", List.of("payload")), "requester-1"));
+
+            TaskAssignMessage first = output.awaitTask();
+            assertNotNull(first);
+            assertTrue(store.awaitTaskAssigned());
+            mailbox.put(new MessageEnvelope(failedResult(first, "processor failed"), "peer-1"));
+
+            TaskAssignMessage retry = output.awaitTask();
+            assertNotNull(retry);
+            assertEquals(first.getTaskId(), retry.getTaskId());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = store.loadTaskAttempts("job-retry-history");
+            assertEquals(2, attempts.size());
+            JobStateStore.TaskAttemptRecord failed = attempts.getFirst();
+            assertEquals(1, failed.attemptNumber());
+            assertEquals("peer-1", failed.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, failed.outcome());
+            assertEquals("processor failed", failed.failureReason());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.get(1).outcome());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void timeoutPersistsTerminalAttemptHistory() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("slow-peer");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_TASK_TIMEOUT_MS", "1",
+                "TASKFLOW_MAX_TASK_RETRIES", "1"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-attempt-timeout-history-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-timeout-history", List.of("payload")), "requester-1"));
+
+            assertTrue(output.awaitTask());
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobFailed());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = store.loadTaskAttempts("job-timeout-history");
+            assertEquals(1, attempts.size());
+            JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
+            assertEquals("slow-peer", attempt.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE, attempt.outcome());
+            assertEquals("task_timeout", attempt.failureReason());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void peerDisconnectPersistsReleaseAttemptHistoryAndIgnoresStaleResult() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        MultiTaskOutput output = new MultiTaskOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-attempt-disconnect-history-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-disconnect-history", List.of("payload")), "requester-1"));
+
+            TaskAssignMessage first = output.awaitTask();
+            assertNotNull(first);
+            registry.remove("peer-1");
+            registry.register("peer-2", new PeerInfo(
+                    "peer-2",
+                    SchedulerConfig.defaults(),
+                    List.of("TEST_TASK")
+            ));
+            mailbox.put(new MessageEnvelope(
+                    new protocol.PeerDisconnectedMessage("peer-1", "2026-07-01T00:00:00Z", "tcp_disconnect"),
+                    "peer-1"
+            ));
+
+            TaskAssignMessage retry = output.awaitTask();
+            assertNotNull(retry);
+            mailbox.put(new MessageEnvelope(successResult(first, "stale-result"), "peer-1"));
+            assertFalse(output.awaitResult(300));
+
+            mailbox.put(new MessageEnvelope(successResult(retry, "accepted-result"), "peer-2"));
+            assertTrue(output.awaitResult());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = store.loadTaskAttempts("job-disconnect-history");
+            assertEquals(2, attempts.size());
+            JobStateStore.TaskAttemptRecord released = attempts.getFirst();
+            assertEquals("peer-1", released.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, released.outcome());
+            assertEquals("tcp_disconnect", released.failureReason());
+
+            JobStateStore.TaskAttemptRecord accepted = attempts.get(1);
+            assertEquals("peer-2", accepted.peerId());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, accepted.outcome());
+            assertEquals(List.of("accepted-result"), output.result().getResultsByTaskId());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1044,6 +1177,40 @@ class TaskSchedulerPersistenceTest {
         }
     }
 
+    private static class MultiTaskOutput implements SchedulerOutput {
+        private final BlockingQueue<TaskAssignMessage> tasks = new LinkedBlockingQueue<>();
+        private final CountDownLatch resultReceived = new CountDownLatch(1);
+        private final AtomicReference<JobResultMessage> result = new AtomicReference<>();
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            tasks.offer(message);
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            result.set(message);
+            resultReceived.countDown();
+            return true;
+        }
+
+        TaskAssignMessage awaitTask() throws InterruptedException {
+            return tasks.poll(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitResult() throws InterruptedException {
+            return awaitResult(2_000);
+        }
+
+        boolean awaitResult(long timeoutMillis) throws InterruptedException {
+            return resultReceived.await(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
+
+        JobResultMessage result() {
+            return result.get();
+        }
+    }
+
     private static class UndeliverableResultOutput implements SchedulerOutput {
         private final CountDownLatch taskReceived = new CountDownLatch(1);
         private final CountDownLatch resultAttempted = new CountDownLatch(1);
@@ -1082,6 +1249,8 @@ class TaskSchedulerPersistenceTest {
 
     private static class RecordingJobStateStore implements JobStateStore {
         private final List<String> events = new ArrayList<>();
+        private final Map<String, String> taskJobIds = new LinkedHashMap<>();
+        private final Map<String, Deque<TaskAttemptRecord>> attemptsByJobId = new LinkedHashMap<>();
         private final CountDownLatch taskAssigned = new CountDownLatch(1);
         private final CountDownLatch jobCompleted = new CountDownLatch(1);
         private final CountDownLatch jobFailed = new CountDownLatch(1);
@@ -1133,6 +1302,9 @@ class TaskSchedulerPersistenceTest {
                                                        Collection<String> taskIds) {
             events.add("insertJobWithTasks:" + jobId + ":" + taskType + ":" + requesterId + ":"
                     + fileCount + ":" + String.join(",", taskIds));
+            for (String taskId : taskIds) {
+                taskJobIds.put(taskId, jobId);
+            }
             if (jobStartupPersists) {
                 existingJobIds.add(jobId);
             }
@@ -1154,12 +1326,28 @@ class TaskSchedulerPersistenceTest {
         @Override
         public synchronized boolean insertTask(String taskId, String jobId) {
             events.add("insertTask:" + taskId + ":" + jobId);
+            taskJobIds.put(taskId, jobId);
             return true;
         }
 
         @Override
         public synchronized boolean markTaskAssigned(String taskId, String peerId, long startedAt) {
             events.add("markTaskAssigned:" + taskId + ":" + peerId);
+            if (succeeds("markTaskAssigned")) {
+                String jobId = taskJobIds.getOrDefault(taskId, "");
+                Deque<TaskAttemptRecord> attempts = attemptsByJobId.computeIfAbsent(jobId, ignored -> new ArrayDeque<>());
+                attempts.addLast(new TaskAttemptRecord(
+                        jobId,
+                        taskId,
+                        attemptsForTask(attempts, taskId) + 1,
+                        peerId,
+                        startedAt,
+                        0L,
+                        0L,
+                        TaskAttemptOutcome.RUNNING,
+                        ""
+                ));
+            }
             taskAssigned.countDown();
             return succeeds("markTaskAssigned");
         }
@@ -1167,6 +1355,15 @@ class TaskSchedulerPersistenceTest {
         @Override
         public synchronized boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
             events.add("markTaskCompleted:" + taskId);
+            if (succeeds("markTaskCompleted")) {
+                finishAttempt(
+                        taskId,
+                        completedAt,
+                        Math.max(0L, durationMs),
+                        TaskAttemptOutcome.SUCCEEDED,
+                        ""
+                );
+            }
             return succeeds("markTaskCompleted");
         }
 
@@ -1177,9 +1374,53 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized boolean markTaskRetried(String taskId,
+                                                   int retryCount,
+                                                   TaskAttemptOutcome outcome,
+                                                   String failureReason,
+                                                   long finishedAt) {
+            if (succeeds("markTaskRetried")) {
+                finishAttempt(
+                        taskId,
+                        finishedAt,
+                        0L,
+                        outcome == null ? TaskAttemptOutcome.RETRY_SCHEDULED : outcome,
+                        failureReason
+                );
+            }
+            return markTaskRetried(taskId, retryCount);
+        }
+
+        @Override
         public synchronized boolean markTaskFailed(String taskId) {
             events.add("markTaskFailed:" + taskId);
+            if (succeeds("markTaskFailed")) {
+                finishAttempt(
+                        taskId,
+                        System.currentTimeMillis(),
+                        0L,
+                        TaskAttemptOutcome.TERMINAL_FAILURE,
+                        ""
+                );
+            }
             return succeeds("markTaskFailed");
+        }
+
+        @Override
+        public synchronized boolean markTaskFailed(String taskId,
+                                                  TaskAttemptOutcome outcome,
+                                                  String failureReason,
+                                                  long finishedAt) {
+            if (succeeds("markTaskFailed")) {
+                finishAttempt(
+                        taskId,
+                        finishedAt,
+                        0L,
+                        outcome == null ? TaskAttemptOutcome.TERMINAL_FAILURE : outcome,
+                        failureReason
+                );
+            }
+            return markTaskFailed(taskId);
         }
 
         @Override
@@ -1222,6 +1463,11 @@ class TaskSchedulerPersistenceTest {
             return Optional.empty();
         }
 
+        @Override
+        public synchronized List<TaskAttemptRecord> loadTaskAttempts(String jobId) {
+            return List.copyOf(attemptsByJobId.getOrDefault(jobId, new ArrayDeque<>()));
+        }
+
         boolean awaitTaskAssigned() throws InterruptedException {
             return taskAssigned.await(2, TimeUnit.SECONDS);
         }
@@ -1256,6 +1502,48 @@ class TaskSchedulerPersistenceTest {
 
         private boolean succeeds(String operation) {
             return !operation.equals(failingOperation);
+        }
+
+        private static int attemptsForTask(Deque<TaskAttemptRecord> attempts, String taskId) {
+            return (int) attempts.stream()
+                    .filter(attempt -> attempt.taskId().equals(taskId))
+                    .count();
+        }
+
+        private void finishAttempt(String taskId,
+                                   long finishedAt,
+                                   long durationMs,
+                                   TaskAttemptOutcome outcome,
+                                   String failureReason) {
+            String jobId = taskJobIds.getOrDefault(taskId, "");
+            Deque<TaskAttemptRecord> attempts = attemptsByJobId.get(jobId);
+            if (attempts == null || attempts.isEmpty()) {
+                return;
+            }
+            List<TaskAttemptRecord> updated = new ArrayList<>();
+            boolean replaced = false;
+            for (TaskAttemptRecord attempt : attempts) {
+                if (!replaced
+                        && attempt.taskId().equals(taskId)
+                        && attempt.outcome() == TaskAttemptOutcome.RUNNING) {
+                    updated.add(new TaskAttemptRecord(
+                            attempt.jobId(),
+                            attempt.taskId(),
+                            attempt.attemptNumber(),
+                            attempt.peerId(),
+                            attempt.startedAt(),
+                            finishedAt,
+                            durationMs,
+                            outcome,
+                            failureReason == null ? "" : failureReason
+                    ));
+                    replaced = true;
+                } else {
+                    updated.add(attempt);
+                }
+            }
+            attempts.clear();
+            attempts.addAll(updated);
         }
 
         private boolean awaitEvent(String expected) throws InterruptedException {
