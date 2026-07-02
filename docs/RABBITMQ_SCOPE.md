@@ -11,13 +11,14 @@ implementation remains a transitional broker adapter, not a fully supported
 production runtime.
 
 The current implementation is useful for broker-backed demos and focused
-integration coverage, but it does not yet provide the durability workflows
+integration coverage, but it does not yet provide every operational workflow
 needed to call RabbitMQ a complete supported runtime. The coordinator now has
 SQLite-backed outbox replay for its outbound RabbitMQ task assignments and
-final job results, but DLQ review/redrive, broker-backed CI, desktop GUI
-evidence, and broader outage coverage remain incomplete. TCP remains the
-current default compatibility/demo runtime until the replacement gates in
-`docs/RUNTIME_STRATEGY.md` pass.
+final job results, with live broker coverage for seeded pending rows and
+replayed task-assignment duplicates. DLQ review/redrive, broker-backed CI,
+desktop GUI evidence, and broader outage coverage remain incomplete. TCP
+remains the current default compatibility/demo runtime until the replacement
+gates in `docs/RUNTIME_STRATEGY.md` pass.
 
 ## Current RabbitMQ Guarantees
 
@@ -55,8 +56,10 @@ The current RabbitMQ path includes:
 - Dead-letter exchange and queue topology declaration.
 - Live broker tests for shared-route delivery, peer-route delivery,
   acknowledgement drain, handler-failure requeue, reject-to-dead-letter,
-  prefetch behavior, broker-side connection-close recovery, and coordinator
-  job completion.
+  prefetch behavior, broker-side connection-close recovery, coordinator job
+  completion, seeded pending outbox replay for `TASK_ASSIGN` and `JOB_RESULT`,
+  replay after publish-before-sent-marking, and duplicate task-result
+  rejection after replayed task assignments.
 - Docker Compose demo coverage for a RabbitMQ-backed image conversion job when
   Docker is available.
 
@@ -71,8 +74,6 @@ TaskFlow does not yet provide:
   assignment acknowledgement until `TASK_RESULT` publication is confirmed.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
-- Live broker crash-timing coverage for coordinator failure before publish,
-  after publish before outbox sent-marking, or during replay.
 - TaskFlow DLQ inspection.
 - TaskFlow DLQ quarantine/discard decisions.
 - TaskFlow DLQ redrive back to the correct normal route.
@@ -95,14 +96,12 @@ First close remaining runtime replacement gaps:
 - Define RabbitMQ result-request behavior or keep it explicitly unsupported
   while live `JOB_RESULT` delivery is the GUI RabbitMQ result path.
 
-Then broaden durable outbox/replay evidence:
+Then close remaining durable outbox/replay decisions:
 
-- Add live broker crash-window tests for coordinator crash before publish,
-  after publish before outbox sent-marking, and during replay.
-- Prove replay does not create successful duplicate task results or duplicate
-  terminal job completion against a live broker.
 - Decide whether peer-side durable `TASK_RESULT` outbox persistence is needed
   beyond the current deferred-ack/requeue behavior.
+- Keep live coordinator outbox crash-window coverage in the broker-backed CI
+  profile when that profile is added.
 
 Then implement DLQ review/redrive:
 

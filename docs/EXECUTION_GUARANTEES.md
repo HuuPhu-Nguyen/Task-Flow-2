@@ -57,7 +57,7 @@ This document defines the current runtime guarantees of TaskFlow.
 
 - RabbitMQ client automatic connection recovery is enabled for transport connections.
 - Opt-in live transport coverage verifies that an existing transport can consume and publish again after the broker closes its connection through the RabbitMQ management API.
-- SQLite-backed coordinator outbox replay covers coordinator-originated `TASK_ASSIGN` and final `JOB_RESULT` messages that were queued before a coordinator crash.
+- SQLite-backed coordinator outbox replay covers coordinator-originated `TASK_ASSIGN` and final `JOB_RESULT` messages that were queued before a coordinator crash. Live broker coverage verifies seeded pending outbox rows, replay after a simulated publish-before-sent-marking crash window, and duplicate task-result rejection after replayed task assignments.
 - This does not guarantee full broker outage recovery, peer-side durable `TASK_RESULT` replay, or redelivery of messages outside the coordinator outbox.
 
 ## RabbitMQ Dead Lettering
