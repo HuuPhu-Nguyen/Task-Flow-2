@@ -87,7 +87,7 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-peer` - command-line peer runtime for TCP or RabbitMQ, with submitter/executor/combined runtime profiles
 - `taskflow-gui` - JavaFX peer for TCP or RabbitMQ with GUI-facing adapters and submitter/executor/combined runtime profiles
 
-Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/final-result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist and role-by-role plugin contract, and `docs/PEER_LIFECYCLE.md` for the peer submitter/result-handling lifecycle.
+Framework core no longer imports concrete image, video, or text job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Server-side scheduling uses `server.job.TaskPlugin`, peer execution uses `peer.engine.PeerProcessorPlugin`, and client upload/final-result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. Conversion plugins can keep binary file bytes inline as Base64 or use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist and role-by-role plugin contract, `docs/PAYLOAD_STORAGE.md` for payload-reference ownership and limits, and `docs/PEER_LIFECYCLE.md` for the peer submitter/result-handling lifecycle.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, job submission, result routing, worker execution, and history reads. It is a peer UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for the selectable RabbitMQ adapter, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -203,14 +203,14 @@ Currently implemented job types:
 - Converts between PNG, JPG, BMP, GIF
 - Supports PDF to image conversion
 - Uses Apache PDFBox for PDF rendering
-- Uses the conversion client plugin to encode local files as Base64 payloads and save decoded results
+- Uses the conversion client plugin to encode local files as inline Base64 payloads by default, or local-file payload references when configured, and save decoded results
 
 **Video transcoding features:**
 - Converts between MP4, AVI, MKV, MOV, WEBM, FLV, WMV
 - Uses JavaCV with bundled FFmpeg native libraries
 - Uses broadly available FFmpeg encoders for portability across machines
 - Preserves source audio streams when supported by the target format
-- Uses the conversion client plugin to encode local files as Base64 payloads and save decoded results
+- Uses the conversion client plugin to encode local files as inline Base64 payloads by default, or local-file payload references when configured, and save decoded results
 
 **Text analysis features:**
 - Reads TXT, Markdown, CSV, and log files as UTF-8 text
@@ -377,6 +377,8 @@ Environment overrides:
 - `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
 - `TASKFLOW_MAX_RESULT_BYTES` - maximum single conversion result payload size before saving/sending, default `67108864` bytes
+- `TASKFLOW_PAYLOAD_STORAGE_DIR` - optional local/shared filesystem root for conversion payload references
+- `TASKFLOW_EXTERNAL_PAYLOAD_THRESHOLD_BYTES` - raw byte threshold for externalizing conversion inputs/results when a payload storage root is configured, default `8388608` bytes
 
 PowerShell override example:
 

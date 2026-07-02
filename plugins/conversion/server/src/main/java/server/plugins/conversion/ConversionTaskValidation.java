@@ -65,13 +65,30 @@ final class ConversionTaskValidation {
             throw new IllegalArgumentException("Unsupported conversion input file type for " + payload.fileName()
                     + ". Supported extensions: " + allowedInputExtensions);
         }
-        if (payload.base64Data() == null || payload.base64Data().isBlank()) {
-            throw new IllegalArgumentException("Conversion payload " + index + " requires Base64 data.");
+        if (payload.hasInlineData() == payload.hasPayloadReference()) {
+            throw new IllegalArgumentException("Conversion payload " + index
+                    + " requires exactly one of Base64 data or a payload reference.");
+        }
+        if (payload.hasPayloadReference()) {
+            validatePayloadReference(payload, index);
+            return;
         }
         try {
             Base64.getDecoder().decode(payload.base64Data());
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Conversion payload " + index + " has invalid Base64 data.", e);
+        }
+    }
+
+    private static void validatePayloadReference(FilePayload payload, int index) {
+        if (!payload.payloadReference().isLocalFile()) {
+            throw new IllegalArgumentException("Conversion payload " + index
+                    + " has unsupported payload reference storage type: "
+                    + payload.payloadReference().storageType());
+        }
+        if (payload.payloadReference().sizeBytes() <= 0) {
+            throw new IllegalArgumentException("Conversion payload " + index
+                    + " payload reference must point to a non-empty file.");
         }
     }
 

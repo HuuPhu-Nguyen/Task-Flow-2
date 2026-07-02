@@ -16,7 +16,7 @@ This document defines the current runtime guarantees of TaskFlow.
   When persistence is enabled, it also rejects IDs already present in persisted
   job history.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
-- Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, and invalid Base64 file data.
+- Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid Base64 file data, and invalid conversion payload-reference shapes.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work.
 
 ## Peer Submitter and Result Handling
@@ -26,7 +26,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - TCP coordinator registration uses the peer-declared ID from heartbeat or first peer message, not the server-side socket address. Active duplicate TCP peer IDs are rejected without replacing the existing peer.
 - Current RabbitMQ peer routes are keyed by peer ID; duplicate active RabbitMQ peers with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
 - When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Live sockets, connection handles, broker consumers, and channels are not persisted.
-- Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling.
+- Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling. Conversion submitters inline Base64 by default and can use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
 - The JavaFX GUI is the supported peer UI for TCP submit, execute, receive-result, and save-result behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.

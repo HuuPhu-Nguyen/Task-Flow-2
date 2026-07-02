@@ -142,8 +142,13 @@ Use `PayloadLimits` when reading local inputs and writing results:
 
 - `maxTasksPerJob()` for input count.
 - `maxInputBytes()` for each local input file.
-- `maxJobPayloadBytes()` for aggregate encoded job payload size.
+- `maxJobPayloadBytes()` for aggregate inline data or reference metadata size.
 - `maxResultBytes()` for decoded result payloads written to disk.
+
+For large binary payloads, use the shared `PayloadReference` /
+`LocalPayloadStorage` contract or document a plugin-owned equivalent. See
+`docs/PAYLOAD_STORAGE.md` for the current local-file reference behavior,
+ownership, cleanup, and failure rules.
 
 Use `SafeFileNames.safeOutputPath(...)` or an equivalent safe path strategy when
 writing files from result-provided names. Do not trust result filenames to stay
@@ -228,6 +233,9 @@ Client module tests should cover:
 - Unsupported input extensions are rejected.
 - `PayloadLimits` failures are surfaced for input count, input bytes, and total
   job payload bytes.
+- Referenced payload tests cover missing storage roots, unsupported references,
+  size/checksum failures, and safe fallback to inline payloads when the storage
+  root is unset.
 - Result handling writes or presents the expected final payload, stays inside
   the selected output directory when writing files, handles duplicate names
   safely, and enforces result-size limits when the result contains file data.

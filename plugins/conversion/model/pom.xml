@@ -10,4 +10,11 @@
     </parent>
 
     <artifactId>taskflow-plugin-conversion-model</artifactId>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.dickinson.cs</groupId>
+            <artifactId>taskflow-spi</artifactId>
+        </dependency>
+    </dependencies>
 </project>

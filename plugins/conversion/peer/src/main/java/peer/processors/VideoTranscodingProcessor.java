@@ -1,5 +1,6 @@
 package peer.processors;
 
+import protocol.LocalPayloadStorage;
 import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.FilePayload;
@@ -38,18 +39,9 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
         String targetFormat = task.getParam().toLowerCase();
 
         FilePayload input = gson.fromJson(gson.toJson(task.getPayload()), FilePayload.class);
-        if (input == null || input.base64Data() == null || input.base64Data().isBlank()) {
-            throw new IOException("Video task has no input data.");
-        }
-
-        byte[] rawBytes = Base64.getDecoder().decode(input.base64Data());
+        byte[] rawBytes = readPayloadBytes(input, PayloadLimits.maxInputBytes());
         if (rawBytes.length == 0) {
             throw new IOException("Video task decoded to an empty file: " + input.fileName());
-        }
-        long maxInputBytes = PayloadLimits.maxInputBytes();
-        if (rawBytes.length > maxInputBytes) {
-            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
-                    + " (" + maxInputBytes + " bytes): " + input.fileName());
         }
 
         String inputFileName = SafeFileNames.sanitize(input.fileName());
@@ -70,15 +62,41 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
                 throw new IOException("Video result exceeds " + PayloadLimits.MAX_RESULT_BYTES_ENV
                         + " (" + maxResultBytes + " bytes): " + input.fileName());
             }
-            byte[] outputBytes = Files.readAllBytes(tempOut.toPath());
-            String outBase64 = Base64.getEncoder().encodeToString(outputBytes);
-
             String newFileName = stripExtension(inputFileName) + "." + targetFormat;
-            return new FilePayload(newFileName, outBase64);
+            if (LocalPayloadStorage.shouldExternalize(outputSize)) {
+                return new FilePayload(newFileName, null,
+                        LocalPayloadStorage.storeFile(tempOut.toPath(), newFileName));
+            }
+            byte[] outputBytes = Files.readAllBytes(tempOut.toPath());
+            return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
         } finally {
             deleteTempFile(tempIn);
             deleteTempFile(tempOut);
         }
+    }
+
+    private byte[] readPayloadBytes(FilePayload payload, long maxBytes) throws IOException {
+        if (payload == null || (!payload.hasInlineData() && !payload.hasPayloadReference())) {
+            throw new IOException("Video task has no input data.");
+        }
+        if (payload.hasInlineData() == payload.hasPayloadReference()) {
+            throw new IOException("Video task must contain exactly one of Base64 data or a payload reference: "
+                    + payload.fileName());
+        }
+        if (payload.hasPayloadReference()) {
+            return LocalPayloadStorage.read(payload.payloadReference(), maxBytes);
+        }
+        byte[] rawBytes;
+        try {
+            rawBytes = Base64.getDecoder().decode(payload.base64Data());
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Video task payload is not valid Base64: " + payload.fileName(), e);
+        }
+        if (rawBytes.length > maxBytes) {
+            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
+                    + " (" + maxBytes + " bytes): " + payload.fileName());
+        }
+        return rawBytes;
     }
 
     private void deleteTempFile(File file) {

@@ -1,5 +1,6 @@
 package peer.processors;
 
+import protocol.LocalPayloadStorage;
 import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.FilePayload;
@@ -27,12 +28,8 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
     public FilePayload process(TaskAssignMessage task) throws Exception {
         String format = task.getParam();
         FilePayload input = gson.fromJson(gson.toJson(task.getPayload()), FilePayload.class);
-        byte[] rawBytes = Base64.getDecoder().decode(input.base64Data());
         long maxInputBytes = PayloadLimits.maxInputBytes();
-        if (rawBytes.length > maxInputBytes) {
-            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
-                    + " (" + maxInputBytes + " bytes): " + input.fileName());
-        }
+        byte[] rawBytes = readPayloadBytes(input, maxInputBytes, "Image task has no input data.");
         BufferedImage img;
         String inputFileName = SafeFileNames.sanitize(input.fileName());
         if (inputFileName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
@@ -72,10 +69,41 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
                     + " (" + maxResultBytes + " bytes): " + input.fileName());
         }
 
-        String outBase64 = Base64.getEncoder().encodeToString(baos.toByteArray());
+        byte[] outputBytes = baos.toByteArray();
         String newFileName = stripExtension(inputFileName) + "." + format;
 
-        return new FilePayload(newFileName, outBase64);
+        return outputPayload(newFileName, outputBytes);
+    }
+
+    private byte[] readPayloadBytes(FilePayload payload, long maxBytes, String emptyMessage) throws IOException {
+        if (payload == null || (!payload.hasInlineData() && !payload.hasPayloadReference())) {
+            throw new IOException(emptyMessage);
+        }
+        if (payload.hasInlineData() == payload.hasPayloadReference()) {
+            throw new IOException("Image task must contain exactly one of Base64 data or a payload reference: "
+                    + payload.fileName());
+        }
+        if (payload.hasPayloadReference()) {
+            return LocalPayloadStorage.read(payload.payloadReference(), maxBytes);
+        }
+        byte[] rawBytes;
+        try {
+            rawBytes = Base64.getDecoder().decode(payload.base64Data());
+        } catch (IllegalArgumentException e) {
+            throw new IOException("Image task payload is not valid Base64: " + payload.fileName(), e);
+        }
+        if (rawBytes.length > maxBytes) {
+            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
+                    + " (" + maxBytes + " bytes): " + payload.fileName());
+        }
+        return rawBytes;
+    }
+
+    private FilePayload outputPayload(String fileName, byte[] bytes) throws IOException {
+        if (LocalPayloadStorage.shouldExternalize(bytes.length)) {
+            return new FilePayload(fileName, null, LocalPayloadStorage.storeBytes(fileName, bytes));
+        }
+        return new FilePayload(fileName, Base64.getEncoder().encodeToString(bytes));
     }
 
     private String stripExtension(String fileName) {

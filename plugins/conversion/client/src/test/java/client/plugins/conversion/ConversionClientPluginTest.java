@@ -1,6 +1,7 @@
 package client.plugins.conversion;
 
 import client.ClientJobPlugin;
+import protocol.LocalPayloadStorage;
 import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.ConversionTaskTypes;
@@ -15,6 +16,7 @@ import java.util.List;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -53,6 +55,45 @@ class ConversionClientPluginTest {
         FilePayload payload = GSON.fromJson(GSON.toJson(payloads.getFirst()), FilePayload.class);
         assertEquals("sample.png", payload.fileName());
         assertArrayEquals(inputBytes, Base64.getDecoder().decode(payload.base64Data()));
+    }
+
+    @Test
+    void buildsReferencedFilePayloadsWhenLocalStorageIsConfigured() throws Exception {
+        byte[] inputBytes = new byte[]{1, 2, 3, 4};
+        Path input = tempDir.resolve("sample.png");
+        Files.write(input, inputBytes);
+        configureExternalPayloadStorage();
+        try {
+            List<Object> payloads = new ImageConversionClientPlugin().buildPayloads(List.of(input), "png");
+
+            assertEquals(1, payloads.size());
+            FilePayload payload = GSON.fromJson(GSON.toJson(payloads.getFirst()), FilePayload.class);
+            assertEquals("sample.png", payload.fileName());
+            assertFalse(payload.hasInlineData());
+            assertTrue(payload.hasPayloadReference());
+            assertArrayEquals(inputBytes, LocalPayloadStorage.read(payload.payloadReference(), 10));
+        } finally {
+            clearExternalPayloadStorage();
+        }
+    }
+
+    @Test
+    void deletesReferencedPayloadFilesWhenBuildFailsAfterStorage() throws Exception {
+        byte[] inputBytes = new byte[]{1, 2, 3, 4};
+        Path input = tempDir.resolve("sample.png");
+        Files.write(input, inputBytes);
+        configureExternalPayloadStorage();
+        System.setProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY, "1");
+        try {
+            java.io.IOException error = assertThrows(java.io.IOException.class,
+                    () -> new ImageConversionClientPlugin().buildPayloads(List.of(input), "png"));
+
+            assertTrue(error.getMessage().contains(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_ENV));
+            assertNoStoredPayloadFiles();
+        } finally {
+            clearExternalPayloadStorage();
+            System.clearProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY);
+        }
     }
 
     @Test
@@ -135,6 +176,26 @@ class ConversionClientPluginTest {
     }
 
     @Test
+    void savesReferencedResultsInsideSelectedFolder() throws Exception {
+        byte[] outputBytes = new byte[]{9, 8, 7};
+        Path outputDir = tempDir.resolve("out");
+        configureExternalPayloadStorage();
+        try {
+            FilePayload result = new FilePayload(
+                    "../escape.txt",
+                    null,
+                    LocalPayloadStorage.storeBytes("escape.txt", outputBytes)
+            );
+
+            new ImageConversionClientPlugin().saveResults(List.<Object>of(result), outputDir);
+
+            assertArrayEquals(outputBytes, Files.readAllBytes(outputDir.resolve("escape.txt")));
+        } finally {
+            clearExternalPayloadStorage();
+        }
+    }
+
+    @Test
     void savesDuplicateResultNamesWithoutOverwriting() throws Exception {
         byte[] first = new byte[]{1};
         byte[] second = new byte[]{2};
@@ -162,6 +223,27 @@ class ConversionClientPluginTest {
             assertTrue(error.getMessage().contains(PayloadLimits.MAX_RESULT_BYTES_ENV));
         } finally {
             System.clearProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY);
+        }
+    }
+
+    private void configureExternalPayloadStorage() {
+        System.setProperty(LocalPayloadStorage.PAYLOAD_STORAGE_DIR_PROPERTY,
+                tempDir.resolve("payloads").toString());
+        System.setProperty(LocalPayloadStorage.EXTERNAL_PAYLOAD_THRESHOLD_BYTES_PROPERTY, "0");
+    }
+
+    private void clearExternalPayloadStorage() {
+        System.clearProperty(LocalPayloadStorage.PAYLOAD_STORAGE_DIR_PROPERTY);
+        System.clearProperty(LocalPayloadStorage.EXTERNAL_PAYLOAD_THRESHOLD_BYTES_PROPERTY);
+    }
+
+    private void assertNoStoredPayloadFiles() throws Exception {
+        Path storageRoot = tempDir.resolve("payloads");
+        if (!Files.exists(storageRoot)) {
+            return;
+        }
+        try (Stream<Path> files = Files.walk(storageRoot)) {
+            assertFalse(files.anyMatch(Files::isRegularFile));
         }
     }
 }

@@ -4,6 +4,7 @@ import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
 import org.junit.jupiter.api.Test;
 import protocol.JobSubmitMessage;
+import protocol.PayloadReference;
 import server.job.TaskPlugin;
 
 import java.time.Instant;
@@ -41,6 +42,69 @@ class ConversionServerPluginDiscoveryTest {
         );
 
         assertDoesNotThrow(() -> new ImageConversionTaskPlugin().validateSubmission(submit));
+    }
+
+    @Test
+    void imagePluginAcceptsPayloadReferenceSubmission() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.IMAGE_CONVERSION,
+                List.<Object>of(new FilePayload("sample.png", null, reference("sample.png"))),
+                "png"
+        );
+
+        assertDoesNotThrow(() -> new ImageConversionTaskPlugin().validateSubmission(submit));
+    }
+
+    @Test
+    void imagePluginRejectsAmbiguousInlineAndReferencedPayload() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.IMAGE_CONVERSION,
+                List.<Object>of(new FilePayload("sample.png", "abcd", reference("sample.png"))),
+                "png"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                new ImageConversionTaskPlugin().validateSubmission(submit));
+
+        assertTrue(error.getMessage().contains("exactly one"));
+    }
+
+    @Test
+    void imagePluginRejectsUnsupportedPayloadReferenceStorageType() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.IMAGE_CONVERSION,
+                List.<Object>of(new FilePayload("sample.png", null, new PayloadReference(
+                        "s3",
+                        "payloads/sample.png",
+                        7,
+                        "0".repeat(64)
+                ))),
+                "png"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                new ImageConversionTaskPlugin().validateSubmission(submit));
+
+        assertTrue(error.getMessage().contains("unsupported payload reference storage type"));
+    }
+
+    @Test
+    void imagePluginRejectsEmptyPayloadReference() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.IMAGE_CONVERSION,
+                List.<Object>of(new FilePayload("sample.png", null, new PayloadReference(
+                        PayloadReference.LOCAL_FILE,
+                        "payloads/sample.png",
+                        0,
+                        "0".repeat(64)
+                ))),
+                "png"
+        );
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                new ImageConversionTaskPlugin().validateSubmission(submit));
+
+        assertTrue(error.getMessage().contains("non-empty file"));
     }
 
     @Test
@@ -100,6 +164,15 @@ class ConversionServerPluginDiscoveryTest {
         return new FilePayload(
                 fileName,
                 Base64.getEncoder().encodeToString("payload".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        );
+    }
+
+    private static PayloadReference reference(String fileName) {
+        return new PayloadReference(
+                PayloadReference.LOCAL_FILE,
+                "payloads/" + fileName,
+                7,
+                "0".repeat(64)
         );
     }
 }
