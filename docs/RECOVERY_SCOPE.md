@@ -13,7 +13,8 @@ and task snapshots, restore completed task results when result payload snapshots
 exist, preserve assigned tasks whose leases have not expired, release assigned
 tasks whose leases are expired or missing to `PENDING`, and mark legacy or
 otherwise non-resumable running jobs failed. Durable attempt rows exist in
-SQLite schema version 7, and task leases exist in SQLite schema version 8.
+SQLite schema version 7, task leases exist in SQLite schema version 8, and
+coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9.
 PostgreSQL/Flyway is not implemented.
 
 ## Decision

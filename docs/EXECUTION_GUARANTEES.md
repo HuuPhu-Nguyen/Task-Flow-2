@@ -47,17 +47,18 @@ This document defines the current runtime guarantees of TaskFlow.
 - `publish` and `publishToPeer` return success only after RabbitMQ confirms the publish within `TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS`.
 - A broker nack or publisher-confirm timeout is reported as a failed publish.
 - Peer-targeted publishes also use RabbitMQ mandatory-return detection; an unroutable peer-targeted publish is reported as failed.
-- Failed task-assignment publishes are retried by scheduler dispatch logic.
-- Failed final `JOB_RESULT` publishes remain pending until delivery succeeds or `jobResultMaxDeliveryAttempts` is exhausted.
-- This is not a durable outbox: coordinator crash replay around publication is still not implemented.
+- With SQLite persistence available, coordinator `TASK_ASSIGN` and final `JOB_RESULT` publications are stored in a durable broker outbox transactionally with the corresponding task assignment or terminal job-state update.
+- Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
+- Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance remains idempotent by current assigned peer and task state, and terminal job completion is persisted once.
+- Peer-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ peers and the GUI defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
 - RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it the primary supported runtime.
 
 ## RabbitMQ Connection Recovery
 
 - RabbitMQ client automatic connection recovery is enabled for transport connections.
 - Opt-in live transport coverage verifies that an existing transport can consume and publish again after the broker closes its connection through the RabbitMQ management API.
-- This does not guarantee durable replay for messages that were not broker-confirmed before an outage.
-- This does not recover coordinator crashes around publication; a durable outbox/replay model is still not implemented.
+- SQLite-backed coordinator outbox replay covers coordinator-originated `TASK_ASSIGN` and final `JOB_RESULT` messages that were queued before a coordinator crash.
+- This does not guarantee full broker outage recovery, peer-side durable `TASK_RESULT` replay, or redelivery of messages outside the coordinator outbox.
 
 ## RabbitMQ Dead Lettering
 
@@ -119,9 +120,10 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - A job is **successful** only when all tasks complete.
 - A job is **failed** when any task reaches terminal `FAILED`.
 - On job failure, non-terminal remaining tasks are persisted as failed in DB for consistent historical state.
-- Final `JOB_RESULT` delivery is retried when the requester cannot be reached or the output transport reports failure.
-- Final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
-- If final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
+- For non-outbox outputs, final `JOB_RESULT` delivery is retried when the requester cannot be reached or the output transport reports failure.
+- Non-outbox final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
+- If non-outbox final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
+- RabbitMQ with SQLite persistence commits the terminal job state and final `JOB_RESULT` outbox row together; failed publishes remain pending for replay instead of using the bounded non-outbox delivery counter.
 
 ## Result Ownership
 
@@ -149,12 +151,13 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Schema version 6 stores the completed job's final semantic result payload.
 - Schema version 7 stores task attempt history rows for assignment, success, retry, terminal failure, dispatch failure, startup reconciliation, and restart release.
 - Schema version 8 stores task lease owner and expiry for assigned work.
+- Schema version 9 stores coordinator broker outbox rows for RabbitMQ `TASK_ASSIGN` and final `JOB_RESULT` publication replay.
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks with unexpired leases, and releases assigned tasks with expired or missing leases to `PENDING` with a `lease_expired` attempt reason.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to a peer.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
-- Final job-status persistence happens after final result delivery. If that terminal write fails, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
+- For non-outbox outputs, final job-status persistence happens after final result delivery. For RabbitMQ with SQLite persistence, terminal job status and the final `JOB_RESULT` outbox row are committed together before immediate publish/replay. If a non-outbox terminal write fails after delivery, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
 - `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
 - PostgreSQL/Flyway is not implemented. `docs/RECOVERY_SCOPE.md` records the SQLite lease behavior and keeps PostgreSQL/Flyway deferred until there is a concrete external database requirement.
@@ -181,4 +184,4 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 
 These metrics are intended for immediate operational visibility in Phase 1 and as migration inputs to dedicated metrics backends in later phases.
 
-`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox/replay, or TaskFlow DLQ workflow work needs operational visibility.
+`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox visibility, or TaskFlow DLQ workflow work needs operational visibility.

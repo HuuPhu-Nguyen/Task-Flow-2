@@ -64,6 +64,8 @@ Final result delivery and abandoned states:
   failed after result delivery or abandonment.
 - `job_result_requester_missing` and `job_result_request_send_failed` record
   failed `JOB_RESULT_REQUEST` responses.
+- With RabbitMQ coordinator outbox enabled, `job_completed` includes
+  `outbox_id` and `outbox_published` for terminal final-result publication.
 
 Persistence and recovery:
 
@@ -90,6 +92,12 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
   `rabbitmq_publish_confirm_timeout`, and
   `rabbitmq_publish_returned_unmatched` record broker publication failures or
   mandatory-return anomalies.
+- `broker_outbox_publish_deferred`, `broker_outbox_publish_failed`, and
+  `broker_outbox_publish_mark_failed` record scheduler-side outbox publish
+  attempts that were not fully marked sent.
+- `rabbitmq_outbox_published`, `rabbitmq_outbox_publish_deferred`,
+  `rabbitmq_outbox_publish_failed`, `rabbitmq_outbox_publish_mark_failed`, and
+  `rabbitmq_outbox_replay` record coordinator outbox replay activity.
 - `scheduler_message_ack_failed`, `scheduler_message_requeue_failed`, and
   `rabbitmq_delivery_requeue_failed` record failed acknowledgement settlement.
 - `task_result_publish_failed` and `rabbitmq_heartbeat_failed` record peer-side
@@ -110,9 +118,11 @@ provide stable dashboard contracts.
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and
 restart release. SQLite task rows also record lease owner and expiry for
-assigned work. TaskFlow still does not provide promoted lease dashboards,
-outbox replay state, DLQ review decisions, or redrive counts. Those remaining
-behaviors are deferred in the recovery and RabbitMQ scope documents.
+assigned work. SQLite broker outbox rows record coordinator-originated
+RabbitMQ task assignments and final job results until they are marked sent.
+TaskFlow still does not provide promoted lease dashboards, outbox dashboards,
+DLQ review decisions, or redrive counts. Those remaining behaviors are deferred
+in the recovery and RabbitMQ scope documents.
 
 ## Metrics Backend Deferral
 
@@ -120,7 +130,7 @@ A dedicated metrics backend is deferred until at least one of these behavior
 tracks is implemented and needs promoted operational visibility:
 
 - promoted lease or attempt-history dashboards;
-- RabbitMQ durable outbox and replay;
+- promoted RabbitMQ outbox replay dashboards or metrics;
 - TaskFlow DLQ inspection, quarantine, discard, and redrive.
 
 Before adding a metrics exporter, define:
@@ -134,7 +144,7 @@ Before adding a metrics exporter, define:
 ## Public Claim Rule
 
 Public docs should describe current observability as structured logs,
-log-based scheduler metrics, SQLite task-attempt audit rows, and SQLite task
-lease fields. Avoid claiming built-in dashboards, alerting, tracing, promoted
-lease timelines, outbox observability, or DLQ workflow visibility until those
-systems exist and are tested.
+log-based scheduler metrics, SQLite task-attempt audit rows, SQLite task lease
+fields, and SQLite coordinator outbox rows. Avoid claiming built-in dashboards,
+alerting, tracing, promoted lease timelines, outbox dashboards, or DLQ workflow
+visibility until those systems exist and are tested.

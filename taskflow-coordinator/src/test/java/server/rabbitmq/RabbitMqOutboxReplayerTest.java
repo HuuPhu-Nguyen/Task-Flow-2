@@ -1,0 +1,163 @@
+package server.rabbitmq;
+
+import org.junit.jupiter.api.Test;
+import protocol.JobResultMessage;
+import server.db.BrokerOutboxStore;
+import server.scheduler.BrokerOutboxPublisher;
+import transport.TransportRoute;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+class RabbitMqOutboxReplayerTest {
+
+    @Test
+    void replayMarksPublishedRowsSent() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(1L)));
+        RecordingPublisher publisher = new RecordingPublisher(true);
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 10, 100L);
+
+        int published = replayer.replayOnce();
+
+        assertEquals(1, published);
+        assertEquals(List.of(1L), publisher.publishedIds);
+        assertEquals(Set.of(1L), store.publishedIds);
+        assertEquals(List.of(), store.failedIds);
+        assertEquals(List.of(), store.loadPendingBrokerOutbox(10));
+        replayer.close();
+    }
+
+    @Test
+    void replayRecordsFailedAttemptAndLeavesRowPending() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(2L)));
+        RecordingPublisher publisher = new RecordingPublisher(false);
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 10, 100L);
+
+        int published = replayer.replayOnce();
+
+        assertEquals(0, published);
+        assertEquals(List.of(2L), publisher.publishedIds);
+        assertEquals(Set.of(), store.publishedIds);
+        assertEquals(List.of(2L), store.failedIds);
+        assertEquals(1, store.loadPendingBrokerOutbox(10).size());
+        replayer.close();
+    }
+
+    private static BrokerOutboxStore.OutboxRecord outboxRecord(long id) {
+        JobResultMessage result = new JobResultMessage(
+                "COORDINATOR",
+                "2026-07-02T00:00:00Z",
+                "job-" + id,
+                "TEST_TASK",
+                true,
+                List.of()
+        );
+        return new BrokerOutboxStore.OutboxRecord(
+                id,
+                new BrokerOutboxStore.OutboxMessage(
+                        TransportRoute.JOB_RESULT,
+                        "requester-" + id,
+                        "COORDINATOR",
+                        result
+                ),
+                100L,
+                0,
+                0L,
+                ""
+        );
+    }
+
+    private static final class RecordingPublisher implements BrokerOutboxPublisher {
+        private final boolean publishResult;
+        private final List<Long> publishedIds = new ArrayList<>();
+
+        private RecordingPublisher(boolean publishResult) {
+            this.publishResult = publishResult;
+        }
+
+        @Override
+        public BrokerOutboxStore.OutboxMessage taskAssignmentOutboxMessage(
+                server.registry.PeerInfo peer,
+                protocol.TaskAssignMessage message
+        ) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public BrokerOutboxStore.OutboxMessage jobResultOutboxMessage(String requesterNodeId,
+                                                                      JobResultMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public boolean publishOutbox(BrokerOutboxStore.OutboxRecord record) {
+            publishedIds.add(record.outboxId());
+            return publishResult;
+        }
+    }
+
+    private static final class RecordingOutboxStore implements BrokerOutboxStore {
+        private final List<OutboxRecord> records;
+        private final Set<Long> publishedIds = new LinkedHashSet<>();
+        private final List<Long> failedIds = new ArrayList<>();
+
+        private RecordingOutboxStore(List<OutboxRecord> records) {
+            this.records = new ArrayList<>(records);
+        }
+
+        @Override
+        public Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                             String peerId,
+                                                                             long startedAt,
+                                                                             String leaseOwnerId,
+                                                                             long leaseExpiresAt,
+                                                                             OutboxMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
+                                                                             Object resultPayload,
+                                                                             OutboxMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
+                                                                          Collection<TaskFailureUpdate> taskFailures,
+                                                                          OutboxMessage message) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<OutboxRecord> loadPendingBrokerOutbox(int limit) {
+            return records.stream()
+                    .filter(record -> !publishedIds.contains(record.outboxId()))
+                    .limit(limit)
+                    .toList();
+        }
+
+        @Override
+        public boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
+            publishedIds.add(outboxId);
+            return true;
+        }
+
+        @Override
+        public boolean markBrokerOutboxPublishFailed(long outboxId, String error, long attemptedAt) {
+            failedIds.add(outboxId);
+            return true;
+        }
+    }
+}

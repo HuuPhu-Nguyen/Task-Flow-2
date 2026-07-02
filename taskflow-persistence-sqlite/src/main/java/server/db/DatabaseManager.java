@@ -1,6 +1,15 @@
 package server.db;
 
 import com.google.gson.Gson;
+import protocol.JobResultMessage;
+import protocol.JobResultRequestMessage;
+import protocol.JobSubmitMessage;
+import protocol.Message;
+import protocol.MessageType;
+import protocol.PingMessage;
+import protocol.PongMessage;
+import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import server.registry.PeerMetricsSnapshot;
@@ -8,6 +17,7 @@ import server.registry.PeerRegistryRecord;
 import server.registry.PeerRegistryStore;
 import server.registry.PeerStatus;
 import server.registry.PeerTransport;
+import transport.TransportRoute;
 
 import java.sql.*;
 import java.util.ArrayList;
@@ -19,12 +29,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-public class DatabaseManager implements JobStateStore, PeerRegistryStore {
+public class DatabaseManager implements JobStateStore, PeerRegistryStore, BrokerOutboxStore, AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 8;
+    public static final int CURRENT_SCHEMA_VERSION = 9;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -83,6 +93,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             }
             createTaskAttemptsTable();
             createPeerRegistryTable();
+            createBrokerOutboxTable();
 
             writeSchemaVersion(CURRENT_SCHEMA_VERSION);
             validateCurrentSchema();
@@ -187,6 +198,26 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                     UNIQUE(task_id, attempt_number),
                     FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE,
                     FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                )
+            """);
+        }
+    }
+
+    private void createBrokerOutboxTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS broker_outbox (
+                    outbox_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                    route           TEXT    NOT NULL,
+                    peer_node_id    TEXT    NOT NULL DEFAULT '',
+                    from_node_id    TEXT    NOT NULL,
+                    message_type    TEXT    NOT NULL,
+                    message_json    TEXT    NOT NULL,
+                    created_at      INTEGER NOT NULL,
+                    published_at    INTEGER,
+                    attempt_count   INTEGER NOT NULL DEFAULT 0,
+                    last_attempt_at INTEGER NOT NULL DEFAULT 0,
+                    last_error      TEXT    NOT NULL DEFAULT ''
                 )
             """);
         }
@@ -423,6 +454,21 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                 || !columnExists("peer_registry", "task_duration_ewma_ms")) {
             throw new SQLException("Database schema is missing peer registry metadata columns.");
         }
+        if (!tableExists("broker_outbox")) {
+            throw new SQLException("Database schema is missing broker_outbox table.");
+        }
+        if (!columnExists("broker_outbox", "route")
+                || !columnExists("broker_outbox", "peer_node_id")
+                || !columnExists("broker_outbox", "from_node_id")
+                || !columnExists("broker_outbox", "message_type")
+                || !columnExists("broker_outbox", "message_json")
+                || !columnExists("broker_outbox", "created_at")
+                || !columnExists("broker_outbox", "published_at")
+                || !columnExists("broker_outbox", "attempt_count")
+                || !columnExists("broker_outbox", "last_attempt_at")
+                || !columnExists("broker_outbox", "last_error")) {
+            throw new SQLException("Database schema is missing broker outbox columns.");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -584,26 +630,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                                                 long startedAt,
                                                 String leaseOwnerId,
                                                 long leaseExpiresAt) {
-        String updateTaskSql = """
-                UPDATE tasks
-                SET status='ASSIGNED',
-                    assigned_peer_id=?,
-                    started_at=?,
-                    lease_owner_id=?,
-                    lease_expires_at=?
-                WHERE task_id=? AND status='PENDING'
-                """;
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
-                ps.setString(1, peerId);
-                ps.setLong(2, startedAt);
-                ps.setString(3, leaseOwnerId == null ? "" : leaseOwnerId);
-                ps.setLong(4, Math.max(0L, leaseExpiresAt));
-                ps.setString(5, taskId);
-                if (ps.executeUpdate() <= 0 || !insertTaskAttempt(taskId, peerId, startedAt)) {
+            try {
+                if (!markTaskAssignedInCurrentTransaction(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
                     conn.rollback();
                     return false;
                 }
@@ -618,6 +650,30 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         } catch (SQLException e) {
             logSqlFailure("markTaskAssigned", e);
             return false;
+        }
+    }
+
+    private boolean markTaskAssignedInCurrentTransaction(String taskId,
+                                                         String peerId,
+                                                         long startedAt,
+                                                         String leaseOwnerId,
+                                                         long leaseExpiresAt) throws SQLException {
+        String updateTaskSql = """
+                UPDATE tasks
+                SET status='ASSIGNED',
+                    assigned_peer_id=?,
+                    started_at=?,
+                    lease_owner_id=?,
+                    lease_expires_at=?
+                WHERE task_id=? AND status='PENDING'
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
+            ps.setString(1, peerId);
+            ps.setLong(2, startedAt);
+            ps.setString(3, leaseOwnerId == null ? "" : leaseOwnerId);
+            ps.setLong(4, Math.max(0L, leaseExpiresAt));
+            ps.setString(5, taskId);
+            return ps.executeUpdate() > 0 && insertTaskAttempt(taskId, peerId, startedAt);
         }
     }
 
@@ -755,33 +811,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                                               TaskAttemptOutcome outcome,
                                               String failureReason,
                                               long finishedAt) {
-        String sql = """
-                UPDATE tasks
-                SET status='FAILED',
-                    completed_at=?,
-                    lease_owner_id='',
-                    lease_expires_at=0
-                WHERE task_id=? AND status NOT IN ('COMPLETED', 'FAILED')
-                """;
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                if (hasRunningAttempt(taskId)
-                        && !finishRunningAttempt(
-                        taskId,
-                        finishedAt,
-                        attemptDuration(taskId, finishedAt),
-                        normalizeFailureOutcome(outcome, TaskAttemptOutcome.TERMINAL_FAILURE),
-                        failureReason
-                )) {
-                    conn.rollback();
-                    return false;
-                }
-                ps.setLong(1, finishedAt);
-                ps.setString(2, taskId);
-                if (ps.executeUpdate() <= 0) {
+            try {
+                if (!markTaskFailedInCurrentTransaction(taskId, outcome, failureReason, finishedAt)) {
                     conn.rollback();
                     return false;
                 }
@@ -799,12 +834,61 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         }
     }
 
+    private boolean markTaskFailedInCurrentTransaction(String taskId,
+                                                       TaskAttemptOutcome outcome,
+                                                       String failureReason,
+                                                       long finishedAt) throws SQLException {
+        String sql = """
+                UPDATE tasks
+                SET status='FAILED',
+                    completed_at=?,
+                    lease_owner_id='',
+                    lease_expires_at=0
+                WHERE task_id=? AND status NOT IN ('COMPLETED', 'FAILED')
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            if (hasRunningAttempt(taskId)
+                    && !finishRunningAttempt(
+                    taskId,
+                    finishedAt,
+                    attemptDuration(taskId, finishedAt),
+                    normalizeFailureOutcome(outcome, TaskAttemptOutcome.TERMINAL_FAILURE),
+                    failureReason
+            )) {
+                return false;
+            }
+            ps.setLong(1, finishedAt);
+            ps.setString(2, taskId);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
     public synchronized boolean markJobCompleted(String jobId) {
         return markJobCompleted(jobId, null);
     }
 
     @Override
     public synchronized boolean markJobCompleted(String jobId, Object resultPayload) {
+        try {
+            return markJobCompletedInCurrentTransaction(jobId, resultPayload, System.currentTimeMillis());
+        } catch (SQLException e) {
+            logSqlFailure("markJobCompleted", e);
+            return false;
+        }
+    }
+
+    public synchronized boolean markJobFailed(String jobId) {
+        try {
+            return markJobFailedInCurrentTransaction(jobId, System.currentTimeMillis());
+        } catch (SQLException e) {
+            logSqlFailure("markJobFailed", e);
+            return false;
+        }
+    }
+
+    private boolean markJobCompletedInCurrentTransaction(String jobId,
+                                                         Object resultPayload,
+                                                         long completedAt) throws SQLException {
         String sql = """
                 UPDATE jobs
                 SET status='COMPLETED',
@@ -813,26 +897,272 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
                 WHERE job_id=? AND status='RUNNING'
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, System.currentTimeMillis());
+            ps.setLong(1, completedAt);
             ps.setString(2, toJson(resultPayload));
             ps.setString(3, jobId);
             return ps.executeUpdate() > 0;
+        }
+    }
+
+    private boolean markJobFailedInCurrentTransaction(String jobId, long completedAt) throws SQLException {
+        String sql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=? AND status='RUNNING'";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, completedAt);
+            ps.setString(2, jobId);
+            return ps.executeUpdate() > 0;
+        }
+    }
+
+    @Override
+    public synchronized Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message) {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
+                conn.commit();
+                return Optional.of(record);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
         } catch (SQLException e) {
-            logSqlFailure("markJobCompleted", e);
+            logSqlFailure("enqueueBrokerOutbox", e);
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                                     String peerId,
+                                                                                     long startedAt,
+                                                                                     String leaseOwnerId,
+                                                                                     long leaseExpiresAt,
+                                                                                     OutboxMessage message) {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                if (!markTaskAssignedInCurrentTransaction(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
+                    conn.rollback();
+                    return Optional.empty();
+                }
+                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
+                conn.commit();
+                return Optional.of(record);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            logSqlFailure("markTaskAssignedAndEnqueueBrokerOutbox", e);
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public synchronized Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
+                                                                                     Object resultPayload,
+                                                                                     OutboxMessage message) {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                if (!markJobCompletedInCurrentTransaction(jobId, resultPayload, System.currentTimeMillis())) {
+                    conn.rollback();
+                    return Optional.empty();
+                }
+                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
+                conn.commit();
+                return Optional.of(record);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            logSqlFailure("markJobCompletedAndEnqueueBrokerOutbox", e);
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public synchronized Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
+                                                                                  Collection<TaskFailureUpdate> taskFailures,
+                                                                                  OutboxMessage message) {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                Collection<TaskFailureUpdate> failures = taskFailures == null ? List.of() : taskFailures;
+                for (TaskFailureUpdate failure : failures) {
+                    if (!markTaskFailedInCurrentTransaction(
+                            failure.taskId(),
+                            failure.outcome(),
+                            failure.failureReason(),
+                            failure.finishedAt()
+                    )) {
+                        conn.rollback();
+                        return Optional.empty();
+                    }
+                }
+                if (!markJobFailedInCurrentTransaction(jobId, System.currentTimeMillis())) {
+                    conn.rollback();
+                    return Optional.empty();
+                }
+                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
+                conn.commit();
+                return Optional.of(record);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            logSqlFailure("markJobFailedAndEnqueueBrokerOutbox", e);
+            return Optional.empty();
+        }
+    }
+
+    @Override
+    public synchronized List<OutboxRecord> loadPendingBrokerOutbox(int limit) {
+        int normalizedLimit = limit <= 0 ? 100 : limit;
+        List<OutboxRecord> records = new ArrayList<>();
+        String sql = """
+                SELECT
+                    outbox_id,
+                    route,
+                    peer_node_id,
+                    from_node_id,
+                    message_type,
+                    message_json,
+                    created_at,
+                    attempt_count,
+                    last_attempt_at,
+                    last_error
+                FROM broker_outbox
+                WHERE published_at IS NULL
+                ORDER BY created_at ASC, outbox_id ASC
+                LIMIT ?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, normalizedLimit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    records.add(outboxRecordFromResultSet(rs));
+                }
+            }
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("loadPendingBrokerOutbox", asSqlException(e));
+        }
+        return records;
+    }
+
+    @Override
+    public synchronized boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
+        String sql = """
+                UPDATE broker_outbox
+                SET published_at=?,
+                    last_attempt_at=?,
+                    last_error=''
+                WHERE outbox_id=? AND published_at IS NULL
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, publishedAt);
+            ps.setLong(2, publishedAt);
+            ps.setLong(3, outboxId);
+            return ps.executeUpdate() > 0;
+        } catch (SQLException e) {
+            logSqlFailure("markBrokerOutboxPublished", e);
             return false;
         }
     }
 
-    public synchronized boolean markJobFailed(String jobId) {
-        String sql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=? AND status='RUNNING'";
+    @Override
+    public synchronized boolean markBrokerOutboxPublishFailed(long outboxId, String error, long attemptedAt) {
+        String sql = """
+                UPDATE broker_outbox
+                SET attempt_count=attempt_count + 1,
+                    last_attempt_at=?,
+                    last_error=?
+                WHERE outbox_id=? AND published_at IS NULL
+                """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, System.currentTimeMillis());
-            ps.setString(2, jobId);
+            ps.setLong(1, attemptedAt);
+            ps.setString(2, error == null ? "" : error);
+            ps.setLong(3, outboxId);
             return ps.executeUpdate() > 0;
         } catch (SQLException e) {
-            logSqlFailure("markJobFailed", e);
+            logSqlFailure("markBrokerOutboxPublishFailed", e);
             return false;
         }
+    }
+
+    private OutboxRecord insertBrokerOutboxInCurrentTransaction(OutboxMessage message,
+                                                                long createdAt) throws SQLException {
+        String sql = """
+                INSERT INTO broker_outbox(
+                    route,
+                    peer_node_id,
+                    from_node_id,
+                    message_type,
+                    message_json,
+                    created_at
+                )
+                VALUES(?,?,?,?,?,?)
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, message.route().name());
+            ps.setString(2, message.peerNodeId());
+            ps.setString(3, message.fromNodeId());
+            ps.setString(4, message.message().getType());
+            ps.setString(5, GSON.toJson(message.message()));
+            ps.setLong(6, createdAt);
+            if (ps.executeUpdate() <= 0) {
+                throw new SQLException("No broker outbox row inserted.");
+            }
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                if (keys.next()) {
+                    return new OutboxRecord(keys.getLong(1), message, createdAt, 0, 0L, "");
+                }
+            }
+        }
+
+        String lastIdSql = "SELECT last_insert_rowid()";
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(lastIdSql)) {
+            if (rs.next()) {
+                return new OutboxRecord(rs.getLong(1), message, createdAt, 0, 0L, "");
+            }
+        }
+        throw new SQLException("Broker outbox id was not available.");
+    }
+
+    private OutboxRecord outboxRecordFromResultSet(ResultSet rs) throws SQLException {
+        TransportRoute route = transportRouteFromDb(rs.getString("route"));
+        Message message = messageFromJson(rs.getString("message_type"), rs.getString("message_json"));
+        return new OutboxRecord(
+                rs.getLong("outbox_id"),
+                new OutboxMessage(
+                        route,
+                        rs.getString("peer_node_id"),
+                        rs.getString("from_node_id"),
+                        message
+                ),
+                rs.getLong("created_at"),
+                rs.getInt("attempt_count"),
+                rs.getLong("last_attempt_at"),
+                rs.getString("last_error")
+        );
     }
 
     public synchronized int markRunningJobsFailedOnStartup(long completedAt) {
@@ -1544,6 +1874,32 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
         }
     }
 
+    private static TransportRoute transportRouteFromDb(String value) {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Broker outbox route is missing.");
+        }
+        return TransportRoute.valueOf(value);
+    }
+
+    private static Message messageFromJson(String messageType, String json) {
+        if (messageType == null || messageType.isBlank()) {
+            throw new IllegalArgumentException("Broker outbox message type is missing.");
+        }
+        if (json == null || json.isBlank()) {
+            throw new IllegalArgumentException("Broker outbox message JSON is missing.");
+        }
+        return switch (messageType) {
+            case MessageType.JOB_SUBMIT -> GSON.fromJson(json, JobSubmitMessage.class);
+            case MessageType.JOB_RESULT_REQUEST -> GSON.fromJson(json, JobResultRequestMessage.class);
+            case MessageType.TASK_ASSIGN -> GSON.fromJson(json, TaskAssignMessage.class);
+            case MessageType.TASK_RESULT -> GSON.fromJson(json, TaskResultMessage.class);
+            case MessageType.JOB_RESULT -> GSON.fromJson(json, JobResultMessage.class);
+            case MessageType.PING -> GSON.fromJson(json, PingMessage.class);
+            case MessageType.PONG -> GSON.fromJson(json, PongMessage.class);
+            default -> throw new IllegalArgumentException("Unknown broker outbox message type: " + messageType);
+        };
+    }
+
     private static TaskAttemptOutcome attemptOutcomeFromDb(String value) {
         if (value == null || value.isBlank()) {
             return TaskAttemptOutcome.JOB_FAILED;
@@ -1579,6 +1935,13 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore {
             return null;
         }
         return GSON.fromJson(json, Object.class);
+    }
+
+    private static SQLException asSqlException(Exception e) {
+        if (e instanceof SQLException sqlException) {
+            return sqlException;
+        }
+        return new SQLException(e.getMessage(), e);
     }
 
     private static int taskIndex(String taskId) {

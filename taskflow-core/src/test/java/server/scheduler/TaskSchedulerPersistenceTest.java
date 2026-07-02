@@ -8,6 +8,7 @@ import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
+import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
@@ -30,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import transport.TransportRoute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -120,6 +122,50 @@ class TaskSchedulerPersistenceTest {
             assertEquals(expectedPayload, result.getResultPayload());
             assertEquals(List.of("alpha"), result.getResultsByTaskId());
             assertEquals(expectedPayload, store.lastCompletedResultPayload());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void successfulJobCompletionPersistsTerminalStateWithBrokerOutbox() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        OutboxCapturingOutput output = new OutboxCapturingOutput(true);
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-completion-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-outbox-completion", List.of("payload")), "requester-1"));
+
+            assertTrue(store.awaitTaskAssigned());
+            TaskAssignMessage assignment = output.awaitTaskAssignmentOutbox();
+            assertNotNull(assignment);
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+
+            assertTrue(store.awaitJobCompleted());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            List<BrokerOutboxStore.OutboxRecord> allOutbox = store.allOutboxRecords();
+            assertEquals(2, allOutbox.size());
+            assertEquals(TransportRoute.TASK_ASSIGN, allOutbox.get(0).message().route());
+            assertEquals(TransportRoute.JOB_RESULT, allOutbox.get(1).message().route());
+            assertEquals("requester-1", allOutbox.get(1).message().peerNodeId());
+            JobResultMessage result = (JobResultMessage) allOutbox.get(1).message().message();
+            assertTrue(result.isSuccessful());
+            assertEquals(List.of("result"), result.getResultsByTaskId());
+            assertEquals(List.of(1L, 2L), store.publishedOutboxIds());
+            assertEquals(List.of(), store.failedOutboxIds());
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-outbox-completion:TEST_TASK:requester-1:1:"
+                            + "task-job-outbox-completion-0",
+                    "markTaskAssigned:task-job-outbox-completion-0:peer-1",
+                    "markTaskCompleted:task-job-outbox-completion-0",
+                    "markJobCompleted:job-outbox-completion"
+            ), store.events());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -368,6 +414,39 @@ class TaskSchedulerPersistenceTest {
                     "markTaskFailed:task-job-assignment-persistence-failure-0",
                     "markJobFailed:job-assignment-persistence-failure"
             ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void brokerOutboxAssignmentStaysPendingWhenPublishFails() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        OutboxCapturingOutput output = new OutboxCapturingOutput(false);
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-assignment-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-outbox-assignment", List.of("payload")), "requester-1"));
+
+            assertTrue(store.awaitTaskAssigned());
+            assertTrue(output.awaitPublishAttempt());
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-outbox-assignment:TEST_TASK:requester-1:1:"
+                            + "task-job-outbox-assignment-0",
+                    "markTaskAssigned:task-job-outbox-assignment-0:peer-1"
+            ), store.events());
+            List<BrokerOutboxStore.OutboxRecord> pending = store.loadPendingBrokerOutbox(10);
+            assertEquals(1, pending.size());
+            assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
+            assertEquals("peer-1", pending.getFirst().message().peerNodeId());
+            assertEquals(List.of(1L), store.failedOutboxIds());
+            assertEquals(List.of(), store.publishedOutboxIds());
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1250,6 +1329,73 @@ class TaskSchedulerPersistenceTest {
         }
     }
 
+    private static class OutboxCapturingOutput implements SchedulerOutput, BrokerOutboxPublisher {
+        private final boolean publishResult;
+        private final CountDownLatch publishAttempted = new CountDownLatch(1);
+        private final BlockingQueue<TaskAssignMessage> taskAssignments = new LinkedBlockingQueue<>();
+
+        private OutboxCapturingOutput(boolean publishResult) {
+            this.publishResult = publishResult;
+        }
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            throw new AssertionError("Expected broker outbox task delivery.");
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message) {
+            throw new AssertionError("Expected broker outbox result delivery.");
+        }
+
+        @Override
+        public BrokerOutboxStore.OutboxMessage taskAssignmentOutboxMessage(PeerInfo peer, TaskAssignMessage message) {
+            TaskAssignMessage routed = new TaskAssignMessage(
+                    peer.getNodeId(),
+                    message.getTime(),
+                    message.getTaskId(),
+                    message.getJobId(),
+                    message.getTaskType(),
+                    message.getPayload(),
+                    message.getParam()
+            );
+            return new BrokerOutboxStore.OutboxMessage(
+                    TransportRoute.TASK_ASSIGN,
+                    peer.getNodeId(),
+                    "COORDINATOR",
+                    routed
+            );
+        }
+
+        @Override
+        public BrokerOutboxStore.OutboxMessage jobResultOutboxMessage(String requesterNodeId,
+                                                                      JobResultMessage message) {
+            return new BrokerOutboxStore.OutboxMessage(
+                    TransportRoute.JOB_RESULT,
+                    requesterNodeId,
+                    "COORDINATOR",
+                    message
+            );
+        }
+
+        @Override
+        public boolean publishOutbox(BrokerOutboxStore.OutboxRecord record) {
+            if (record.message().message() instanceof TaskAssignMessage assignment) {
+                taskAssignments.offer(assignment);
+            }
+            publishAttempted.countDown();
+            return publishResult;
+        }
+
+        boolean awaitPublishAttempt() throws InterruptedException {
+            return publishAttempted.await(2, TimeUnit.SECONDS);
+        }
+
+        TaskAssignMessage awaitTaskAssignmentOutbox() throws InterruptedException {
+            return taskAssignments.poll(2, TimeUnit.SECONDS);
+        }
+    }
+
     private static class RecordingJobStateStore implements JobStateStore {
         private final List<String> events = new ArrayList<>();
         private final Map<String, String> taskJobIds = new LinkedHashMap<>();
@@ -1583,6 +1729,93 @@ class TaskSchedulerPersistenceTest {
             synchronized (this) {
                 return events.contains(expected);
             }
+        }
+    }
+
+    private static class OutboxRecordingJobStateStore
+            extends RecordingJobStateStore
+            implements BrokerOutboxStore {
+        private final List<OutboxRecord> outboxRecords = new ArrayList<>();
+        private final List<Long> failedOutboxIds = new ArrayList<>();
+        private final List<Long> publishedOutboxIds = new ArrayList<>();
+        private long nextOutboxId = 1L;
+
+        @Override
+        public synchronized Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message) {
+            OutboxRecord record = new OutboxRecord(nextOutboxId++, message, System.currentTimeMillis(), 0, 0L, "");
+            outboxRecords.add(record);
+            return Optional.of(record);
+        }
+
+        @Override
+        public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                                         String peerId,
+                                                                                         long startedAt,
+                                                                                         String leaseOwnerId,
+                                                                                         long leaseExpiresAt,
+                                                                                         OutboxMessage message) {
+            if (!markTaskAssigned(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
+                return Optional.empty();
+            }
+            return enqueueBrokerOutbox(message);
+        }
+
+        @Override
+        public synchronized Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
+                                                                                         Object resultPayload,
+                                                                                         OutboxMessage message) {
+            if (!markJobCompleted(jobId, resultPayload)) {
+                return Optional.empty();
+            }
+            return enqueueBrokerOutbox(message);
+        }
+
+        @Override
+        public synchronized Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
+                                                                                      Collection<TaskFailureUpdate> taskFailures,
+                                                                                      OutboxMessage message) {
+            Collection<TaskFailureUpdate> updates = taskFailures == null ? List.of() : taskFailures;
+            for (TaskFailureUpdate update : updates) {
+                if (!markTaskFailed(update.taskId(), update.outcome(), update.failureReason(), update.finishedAt())) {
+                    return Optional.empty();
+                }
+            }
+            if (!markJobFailed(jobId)) {
+                return Optional.empty();
+            }
+            return enqueueBrokerOutbox(message);
+        }
+
+        @Override
+        public synchronized List<OutboxRecord> loadPendingBrokerOutbox(int limit) {
+            return outboxRecords.stream()
+                    .filter(record -> !publishedOutboxIds.contains(record.outboxId()))
+                    .limit(limit)
+                    .toList();
+        }
+
+        @Override
+        public synchronized boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
+            publishedOutboxIds.add(outboxId);
+            return true;
+        }
+
+        @Override
+        public synchronized boolean markBrokerOutboxPublishFailed(long outboxId, String error, long attemptedAt) {
+            failedOutboxIds.add(outboxId);
+            return true;
+        }
+
+        synchronized List<OutboxRecord> allOutboxRecords() {
+            return List.copyOf(outboxRecords);
+        }
+
+        synchronized List<Long> failedOutboxIds() {
+            return List.copyOf(failedOutboxIds);
+        }
+
+        synchronized List<Long> publishedOutboxIds() {
+            return List.copyOf(publishedOutboxIds);
         }
     }
 }

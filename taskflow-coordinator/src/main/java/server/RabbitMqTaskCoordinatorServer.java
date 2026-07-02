@@ -10,6 +10,7 @@ import server.db.DatabaseManager;
 import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
+import server.rabbitmq.RabbitMqOutboxReplayer;
 import server.rabbitmq.RabbitMqSchedulerOutput;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
@@ -68,11 +69,15 @@ public class RabbitMqTaskCoordinatorServer {
         }
 
         PeerRegistry registry = new InMemoryPeerRegistry(db);
+        RabbitMqSchedulerOutput schedulerOutput = new RabbitMqSchedulerOutput(transport);
+        RabbitMqOutboxReplayer outboxReplayer = db == null
+                ? null
+                : new RabbitMqOutboxReplayer(db, schedulerOutput);
         TaskScheduler schedulerLogic = new TaskScheduler(
                 inboundMailbox,
                 registry,
                 db,
-                new RabbitMqSchedulerOutput(transport),
+                schedulerOutput,
                 schedulerConfig
         );
         schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
@@ -91,10 +96,14 @@ public class RabbitMqTaskCoordinatorServer {
                 delivery -> handleHeartbeat(registry, schedulerConfig, delivery));
 
         DatabaseManager finalDb = db;
+        RabbitMqOutboxReplayer finalOutboxReplayer = outboxReplayer;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOGGER.info("event=rabbitmq_coordinator_shutdown");
             schedulerThread.interrupt();
             monitor.shutdown();
+            if (finalOutboxReplayer != null) {
+                finalOutboxReplayer.close();
+            }
             if (finalDb != null) {
                 finalDb.close();
             }
@@ -106,6 +115,9 @@ public class RabbitMqTaskCoordinatorServer {
 
         monitor.start();
         schedulerThread.start();
+        if (outboxReplayer != null) {
+            outboxReplayer.start();
+        }
         LOGGER.info("event=coordinator_started transport=rabbitmq");
         Thread.currentThread().join();
     }

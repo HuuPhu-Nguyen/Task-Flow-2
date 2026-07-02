@@ -2,11 +2,14 @@ package server.db;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.JobResultMessage;
 import protocol.RequesterTokens;
+import protocol.TaskAssignMessage;
 import server.registry.PeerMetricsSnapshot;
 import server.registry.PeerRegistryRecord;
 import server.registry.PeerStatus;
 import server.registry.PeerTransport;
+import transport.TransportRoute;
 
 import java.nio.file.Path;
 import java.sql.Connection;
@@ -20,6 +23,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -82,6 +86,176 @@ class DatabaseManagerTest {
             assertEquals("", attempt.failureReason());
         } finally {
             db.close();
+        }
+    }
+
+    @Test
+    void taskAssignmentOutboxCommitsWithAssignedTask() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-test.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-0", "job-outbox");
+
+            var outbox = db.markTaskAssignedAndEnqueueBrokerOutbox(
+                    "task-outbox-0",
+                    "peer-1",
+                    123L,
+                    "coordinator-lease",
+                    456L,
+                    taskAssignmentOutboxMessage("peer-1", "task-outbox-0", "job-outbox")
+            );
+
+            assertTrue(outbox.isPresent());
+            List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-outbox");
+            assertEquals("ASSIGNED", tasks.getFirst().status());
+            assertEquals("peer-1", tasks.getFirst().assignedPeerId());
+            assertEquals("coordinator-lease", tasks.getFirst().leaseOwnerId());
+            assertEquals(456L, tasks.getFirst().leaseExpiresAt());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-outbox");
+            assertEquals(1, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.getFirst().outcome());
+
+            List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
+            assertEquals(1, pending.size());
+            assertEquals(outbox.get().outboxId(), pending.getFirst().outboxId());
+            assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
+            assertEquals("peer-1", pending.getFirst().message().peerNodeId());
+            TaskAssignMessage message = assertInstanceOf(
+                    TaskAssignMessage.class,
+                    pending.getFirst().message().message()
+            );
+            assertEquals("task-outbox-0", message.getTaskId());
+
+            assertTrue(db.markBrokerOutboxPublished(outbox.get().outboxId(), 789L));
+            assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+        }
+    }
+
+    @Test
+    void taskAssignmentOutboxRollsBackWhenTaskCannotBeAssigned() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-rollback-test.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-rollback", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-rollback-0", "job-outbox-rollback");
+            assertTrue(db.markTaskAssigned("task-outbox-rollback-0", "peer-1", 100L));
+
+            var outbox = db.markTaskAssignedAndEnqueueBrokerOutbox(
+                    "task-outbox-rollback-0",
+                    "peer-2",
+                    200L,
+                    "coordinator-lease",
+                    300L,
+                    taskAssignmentOutboxMessage("peer-2", "task-outbox-rollback-0", "job-outbox-rollback")
+            );
+
+            assertTrue(outbox.isEmpty());
+            assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+            List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-outbox-rollback");
+            assertEquals("ASSIGNED", tasks.getFirst().status());
+            assertEquals("peer-1", tasks.getFirst().assignedPeerId());
+            assertEquals(1, db.loadTaskAttempts("job-outbox-rollback").size());
+        }
+    }
+
+    @Test
+    void completedJobOutboxCommitsTerminalStateAndResultMessage() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-completed-outbox-test.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-completed-outbox", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-completed-outbox-0", "job-completed-outbox");
+            assertTrue(db.markTaskAssigned("task-completed-outbox-0", "peer-1", 123L));
+            assertTrue(db.markTaskCompleted("task-completed-outbox-0", 456L, 333L, "result"));
+
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-02T00:00:00Z",
+                    "job-completed-outbox",
+                    "TEST_TASK",
+                    true,
+                    Map.of("joined", "result"),
+                    List.of("result")
+            );
+            var outbox = db.markJobCompletedAndEnqueueBrokerOutbox(
+                    "job-completed-outbox",
+                    result.getResultPayload(),
+                    jobResultOutboxMessage("requester-1", result)
+            );
+
+            assertTrue(outbox.isPresent());
+            DatabaseManager.JobRecord job = db.getJobHistory().getFirst();
+            assertEquals("COMPLETED", job.status());
+            JobStateStore.CompletedJobResultState completed =
+                    db.loadCompletedJobResult("job-completed-outbox").orElseThrow();
+            assertEquals(Map.of("joined", "result"), completed.resultPayload());
+
+            List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
+            assertEquals(1, pending.size());
+            assertEquals(TransportRoute.JOB_RESULT, pending.getFirst().message().route());
+            assertEquals("requester-1", pending.getFirst().message().peerNodeId());
+            JobResultMessage restored = assertInstanceOf(
+                    JobResultMessage.class,
+                    pending.getFirst().message().message()
+            );
+            assertEquals("job-completed-outbox", restored.getJobId());
+            assertEquals(Map.of("joined", "result"), restored.getResultPayload());
+        }
+    }
+
+    @Test
+    void failedJobOutboxCommitsTaskFailuresAndResultMessage() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-failed-outbox-test.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failed-outbox", "TEST_TASK", "requester-1", 2);
+            db.insertTask("task-failed-outbox-0", "job-failed-outbox");
+            db.insertTask("task-failed-outbox-1", "job-failed-outbox");
+            assertTrue(db.markTaskAssigned("task-failed-outbox-0", "peer-1", 123L));
+
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-02T00:00:00Z",
+                    "job-failed-outbox",
+                    "TEST_TASK",
+                    false,
+                    List.of(),
+                    "job failed"
+            );
+            var outbox = db.markJobFailedAndEnqueueBrokerOutbox(
+                    "job-failed-outbox",
+                    List.of(
+                            new BrokerOutboxStore.TaskFailureUpdate(
+                                    "task-failed-outbox-0",
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    "job failed",
+                                    456L
+                            ),
+                            new BrokerOutboxStore.TaskFailureUpdate(
+                                    "task-failed-outbox-1",
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    "job failed",
+                                    456L
+                            )
+                    ),
+                    jobResultOutboxMessage("requester-1", result)
+            );
+
+            assertTrue(outbox.isPresent());
+            assertEquals("FAILED", db.getJobHistory().getFirst().status());
+            List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-failed-outbox");
+            assertEquals(List.of("FAILED", "FAILED"), tasks.stream().map(DatabaseManager.TaskRecord::status).toList());
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-failed-outbox");
+            assertEquals(1, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.JOB_FAILED, attempts.getFirst().outcome());
+            assertEquals("job failed", attempts.getFirst().failureReason());
+
+            List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
+            assertEquals(1, pending.size());
+            JobResultMessage restored = assertInstanceOf(
+                    JobResultMessage.class,
+                    pending.getFirst().message().message()
+            );
+            assertFalse(restored.isSuccessful());
+            assertEquals("job failed", restored.getErrorMessage());
         }
     }
 
@@ -861,6 +1035,35 @@ class DatabaseManagerTest {
         } finally {
             db.close();
         }
+    }
+
+    private static BrokerOutboxStore.OutboxMessage taskAssignmentOutboxMessage(String peerId,
+                                                                               String taskId,
+                                                                               String jobId) {
+        return new BrokerOutboxStore.OutboxMessage(
+                TransportRoute.TASK_ASSIGN,
+                peerId,
+                "COORDINATOR",
+                new TaskAssignMessage(
+                        peerId,
+                        "2026-07-02T00:00:00Z",
+                        taskId,
+                        jobId,
+                        "TEST_TASK",
+                        "payload",
+                        ""
+                )
+        );
+    }
+
+    private static BrokerOutboxStore.OutboxMessage jobResultOutboxMessage(String requesterId,
+                                                                          JobResultMessage result) {
+        return new BrokerOutboxStore.OutboxMessage(
+                TransportRoute.JOB_RESULT,
+                requesterId,
+                "COORDINATOR",
+                result
+        );
     }
 
     private static void createLegacyDatabaseWithoutTaskForeignKey(Path dbPath) throws Exception {

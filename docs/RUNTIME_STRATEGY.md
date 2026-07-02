@@ -14,8 +14,8 @@ RabbitMQ path is completed, documented, and verified.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
 documented as transitional in `docs/RABBITMQ_SCOPE.md` because durable
-outbox/replay, TaskFlow DLQ workflow, broker-backed CI, and desktop GUI
-evidence gates are not complete.
+outbox live crash-window evidence, TaskFlow DLQ workflow, broker-backed CI,
+and desktop GUI evidence gates are not complete.
 
 ## Rationale
 
@@ -57,6 +57,10 @@ compatibility while the identity, recovery, and operational gaps are closed.
   peer-specific task assignment, task-result publication, live `JOB_RESULT`
   routing, and plugin-backed result handling. RabbitMQ GUI result-request replay
   after restart is not implemented.
+- SQLite-backed RabbitMQ coordinator runs persist outbound `TASK_ASSIGN` and
+  final `JOB_RESULT` messages in a broker outbox transactionally with scheduler
+  state changes, replay pending rows on startup, and retry unsent rows while the
+  coordinator runs.
 - RabbitMQ has focused live broker coverage and a Docker Compose demo, but live
   broker tests are still opt-in.
 
@@ -71,8 +75,9 @@ runtime, or start TCP deprecation until all of these are complete:
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- Durable RabbitMQ outbox/replay for coordinator publications, with idempotent
-  replay of task assignments and final job results.
+- Live broker crash-window evidence for RabbitMQ coordinator outbox replay,
+  including coordinator crash before publish, after publish before sent-marking,
+  and during replay.
 - TaskFlow DLQ inspection, quarantine/discard decisions, and redrive back to the
   correct normal route.
 - Broker-failure integration tests for coordinator, command-line peer, GUI

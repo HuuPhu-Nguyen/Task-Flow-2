@@ -3,6 +3,7 @@ package server.scheduler;
 import protocol.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
 import server.job.*;
 import server.model.MessageEnvelope;
@@ -669,6 +670,22 @@ public class TaskScheduler implements Runnable {
         }
         long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
         TaskAssignMessage message = job.createTaskAssignMessage(task);
+        BrokerOutboxStore outboxStore = brokerOutboxStore();
+        BrokerOutboxPublisher outboxPublisher = brokerOutboxPublisher();
+        if (outboxStore != null && outboxPublisher != null) {
+            assignWithBrokerOutbox(
+                    job,
+                    task,
+                    peer,
+                    startedAt,
+                    leaseExpiresAt,
+                    dispatchLatencyMs,
+                    message,
+                    outboxStore,
+                    outboxPublisher
+            );
+            return;
+        }
         if (db != null) {
             boolean persisted = recordPersistence(
                     "markTaskAssigned",
@@ -720,12 +737,113 @@ public class TaskScheduler implements Runnable {
         ));
     }
 
+    private void assignWithBrokerOutbox(EmbarrassinglyParallelJob<?, ?> job,
+                                        TaskUnit<?> task,
+                                        PeerInfo peer,
+                                        long startedAt,
+                                        long leaseExpiresAt,
+                                        long dispatchLatencyMs,
+                                        TaskAssignMessage message,
+                                        BrokerOutboxStore outboxStore,
+                                        BrokerOutboxPublisher outboxPublisher) {
+        BrokerOutboxStore.OutboxMessage outboxMessage;
+        try {
+            outboxMessage = outboxPublisher.taskAssignmentOutboxMessage(peer, message);
+        } catch (RuntimeException e) {
+            task.resetToPending();
+            failJob(job, "Broker outbox task assignment could not be prepared: " + e.getMessage());
+            return;
+        }
+
+        Optional<BrokerOutboxStore.OutboxRecord> outboxRecord =
+                outboxStore.markTaskAssignedAndEnqueueBrokerOutbox(
+                        task.getTaskId(),
+                        peer.getNodeId(),
+                        startedAt,
+                        leaseOwnerId,
+                        leaseExpiresAt,
+                        outboxMessage
+                );
+        if (outboxRecord.isEmpty()) {
+            task.resetToPending();
+            failJob(job, persistenceFailureReason("markTaskAssignedAndEnqueueBrokerOutbox"));
+            return;
+        }
+
+        metrics.recordDispatch(dispatchLatencyMs);
+        peer.incrementTasks();
+        boolean published = publishBrokerOutboxRecord(outboxStore, outboxPublisher, outboxRecord.get());
+        logInfoEvent("task_assigned", fields(
+                "job_id", job.getJobId(),
+                "task_id", task.getTaskId(),
+                "peer_id", peer.getNodeId(),
+                "dispatch_latency_ms", dispatchLatencyMs,
+                "outbox_id", outboxRecord.get().outboxId(),
+                "outbox_published", published
+        ));
+    }
+
     private long leaseExpiresAt(long startedAt) {
         long leaseMillis = config.taskLeaseMillis();
         if (Long.MAX_VALUE - startedAt < leaseMillis) {
             return Long.MAX_VALUE;
         }
         return startedAt + leaseMillis;
+    }
+
+    private BrokerOutboxStore brokerOutboxStore() {
+        if (db instanceof BrokerOutboxStore store) {
+            return store;
+        }
+        return null;
+    }
+
+    private BrokerOutboxPublisher brokerOutboxPublisher() {
+        if (output instanceof BrokerOutboxPublisher publisher) {
+            return publisher;
+        }
+        return null;
+    }
+
+    private boolean publishBrokerOutboxRecord(BrokerOutboxStore outboxStore,
+                                              BrokerOutboxPublisher outboxPublisher,
+                                              BrokerOutboxStore.OutboxRecord record) {
+        long attemptedAt = System.currentTimeMillis();
+        try {
+            boolean published = outboxPublisher.publishOutbox(record);
+            if (!published) {
+                outboxStore.markBrokerOutboxPublishFailed(
+                        record.outboxId(),
+                        "publish_unconfirmed_or_unroutable",
+                        attemptedAt
+                );
+                logErrorEvent("broker_outbox_publish_deferred", fields(
+                        "outbox_id", record.outboxId(),
+                        "route", record.message().route(),
+                        "peer_id", record.message().peerNodeId(),
+                        "reason", "publish_unconfirmed_or_unroutable"
+                ));
+                return false;
+            }
+            if (!outboxStore.markBrokerOutboxPublished(record.outboxId(), attemptedAt)) {
+                logErrorEvent("broker_outbox_publish_mark_failed", fields(
+                        "outbox_id", record.outboxId(),
+                        "route", record.message().route(),
+                        "peer_id", record.message().peerNodeId()
+                ));
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            outboxStore.markBrokerOutboxPublishFailed(record.outboxId(), e.getMessage(), attemptedAt);
+            logErrorEvent("broker_outbox_publish_failed", fields(
+                    "outbox_id", record.outboxId(),
+                    "route", record.message().route(),
+                    "peer_id", record.message().peerNodeId(),
+                    "error", e.getMessage()
+            ));
+            return false;
+        }
     }
 
     private List<PeerInfo> getAvailablePeers(String taskType) {
@@ -838,6 +956,13 @@ public class TaskScheduler implements Runnable {
         completion.lastAttemptAtMillis = now;
         completion.attempts++;
 
+        BrokerOutboxStore outboxStore = brokerOutboxStore();
+        BrokerOutboxPublisher outboxPublisher = brokerOutboxPublisher();
+        if (outboxStore != null && outboxPublisher != null) {
+            tryDeliverJobResultThroughOutbox(completion, outboxStore, outboxPublisher);
+            return;
+        }
+
         try {
             boolean sent = output.sendJobResult(completion.job.getRequesterNodeId(), completion.response);
             if (!sent) {
@@ -862,6 +987,111 @@ public class TaskScheduler implements Runnable {
         }
 
         finalizeJobCompletion(completion);
+    }
+
+    private void tryDeliverJobResultThroughOutbox(PendingJobCompletion completion,
+                                                  BrokerOutboxStore outboxStore,
+                                                  BrokerOutboxPublisher outboxPublisher) {
+        Optional<BrokerOutboxStore.OutboxRecord> outboxRecord =
+                persistJobCompletionOutbox(completion, outboxStore, outboxPublisher);
+        if (outboxRecord.isEmpty()) {
+            logErrorEvent("job_result_delivery_deferred", fields(
+                    "job_id", completion.job.getJobId(),
+                    "requester_id", completion.job.getRequesterNodeId(),
+                    "attempt", completion.attempts,
+                    "reason", "broker_outbox_persistence_failed"
+            ));
+            abandonIfResultDeliveryExhausted(completion, "broker_outbox_persistence_failed");
+            return;
+        }
+
+        boolean published = publishBrokerOutboxRecord(outboxStore, outboxPublisher, outboxRecord.get());
+        finalizeJobCompletionAfterOutbox(completion, outboxRecord.get(), published);
+    }
+
+    private Optional<BrokerOutboxStore.OutboxRecord> persistJobCompletionOutbox(
+            PendingJobCompletion completion,
+            BrokerOutboxStore outboxStore,
+            BrokerOutboxPublisher outboxPublisher
+    ) {
+        BrokerOutboxStore.OutboxMessage outboxMessage;
+        try {
+            outboxMessage = outboxPublisher.jobResultOutboxMessage(
+                    completion.job.getRequesterNodeId(),
+                    completion.response
+            );
+        } catch (RuntimeException e) {
+            logErrorEvent("broker_outbox_prepare_failed", fields(
+                    "job_id", completion.job.getJobId(),
+                    "route", "JOB_RESULT",
+                    "error", e.getMessage()
+            ));
+            return Optional.empty();
+        }
+
+        if (completion.success) {
+            return outboxStore.markJobCompletedAndEnqueueBrokerOutbox(
+                    completion.job.getJobId(),
+                    completion.response.getResultPayload(),
+                    outboxMessage
+            );
+        }
+        return outboxStore.markJobFailedAndEnqueueBrokerOutbox(
+                completion.job.getJobId(),
+                taskFailureUpdatesForJobFailure(completion),
+                outboxMessage
+        );
+    }
+
+    private List<BrokerOutboxStore.TaskFailureUpdate> taskFailureUpdatesForJobFailure(
+            PendingJobCompletion completion
+    ) {
+        long failedAt = System.currentTimeMillis();
+        String reason = completion.reason == null || completion.reason.isBlank()
+                ? "job_failed"
+                : completion.reason;
+        List<BrokerOutboxStore.TaskFailureUpdate> updates = new ArrayList<>();
+        for (TaskUnit<?> task : completion.job.getTasks().values()) {
+            if (task.getStatus() == TaskUnit.TaskStatus.COMPLETED
+                    || task.getStatus() == TaskUnit.TaskStatus.FAILED) {
+                continue;
+            }
+            updates.add(new BrokerOutboxStore.TaskFailureUpdate(
+                    task.getTaskId(),
+                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                    reason,
+                    failedAt
+            ));
+        }
+        return updates;
+    }
+
+    private void finalizeJobCompletionAfterOutbox(PendingJobCompletion completion,
+                                                  BrokerOutboxStore.OutboxRecord outboxRecord,
+                                                  boolean published) {
+        EmbarrassinglyParallelJob<?, ?> job = completion.job;
+        activeJobs.remove(job.getJobId());
+        pendingJobCompletions.remove(job.getJobId());
+        requesterTokenHashes.remove(job.getJobId());
+        requesterIdentityKeys.remove(job.getJobId());
+        metrics.setActiveJobs(activeJobs.size());
+
+        logInfoEvent("job_completed", fields(
+                "job_id", job.getJobId(),
+                "requester_id", job.getRequesterNodeId(),
+                "success", completion.success,
+                "result_count", completion.response.getResultPayloadList().size(),
+                "outbox_id", outboxRecord.outboxId(),
+                "outbox_published", published
+        ));
+
+        if (!completion.success && completion.reason != null && !completion.reason.isBlank()) {
+            logErrorEvent("job_failed", fields(
+                    "job_id", job.getJobId(),
+                    "failed_tasks", job.getFailedCount(),
+                    "reason", completion.reason
+            ));
+        }
     }
 
     private void abandonIfResultDeliveryExhausted(PendingJobCompletion completion, String reason) {
