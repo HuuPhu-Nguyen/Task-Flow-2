@@ -126,6 +126,12 @@ public class RabbitMqTransport implements BrokerTransport {
                         topology.deadLetterExchangeName(),
                         topology.deadLetterRoutingKey()
                 );
+                channel.queueDeclare(topology.deadLetterQuarantineQueueName(), topology.durable(), false, false, null);
+                channel.queueBind(
+                        topology.deadLetterQuarantineQueueName(),
+                        topology.deadLetterExchangeName(),
+                        topology.deadLetterQuarantineRoutingKey()
+                );
             }
             Map<String, Object> queueArguments = topology.queueArguments();
             channel.exchangeDeclare(topology.exchangeName(), BuiltinExchangeType.DIRECT, topology.durable());
@@ -135,12 +141,13 @@ public class RabbitMqTransport implements BrokerTransport {
                 channel.queueBind(queueName, topology.exchangeName(), route.routingKey());
             }
         }
-        LOGGER.info("event=rabbitmq_topology_declared exchange={} durable={} dead_letter_enabled={} dead_letter_exchange={} dead_letter_queue={}",
+        LOGGER.info("event=rabbitmq_topology_declared exchange={} durable={} dead_letter_enabled={} dead_letter_exchange={} dead_letter_queue={} dead_letter_quarantine_queue={}",
                 topology.exchangeName(),
                 topology.durable(),
                 topology.deadLetterEnabled(),
                 topology.deadLetterEnabled() ? topology.deadLetterExchangeName() : "",
-                topology.deadLetterEnabled() ? topology.deadLetterQueueName() : "");
+                topology.deadLetterEnabled() ? topology.deadLetterQueueName() : "",
+                topology.deadLetterEnabled() ? topology.deadLetterQuarantineQueueName() : "");
     }
 
     @Override

@@ -62,10 +62,14 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## RabbitMQ Dead Lettering
 
-- RabbitMQ topology declaration can configure a dead-letter exchange and queue for normal TaskFlow queues.
+- RabbitMQ topology declaration can configure a dead-letter exchange, dead-letter queue, and quarantine queue for normal TaskFlow queues.
 - Malformed broker deliveries are rejected, and handler failures can be rejected when `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
 - Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
-- TaskFlow does not yet provide a DLQ inspection, quarantine, or redrive workflow. Dead-lettered messages require operator review outside TaskFlow before any manual republish.
+- `peer.PeerNode dlq inspect` reads dead-letter metadata and body previews without acknowledging the DLQ entry.
+- `peer.PeerNode dlq redrive` republishes only valid TaskFlow broker envelopes to the original routing key captured in RabbitMQ dead-letter metadata, increments `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after RabbitMQ confirms the publish.
+- Redrive refuses malformed or unknown-route poison messages and leaves them in the DLQ for an explicit quarantine or discard decision.
+- `peer.PeerNode dlq quarantine` republishes a DLQ entry to the configured quarantine queue and acknowledges the original DLQ entry only after publish confirmation.
+- `peer.PeerNode dlq discard` acknowledges and removes the DLQ entry without republishing it.
 
 ## JavaFX GUI Transport Scope
 
@@ -184,4 +188,4 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 
 These metrics are intended for immediate operational visibility in Phase 1 and as migration inputs to dedicated metrics backends in later phases.
 
-`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox visibility, or TaskFlow DLQ workflow work needs operational visibility.
+`docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox visibility, or promoted DLQ workflow metrics need operational visibility.

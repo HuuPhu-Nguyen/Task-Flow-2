@@ -50,10 +50,22 @@ class RabbitMqTopologyTest {
         assertEquals("taskflow.dead-letter.exchange", topology.deadLetterExchangeName());
         assertEquals("taskflow.dead-letter", topology.deadLetterQueueName());
         assertEquals("dead-letter", topology.deadLetterRoutingKey());
+        assertEquals("taskflow.dead-letter.quarantine", topology.deadLetterQuarantineQueueName());
+        assertEquals("dead-letter.quarantine", topology.deadLetterQuarantineRoutingKey());
         assertEquals("taskflow.dead-letter.exchange",
                 topology.queueArguments().get("x-dead-letter-exchange"));
         assertEquals("dead-letter",
                 topology.queueArguments().get("x-dead-letter-routing-key"));
+    }
+
+    @Test
+    void mapsNormalAndPeerRoutingKeysBackToRoutes() {
+        RabbitMqTopology topology = new RabbitMqTopology(RabbitMqTransportConfig.localDefaults());
+
+        assertEquals(TransportRoute.HEARTBEAT, topology.routeForRoutingKey("heartbeats"));
+        assertEquals(TransportRoute.JOB_RESULT, topology.routeForRoutingKey("jobs.result.peer_1"));
+        assertEquals(TransportRoute.TASK_ASSIGN, topology.routeForRoutingKey("tasks.assign.peer_1"));
+        assertEquals(null, topology.routeForRoutingKey("unknown.route"));
     }
 
     @Test

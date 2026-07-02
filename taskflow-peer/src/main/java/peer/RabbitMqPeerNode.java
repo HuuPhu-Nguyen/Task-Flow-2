@@ -20,6 +20,7 @@ import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
+import transport.rabbitmq.RabbitMqDlqClient;
 import transport.rabbitmq.RabbitMqRuntimeDefaults;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
@@ -43,6 +44,11 @@ public class RabbitMqPeerNode {
     private static final long JOB_RESULT_TIMEOUT_MINUTES = 15;
 
     public static void main(String[] args) throws Exception {
+        if (RabbitMqDlqCommand.isCommand(args)) {
+            runDlqCommand(args);
+            return;
+        }
+
         String nodeId = resolveNodeId();
         RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
         transport.declareTopology();
@@ -307,6 +313,13 @@ public class RabbitMqPeerNode {
 
     private static boolean isSubmitCommand(String[] args) {
         return args.length > 0 && "submit".equalsIgnoreCase(args[0]);
+    }
+
+    private static void runDlqCommand(String[] args) throws Exception {
+        try (RabbitMqDlqClient dlqClient = new RabbitMqDlqClient(RabbitMqTransportConfig.fromEnvironment())) {
+            dlqClient.declareTopology();
+            RabbitMqDlqCommand.run(dlqClient, args, System.out);
+        }
     }
 
     private static void ack(TransportAcknowledgement acknowledgement) throws Exception {

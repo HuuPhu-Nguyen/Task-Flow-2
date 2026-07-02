@@ -13,9 +13,9 @@ RabbitMQ reaches the replacement gates below. TCP must keep working while the
 RabbitMQ path is completed, documented, and verified.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
-documented as transitional in `docs/RABBITMQ_SCOPE.md` because TaskFlow DLQ
-workflow, broker-backed CI, broader broker-failure coverage, and desktop GUI
-evidence gates are not complete.
+documented as transitional in `docs/RABBITMQ_SCOPE.md` because broker-backed
+CI, broader broker-failure coverage, and desktop GUI evidence gates are not
+complete.
 
 ## Rationale
 
@@ -61,6 +61,9 @@ compatibility while the identity, recovery, and operational gaps are closed.
   final `JOB_RESULT` messages in a broker outbox transactionally with scheduler
   state changes, replay pending rows on startup, and retry unsent rows while the
   coordinator runs.
+- RabbitMQ dead-letter entries can be inspected through the command-line peer
+  artifact, redriven to their original routing key when they contain valid
+  TaskFlow broker envelopes, quarantined, or discarded.
 - RabbitMQ has focused live broker coverage, including coordinator outbox
   crash-window scenarios, and a Docker Compose demo, but live broker tests are
   still opt-in.
@@ -76,8 +79,6 @@ runtime, or start TCP deprecation until all of these are complete:
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- TaskFlow DLQ inspection, quarantine/discard decisions, and redrive back to the
-  correct normal route.
 - Broker-failure integration tests for coordinator, command-line peer, GUI
   service adapters, publisher confirms, requeue/reject/DLQ behavior, and result
   routing.

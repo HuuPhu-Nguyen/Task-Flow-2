@@ -15,8 +15,9 @@ integration coverage, but it does not yet provide every operational workflow
 needed to call RabbitMQ a complete supported runtime. The coordinator now has
 SQLite-backed outbox replay for its outbound RabbitMQ task assignments and
 final job results, with live broker coverage for seeded pending rows and
-replayed task-assignment duplicates. DLQ review/redrive, broker-backed CI,
-desktop GUI evidence, and broader outage coverage remain incomplete. TCP
+replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
+redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
+Broker-backed CI, desktop GUI evidence, and broader outage coverage remain incomplete. TCP
 remains the current default compatibility/demo runtime until the replacement
 gates in `docs/RUNTIME_STRATEGY.md` pass.
 
@@ -53,13 +54,22 @@ The current RabbitMQ path includes:
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject
   behavior.
 - RabbitMQ prefetch configuration.
-- Dead-letter exchange and queue topology declaration.
+- Dead-letter exchange, dead-letter queue, and quarantine queue topology
+  declaration.
+- DLQ inspection for dead-letter metadata, original routing keys, body preview,
+  redrive count, and redrivability.
+- DLQ decisions for redrive, quarantine, and discard. Redrive republishes valid
+  TaskFlow broker envelopes to the original RabbitMQ routing key, increments
+  `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after broker
+  publish confirmation. Malformed or unknown-route poison messages are left in
+  the DLQ for quarantine or discard.
 - Live broker tests for shared-route delivery, peer-route delivery,
   acknowledgement drain, handler-failure requeue, reject-to-dead-letter,
-  prefetch behavior, broker-side connection-close recovery, coordinator job
-  completion, seeded pending outbox replay for `TASK_ASSIGN` and `JOB_RESULT`,
-  replay after publish-before-sent-marking, and duplicate task-result
-  rejection after replayed task assignments.
+  DLQ redrive/quarantine behavior, prefetch behavior, broker-side
+  connection-close recovery, coordinator job completion, seeded pending outbox
+  replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
+  publish-before-sent-marking, and duplicate task-result rejection after
+  replayed task assignments.
 - Docker Compose demo coverage for a RabbitMQ-backed image conversion job when
   Docker is available.
 
@@ -74,9 +84,8 @@ TaskFlow does not yet provide:
   assignment acknowledgement until `TASK_RESULT` publication is confirmed.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
-- TaskFlow DLQ inspection.
-- TaskFlow DLQ quarantine/discard decisions.
-- TaskFlow DLQ redrive back to the correct normal route.
+- A DLQ dashboard, bulk editor, or automatic message repair workflow. Current
+  DLQ actions are explicit command-line operator decisions.
 - Adaptive broker/peer backpressure beyond bounded scheduler ingress and broker
   prefetch.
 
@@ -103,19 +112,10 @@ Then close remaining durable outbox/replay decisions:
 - Keep live coordinator outbox crash-window coverage in the broker-backed CI
   profile when that profile is added.
 
-Then implement DLQ review/redrive:
-
-- Persist or expose original route and routing-key metadata.
-- Preserve failure reason and dead-letter context.
-- Track redrive count.
-- Define review decisions: redrive, quarantine, discard.
-- Avoid automatic requeue of poisoned messages.
-- Test redrive to the correct normal route and quarantine/discard behavior.
-
 Then promote evidence:
 
 - Add a RabbitMQ-backed CI profile that starts a broker and runs focused live
-  integration gates.
+  integration gates, including DLQ redrive/quarantine behavior.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,
@@ -129,4 +129,4 @@ supported runtime rather than a transitional adapter.
 Until the gates above are complete, public docs should say that RabbitMQ mode is
 functional and tested for the listed broker behaviors, but transitional. Avoid
 phrases such as production-ready broker runtime, durable RabbitMQ recovery, full
-broker outage recovery, or built-in DLQ redrive.
+broker outage recovery, automatic DLQ repair, or DLQ dashboard.

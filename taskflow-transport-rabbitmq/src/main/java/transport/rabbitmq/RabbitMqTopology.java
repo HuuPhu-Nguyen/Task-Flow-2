@@ -40,6 +40,14 @@ public class RabbitMqTopology {
         return config.deadLetterRoutingKey();
     }
 
+    public String deadLetterQuarantineQueueName() {
+        return config.deadLetterQueueName() + ".quarantine";
+    }
+
+    public String deadLetterQuarantineRoutingKey() {
+        return config.deadLetterRoutingKey() + ".quarantine";
+    }
+
     public Map<String, Object> queueArguments() {
         if (!config.deadLetterEnabled()) {
             return Map.of();
@@ -68,6 +76,20 @@ public class RabbitMqTopology {
 
     public String peerRoutingKey(TransportRoute route, String peerNodeId) {
         return route.routingKey() + "." + peerSegment(peerNodeId);
+    }
+
+    public TransportRoute routeForRoutingKey(String routingKey) {
+        if (routingKey == null || routingKey.isBlank()) {
+            return null;
+        }
+        String candidate = routingKey.trim();
+        for (TransportRoute route : TransportRoute.values()) {
+            String normalRoutingKey = route.routingKey();
+            if (normalRoutingKey.equals(candidate) || candidate.startsWith(normalRoutingKey + ".")) {
+                return route;
+            }
+        }
+        return null;
     }
 
     private Map<TransportRoute, String> buildQueueNames(String prefix) {

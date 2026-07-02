@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -206,6 +207,101 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
+    void inspectsAndRedrivesDeadLetteredHandlerFailureAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config);
+                 RabbitMqDlqClient dlqClient = new RabbitMqDlqClient(config)) {
+                transport.declareTopology();
+                dlqClient.declareTopology();
+
+                CountDownLatch failedDelivery = new CountDownLatch(1);
+                String failingConsumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    failedDelivery.countDown();
+                    throw new IllegalStateException("expected live-test handler failure before redrive");
+                });
+                publishHeartbeat(transport);
+                assertTrue(failedDelivery.await(10, TimeUnit.SECONDS),
+                        "Timed out waiting for failed HEARTBEAT delivery");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueCount(config, config.deadLetterQueueName(), 1);
+                transport.cancel(failingConsumer);
+
+                List<RabbitMqDlqMessage> inspected = dlqClient.inspect(1);
+                assertEquals(1, inspected.size());
+                assertEquals(TransportRoute.HEARTBEAT, inspected.getFirst().inferredRoute());
+                assertTrue(inspected.getFirst().redrivable());
+
+                CountDownLatch redrivenDelivery = new CountDownLatch(1);
+                AtomicReference<Throwable> redriveFailure = new AtomicReference<>();
+                String healthyConsumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    assertDelivery(redrivenDelivery, redriveFailure,
+                            () -> assertHeartbeatDelivery(delivery));
+                });
+
+                List<RabbitMqDlqDecisionResult> redriveResults = dlqClient.redrive(1);
+                assertEquals(1, redriveResults.size());
+                assertEquals(RabbitMqDlqDecisionResult.Status.REDRIVEN, redriveResults.getFirst().status());
+
+                awaitDelivery(redrivenDelivery, redriveFailure, "redriven HEARTBEAT");
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueToDrain(config, config.deadLetterQueueName());
+                transport.cancel(healthyConsumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
+    @Test
+    void malformedDeliveryIsDeadLetteredNotRedrivenAndCanBeQuarantinedAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config);
+                 RabbitMqDlqClient dlqClient = new RabbitMqDlqClient(config)) {
+                transport.declareTopology();
+                dlqClient.declareTopology();
+
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery ->
+                        fail("Malformed delivery should be rejected before it reaches the handler"));
+                publishRaw(config, TransportRoute.HEARTBEAT.routingKey(), "{not valid json".getBytes(StandardCharsets.UTF_8));
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueCount(config, config.deadLetterQueueName(), 1);
+                transport.cancel(consumer);
+
+                RabbitMqDlqDecisionResult redriveResult = dlqClient.redriveNext();
+                assertEquals(RabbitMqDlqDecisionResult.Status.NOT_REDRIVABLE, redriveResult.status());
+                assertNotNull(redriveResult.message());
+                assertFalse(redriveResult.message().redrivable());
+                waitForQueueCount(config, config.deadLetterQueueName(), 1);
+
+                RabbitMqDlqDecisionResult quarantineResult = dlqClient.quarantineNext();
+                assertEquals(RabbitMqDlqDecisionResult.Status.QUARANTINED, quarantineResult.status());
+                waitForQueueToDrain(config, config.deadLetterQueueName());
+                waitForQueueCount(config, topology.deadLetterQuarantineQueueName(), 1);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
+    @Test
     void requeuesHandlerFailuresWhenConfiguredAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
@@ -358,6 +454,22 @@ class RabbitMqTransportLiveTest {
         throw error;
     }
 
+    private static void publishRaw(RabbitMqTransportConfig config,
+                                   String routingKey,
+                                   byte[] body) throws Exception {
+        try (Connection connection = connectionFactory(config).newConnection("taskflow-rabbitmq-live-test-publish-raw");
+             Channel channel = connection.createChannel()) {
+            channel.basicPublish(
+                    config.exchangeName(),
+                    routingKey,
+                    new com.rabbitmq.client.AMQP.BasicProperties.Builder()
+                            .contentType("application/json")
+                            .build(),
+                    body
+            );
+        }
+    }
+
     private static <T extends Message> T assertMessage(Class<T> type, InboundTransportMessage delivery) {
         return assertInstanceOf(type, delivery.message());
     }
@@ -466,6 +578,7 @@ class RabbitMqTransportLiveTest {
             deleteQueue(config, topology.queueName(route));
         }
         deleteQueue(config, topology.peerQueueName(TransportRoute.JOB_RESULT, peerId));
+        deleteQueue(config, topology.deadLetterQuarantineQueueName());
         deleteQueue(config, config.deadLetterQueueName());
         deleteExchange(config, config.exchangeName());
         deleteExchange(config, config.deadLetterExchangeName());

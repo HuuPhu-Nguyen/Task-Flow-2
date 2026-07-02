@@ -10,8 +10,8 @@ metrics snapshots. These logs are suitable for local runs, CI output, Docker
 demo inspection, and focused troubleshooting.
 
 TaskFlow does not yet provide a metrics exporter, dashboard, alerting rules,
-distributed tracing, log retention policy, or TaskFlow-managed DLQ review
-workflow.
+distributed tracing, log retention policy, DLQ dashboard, or aggregated DLQ
+metrics.
 
 ## Current Event Map
 
@@ -86,8 +86,10 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 - `rabbitmq_connected` records the broker connection configuration, including
   prefetch, publisher-confirm timeout, dead-letter setting, and handler-failure
   requeue policy.
-- `rabbitmq_topology_declared` records dead-letter exchange and queue
-  declaration when enabled.
+- `rabbitmq_topology_declared` records dead-letter exchange, dead-letter queue,
+  and quarantine queue declaration when enabled.
+- `rabbitmq_dlq_topology_declared` records the DLQ and quarantine queues used
+  by the operator DLQ command path.
 - `rabbitmq_publish_unroutable`, `rabbitmq_publish_not_confirmed`,
   `rabbitmq_publish_confirm_timeout`, and
   `rabbitmq_publish_returned_unmatched` record broker publication failures or
@@ -108,6 +110,14 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 - `rabbitmq_delivery_handler_failed action=reject` can also route failed
   handler deliveries to the dead-letter queue when
   `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+- `rabbitmq_dlq_redriven`, `rabbitmq_dlq_quarantined`, and
+  `rabbitmq_dlq_discarded` record explicit operator decisions on DLQ entries.
+- `rabbitmq_dlq_redrive_rejected status=not_redrivable`,
+  `rabbitmq_dlq_redrive_deferred`, `rabbitmq_dlq_quarantine_deferred`,
+  `rabbitmq_dlq_publish_unroutable`, `rabbitmq_dlq_publish_not_confirmed`,
+  `rabbitmq_dlq_publish_confirm_timeout`, and
+  `rabbitmq_dlq_publish_returned_unmatched` record DLQ workflow failures or
+  deferrals.
 
 ## Current Limits
 
@@ -120,9 +130,10 @@ success, retry, terminal failure, dispatch failure, startup reconciliation, and
 restart release. SQLite task rows also record lease owner and expiry for
 assigned work. SQLite broker outbox rows record coordinator-originated
 RabbitMQ task assignments and final job results until they are marked sent.
-TaskFlow still does not provide promoted lease dashboards, outbox dashboards,
-DLQ review decisions, or redrive counts. Those remaining behaviors are deferred
-in the recovery and RabbitMQ scope documents.
+TaskFlow DLQ commands emit decision logs and preserve redrive counts in broker
+headers, but TaskFlow still does not provide promoted lease dashboards, outbox
+dashboards, DLQ dashboards, or aggregated DLQ metrics. Those remaining
+behaviors are deferred in the recovery and RabbitMQ scope documents.
 
 ## Metrics Backend Deferral
 
@@ -131,7 +142,8 @@ tracks is implemented and needs promoted operational visibility:
 
 - promoted lease or attempt-history dashboards;
 - promoted RabbitMQ outbox replay dashboards or metrics;
-- TaskFlow DLQ inspection, quarantine, discard, and redrive.
+- promoted DLQ dashboards or metrics beyond the current command output and
+  structured logs.
 
 Before adding a metrics exporter, define:
 
@@ -146,5 +158,5 @@ Before adding a metrics exporter, define:
 Public docs should describe current observability as structured logs,
 log-based scheduler metrics, SQLite task-attempt audit rows, SQLite task lease
 fields, and SQLite coordinator outbox rows. Avoid claiming built-in dashboards,
-alerting, tracing, promoted lease timelines, outbox dashboards, or DLQ workflow
-visibility until those systems exist and are tested.
+alerting, tracing, promoted lease timelines, outbox dashboards, or DLQ
+dashboards until those systems exist and are tested.
