@@ -1,7 +1,9 @@
 package transport.rabbitmq;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
@@ -10,6 +12,7 @@ import protocol.Message;
 import protocol.MessageType;
 import protocol.PingMessage;
 import protocol.PongMessage;
+import protocol.ProtocolVersions;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.InboundTransportMessage;
@@ -28,6 +31,7 @@ public class RabbitMqMessageCodec {
 
     public byte[] encode(OutboundTransportMessage outbound) {
         JsonObject root = new JsonObject();
+        root.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT);
         root.addProperty(FIELD_ROUTE, outbound.route().name());
         root.addProperty(FIELD_FROM_NODE_ID, outbound.fromNodeId());
         root.add(FIELD_MESSAGE, gson.toJsonTree(outbound.message()));
@@ -39,19 +43,28 @@ public class RabbitMqMessageCodec {
             TransportRoute fallbackRoute,
             TransportAcknowledgement acknowledgement
     ) {
-        JsonObject root = JsonParser.parseString(new String(body, StandardCharsets.UTF_8)).getAsJsonObject();
+        JsonObject root = parseObject(new String(body, StandardCharsets.UTF_8), "RabbitMQ broker envelope");
+        ProtocolVersions.normalizeSupportedVersion(root, "RabbitMQ envelope");
         TransportRoute route = root.has(FIELD_ROUTE)
                 ? TransportRoute.valueOf(root.get(FIELD_ROUTE).getAsString())
                 : fallbackRoute;
         String fromNodeId = root.has(FIELD_FROM_NODE_ID)
                 ? root.get(FIELD_FROM_NODE_ID).getAsString()
                 : "";
-        Message message = parseMessage(root.getAsJsonObject(FIELD_MESSAGE));
+        Message message = parseMessage(requiredMessage(root));
         return new InboundTransportMessage(route, fromNodeId, message, acknowledgement);
     }
 
     private Message parseMessage(JsonObject messageJson) {
-        String type = messageJson.get("type").getAsString();
+        ProtocolVersions.normalizeSupportedVersion(messageJson, "RabbitMQ message");
+        JsonElement typeElement = messageJson.get("type");
+        if (typeElement == null || typeElement.isJsonNull() || !typeElement.isJsonPrimitive()) {
+            throw new IllegalArgumentException("RabbitMQ message JSON is missing required type field.");
+        }
+        String type = typeElement.getAsString();
+        if (type == null || type.isBlank()) {
+            throw new IllegalArgumentException("RabbitMQ message type is required.");
+        }
         String json = gson.toJson(messageJson);
         return switch (type) {
             case MessageType.JOB_SUBMIT -> gson.fromJson(json, JobSubmitMessage.class);
@@ -63,5 +76,25 @@ public class RabbitMqMessageCodec {
             case MessageType.PONG -> gson.fromJson(json, PongMessage.class);
             default -> throw new IllegalArgumentException("Unknown message type: " + type);
         };
+    }
+
+    private static JsonObject requiredMessage(JsonObject root) {
+        JsonElement messageElement = root.get(FIELD_MESSAGE);
+        if (messageElement == null || messageElement.isJsonNull() || !messageElement.isJsonObject()) {
+            throw new IllegalArgumentException("RabbitMQ envelope is missing required message object.");
+        }
+        return messageElement.getAsJsonObject();
+    }
+
+    private static JsonObject parseObject(String json, String context) {
+        try {
+            JsonElement parsed = JsonParser.parseString(json);
+            if (parsed == null || !parsed.isJsonObject()) {
+                throw new IllegalArgumentException(context + " must be a valid JSON object.");
+            }
+            return parsed.getAsJsonObject();
+        } catch (IllegalStateException | JsonParseException e) {
+            throw new IllegalArgumentException(context + " must be a valid JSON object.", e);
+        }
     }
 }

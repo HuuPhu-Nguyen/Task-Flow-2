@@ -191,6 +191,18 @@ The coordinator and peer shaded JARs already use Maven Shade's
 `ServicesResourceTransformer`, so service files from plugin artifacts are
 merged into packaged runtime JARs.
 
+## Protocol Compatibility
+
+Plugins should use TaskFlow SPI message classes instead of building raw protocol
+JSON. Current messages emit `protocolVersion: 1`; missing versions are accepted
+only for legacy compatibility, and unsupported future versions are rejected
+before plugin code sees the message.
+
+Keep plugin-owned payload and result object changes compatible within the
+plugin contract. If a new task type needs a framework-level message field
+outside plugin-owned payloads, update `docs/PROTOCOL_COMPATIBILITY.md` and the
+shared protocol tests with the framework change.
+
 ## Focused Tests
 
 Add tests in the plugin role modules before relying on the new type in a demo.

@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import protocol.Message;
+import protocol.ProtocolVersions;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -33,6 +34,8 @@ public class MessageFactory {
             throw new IllegalArgumentException("Message JSON must be a valid object.", e);
         }
 
+        ProtocolVersions.normalizeSupportedVersion(obj, "Message");
+
         JsonElement typeElement = obj.get("type");
         if (typeElement == null || typeElement.isJsonNull() || !typeElement.isJsonPrimitive()) {
             throw new IllegalArgumentException("Message JSON is missing required type field.");
@@ -47,6 +50,6 @@ public class MessageFactory {
         if (parser == null) {
             throw new IllegalArgumentException("Unknown message type: " + type);
         }
-        return parser.apply(json);
+        return parser.apply(obj.toString());
     }
 }

@@ -1,10 +1,13 @@
 package transport.rabbitmq;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
 import protocol.PongMessage;
+import protocol.ProtocolVersions;
 import protocol.RequesterIdentity;
 import protocol.TaskAssignMessage;
 import transport.InboundTransportMessage;
@@ -12,11 +15,13 @@ import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RabbitMqMessageCodecTest {
     private final RabbitMqMessageCodec codec = new RabbitMqMessageCodec();
@@ -110,6 +115,62 @@ class RabbitMqMessageCodecTest {
     }
 
     @Test
+    void encodesProtocolVersionOnEnvelopeAndMessage() {
+        byte[] body = codec.encode(new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                new PongMessage("peer-1", "2026-06-04T00:00:00Z")
+        ));
+
+        JsonObject envelope = JsonParser.parseString(new String(body, StandardCharsets.UTF_8)).getAsJsonObject();
+
+        assertEquals(ProtocolVersions.CURRENT, envelope.get(ProtocolVersions.FIELD_NAME).getAsInt());
+        assertEquals(ProtocolVersions.CURRENT,
+                envelope.getAsJsonObject("message").get(ProtocolVersions.FIELD_NAME).getAsInt());
+    }
+
+    @Test
+    void decodesLegacyEnvelopeAndMessageWithoutProtocolVersion() {
+        JsonObject envelope = envelope(new PongMessage("peer-1", "2026-06-04T00:00:00Z"));
+        envelope.remove(ProtocolVersions.FIELD_NAME);
+        envelope.getAsJsonObject("message").remove(ProtocolVersions.FIELD_NAME);
+
+        InboundTransportMessage decoded = codec.decode(body(envelope), TransportRoute.HEARTBEAT,
+                new NoopAcknowledgement());
+
+        assertEquals(TransportRoute.HEARTBEAT, decoded.route());
+        PongMessage decodedMessage = assertInstanceOf(PongMessage.class, decoded.message());
+        assertEquals(MessageType.PONG, decodedMessage.getType());
+        assertEquals(ProtocolVersions.LEGACY, decodedMessage.getProtocolVersion());
+        assertEquals("peer-1", decodedMessage.getNodeId());
+    }
+
+    @Test
+    void rejectsUnsupportedFutureEnvelopeProtocolVersionWithClearError() {
+        JsonObject envelope = envelope(new PongMessage("peer-1", "2026-06-04T00:00:00Z"));
+        envelope.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT + 1);
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> codec.decode(body(envelope), TransportRoute.HEARTBEAT, new NoopAcknowledgement()));
+
+        assertEquals("RabbitMQ envelope uses unsupported TaskFlow protocolVersion 2; "
+                + "supported versions are 0 through 1.", error.getMessage());
+    }
+
+    @Test
+    void rejectsUnsupportedFutureMessageProtocolVersionWithClearError() {
+        JsonObject envelope = envelope(new PongMessage("peer-1", "2026-06-04T00:00:00Z"));
+        envelope.getAsJsonObject("message")
+                .addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT + 1);
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> codec.decode(body(envelope), TransportRoute.HEARTBEAT, new NoopAcknowledgement()));
+
+        assertEquals("RabbitMQ message uses unsupported TaskFlow protocolVersion 2; "
+                + "supported versions are 0 through 1.", error.getMessage());
+    }
+
+    @Test
     void roundTripsJobResultRequests() {
         RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
         String time = "2026-06-25T00:00:00Z";
@@ -147,6 +208,19 @@ class RabbitMqMessageCodecTest {
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {
         return codec.decode(codec.encode(outbound), outbound.route(), new NoopAcknowledgement());
+    }
+
+    private JsonObject envelope(PongMessage message) {
+        byte[] body = codec.encode(new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                message
+        ));
+        return JsonParser.parseString(new String(body, StandardCharsets.UTF_8)).getAsJsonObject();
+    }
+
+    private byte[] body(JsonObject envelope) {
+        return envelope.toString().getBytes(StandardCharsets.UTF_8);
     }
 
     private record TestPayload(String fileName, String base64Data) {

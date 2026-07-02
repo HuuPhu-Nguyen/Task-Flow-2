@@ -5,6 +5,8 @@ import com.google.gson.annotations.SerializedName;
 import java.io.Serial;
 
 public abstract class Message {
+    @SerializedName("protocolVersion")
+    int protocolVersion = ProtocolVersions.CURRENT;
     @SerializedName("type")
     String type;
     @SerializedName("nodeId")
@@ -25,5 +27,9 @@ public abstract class Message {
 
     public String getTime() {
         return time;
+    }
+
+    public int getProtocolVersion() {
+        return protocolVersion;
     }
 }

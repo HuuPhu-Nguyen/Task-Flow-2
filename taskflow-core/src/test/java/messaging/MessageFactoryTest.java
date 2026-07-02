@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import protocol.Message;
 import protocol.MessageType;
 import protocol.PingMessage;
+import protocol.ProtocolVersions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -22,7 +23,53 @@ class MessageFactoryTest {
 
         PingMessage ping = assertInstanceOf(PingMessage.class, parsed);
         assertEquals(MessageType.PING, ping.getType());
+        assertEquals(ProtocolVersions.CURRENT, ping.getProtocolVersion());
         assertEquals("peer-1", ping.getNodeId());
+    }
+
+    @Test
+    void parsesLegacyMessageWithoutProtocolVersion() {
+        MessageFactory factory = new MessageFactory();
+        factory.register(MessageType.PING, json -> gson.fromJson(json, PingMessage.class));
+
+        Message parsed = factory.fromJson("""
+                {"type":"PING","nodeId":"peer-1","time":"2026-06-12T00:00:00Z"}
+                """);
+
+        PingMessage ping = assertInstanceOf(PingMessage.class, parsed);
+        assertEquals(MessageType.PING, ping.getType());
+        assertEquals(ProtocolVersions.LEGACY, ping.getProtocolVersion());
+        assertEquals("peer-1", ping.getNodeId());
+    }
+
+    @Test
+    void rejectsUnsupportedFutureProtocolVersionWithClearError() {
+        MessageFactory factory = new MessageFactory();
+        factory.register(MessageType.PING, json -> gson.fromJson(json, PingMessage.class));
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> factory.fromJson("""
+                        {"protocolVersion":2,"type":"PING","nodeId":"peer-1","time":"2026-06-12T00:00:00Z"}
+                        """)
+        );
+
+        assertEquals("Message uses unsupported TaskFlow protocolVersion 2; supported versions are 0 through 1.",
+                error.getMessage());
+    }
+
+    @Test
+    void rejectsInvalidProtocolVersionWithClearError() {
+        MessageFactory factory = new MessageFactory();
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> factory.fromJson("""
+                        {"protocolVersion":"future","type":"PING","nodeId":"peer-1","time":"2026-06-12T00:00:00Z"}
+                        """)
+        );
+
+        assertEquals("Message protocolVersion must be an integer.", error.getMessage());
     }
 
     @Test
