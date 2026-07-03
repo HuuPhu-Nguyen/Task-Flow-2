@@ -40,13 +40,18 @@ public class PeerNode {
     }
 
     public static void main(String[] args) throws Exception {
+        if (isHelpRequested(args)) {
+            System.out.println(usage());
+            return;
+        }
+
         if (isRabbitMqTransportSelected()) {
             RabbitMqPeerNode.main(args);
             return;
         }
 
         if (args.length < 2) {
-            LOGGER.info("event=peer_usage command=\"java peer.PeerNode <host> <port>\"");
+            LOGGER.info("event=peer_usage command=\"{}\"", tcpUsageLine());
             return;
         }
         String host = args[0];
@@ -173,5 +178,24 @@ public class PeerNode {
 
     private static boolean isRabbitMqTransportSelected() {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
+    }
+
+    static boolean isHelpRequested(String[] args) {
+        return args != null
+                && args.length > 0
+                && ("--help".equals(args[0]) || "-h".equals(args[0]));
+    }
+
+    static String usage() {
+        return String.join(System.lineSeparator(),
+                tcpUsageLine(),
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-submitter-runtime.jar submit <task-type> <parameter> <file> [file...]",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-executor-runtime.jar",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]]",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|redrive|quarantine|discard> [count]");
+    }
+
+    private static String tcpUsageLine() {
+        return "TASKFLOW_TRANSPORT=tcp java -jar taskflow-peer-<version>-combined-runtime.jar <host> <port>";
     }
 }

@@ -38,6 +38,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PeerNodeTest {
 
     @Test
+    void usageDescribesProfileSpecificPeerPackages() {
+        String usage = PeerNode.usage();
+
+        assertTrue(usage.contains("taskflow-peer-<version>-combined-runtime.jar"));
+        assertTrue(usage.contains("taskflow-peer-<version>-submitter-runtime.jar"));
+        assertTrue(usage.contains("taskflow-peer-<version>-executor-runtime.jar"));
+        assertTrue(usage.contains("submit <task-type> <parameter> <file> [file...]"));
+        assertTrue(usage.contains("dlq <inspect|redrive|quarantine|discard> [count]"));
+    }
+
+    @Test
     void submitJobWritesJobSubmitMessage() {
         PeerNode node = new PeerNode("peer-submit");
         StringWriter buffer = new StringWriter();

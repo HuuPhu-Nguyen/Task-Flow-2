@@ -29,7 +29,7 @@ services:
       - java
       - -Xmx256m
       - -jar
-      - taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-jar-with-dependencies.jar
+      - taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar
 
   peer-a:
     image: taskflow-demo:local
@@ -45,7 +45,7 @@ services:
       - java
       - -Xmx256m
       - -jar
-      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar
 
   peer-b:
     image: taskflow-demo:local
@@ -61,7 +61,7 @@ services:
       - java
       - -Xmx256m
       - -jar
-      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar
 
   peer-c:
     image: taskflow-demo:local
@@ -78,7 +78,7 @@ services:
       - java
       - -Xmx256m
       - -jar
-      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+      - taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar
 
   submitter:
     image: taskflow-demo:local
@@ -116,7 +116,7 @@ services:
         echo "Generated $$count demo input files."
         echo "Waiting for coordinator and peers to register..."
         sleep 20
-        java -Xmx256m -jar taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar submit image png $$inputs
+        java -Xmx256m -jar taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar submit image png $$inputs
         latest="$$(find target/rabbitmq-results -mindepth 1 -maxdepth 1 -type d | sort | tail -n 1)"
         if [ -z "$$latest" ]; then
           echo "No result directory was created."

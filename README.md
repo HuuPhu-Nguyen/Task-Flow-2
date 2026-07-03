@@ -98,7 +98,7 @@ The JavaFX presentation layer talks to GUI-facing services for connection lifecy
 - `submitter-runtime` includes client plugins only. It omits peer processor artifacts and their native media dependencies, including the conversion peer's JavaCV/FFmpeg runtime.
 - `executor-runtime` includes peer processors only. Use it for workers that should execute assigned tasks without carrying client payload creation and result-saving plugins.
 
-The coordinator runtime carries server plugin artifacts only. It does not need client plugins or peer processor artifacts.
+The coordinator runtime carries server plugin artifacts only. It does not need client plugins or peer processor artifacts. Release packages use role-specific artifact names for these profiles; see `docs/RELEASE_PACKAGING.md` for the current coordinator, command-line peer, GUI peer, and plugin bundle package strategy.
 
 The core peer registry uses a `transport.TransportConnection` abstraction instead of socket APIs. Peer IDs are explicit and sanitized across TCP, RabbitMQ, command-line peers, and JavaFX GUI peers; the TCP coordinator now registers peers from their declared peer ID instead of the remote socket address. The runtime registry keeps live connection handles in memory, while the SQLite peer registry store persists durable peer metadata such as peer ID, runtime type, transport, supported task types, heartbeat/disconnect times, status, and scheduling metric snapshots when persistence is available. TCP remains the current default runtime for local compatibility, and RabbitMQ can be selected through `TASKFLOW_TRANSPORT=rabbitmq` for the coordinator, command-line peer, and JavaFX GUI. See `docs/PEER_IDENTITY.md` for duplicate-ID behavior and generated fallback limits.
 

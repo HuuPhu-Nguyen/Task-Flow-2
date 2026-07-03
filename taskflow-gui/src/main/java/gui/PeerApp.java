@@ -460,6 +460,10 @@ public class PeerApp extends Application {
     }
 
     public static void main(String[] args) {
+        if (GuiUsage.isHelpRequested(args)) {
+            System.out.println(GuiUsage.usage());
+            return;
+        }
         launch(args);
     }
 

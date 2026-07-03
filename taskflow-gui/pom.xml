@@ -126,7 +126,7 @@
                 <groupId>org.openjfx</groupId>
                 <artifactId>javafx-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>gui.PeerApp</mainClass>
+                    <mainClass>gui.PeerAppLauncher</mainClass>
                 </configuration>
             </plugin>
         </plugins>

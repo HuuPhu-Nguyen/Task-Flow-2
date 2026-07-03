@@ -37,6 +37,11 @@ public class TaskCoordinatorServer {
     private static final String TRANSPORT_ENV = "TASKFLOW_TRANSPORT";
 
     public static void main(String[] args) throws Exception {
+        if (isHelpRequested(args)) {
+            System.out.println(usage());
+            return;
+        }
+
         if (isRabbitMqTransportSelected()) {
             RabbitMqTaskCoordinatorServer.main(args);
             return;
@@ -132,6 +137,18 @@ public class TaskCoordinatorServer {
 
     private static boolean isRabbitMqTransportSelected() {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
+    }
+
+    static boolean isHelpRequested(String[] args) {
+        return args != null
+                && args.length > 0
+                && ("--help".equals(args[0]) || "-h".equals(args[0]));
+    }
+
+    static String usage() {
+        return String.join(System.lineSeparator(),
+                "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar");
     }
 
     private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,

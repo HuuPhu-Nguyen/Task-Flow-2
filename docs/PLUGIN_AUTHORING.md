@@ -227,6 +227,11 @@ The coordinator and peer shaded JARs already use Maven Shade's
 `ServicesResourceTransformer`, so service files from plugin artifacts are
 merged into packaged runtime JARs.
 
+Release package names and smoke checks are documented in
+`docs/RELEASE_PACKAGING.md`. When a plugin adds heavy runtime dependencies,
+keep those dependencies in the narrowest role artifact and verify the submitter
+packages still omit executor-only dependencies.
+
 ## Protocol Compatibility
 
 Plugins should use TaskFlow SPI message classes instead of building raw protocol

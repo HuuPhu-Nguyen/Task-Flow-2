@@ -10,6 +10,12 @@ COPY config config
 COPY taskflow-spi/pom.xml taskflow-spi/pom.xml
 COPY taskflow-core/pom.xml taskflow-core/pom.xml
 COPY taskflow-persistence-sqlite/pom.xml taskflow-persistence-sqlite/pom.xml
+COPY plugins/example/pom.xml plugins/example/pom.xml
+COPY plugins/example/model/pom.xml plugins/example/model/pom.xml
+COPY plugins/example/server/pom.xml plugins/example/server/pom.xml
+COPY plugins/example/client/pom.xml plugins/example/client/pom.xml
+COPY plugins/example/peer/pom.xml plugins/example/peer/pom.xml
+COPY plugins/example/harness/pom.xml plugins/example/harness/pom.xml
 COPY plugins/conversion/pom.xml plugins/conversion/pom.xml
 COPY plugins/conversion/model/pom.xml plugins/conversion/model/pom.xml
 COPY plugins/conversion/server/pom.xml plugins/conversion/server/pom.xml
@@ -35,8 +41,8 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 
 COPY --from=build /app/config config
-COPY --from=build /app/taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-jar-with-dependencies.jar taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-jar-with-dependencies.jar
-COPY --from=build /app/taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-jar-with-dependencies.jar
+COPY --from=build /app/taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar
+COPY --from=build /app/taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar
 
 RUN mkdir -p target/demo-input target/demo-results target/rabbitmq-results
 
