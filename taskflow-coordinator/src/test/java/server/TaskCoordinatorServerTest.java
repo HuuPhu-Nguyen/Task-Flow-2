@@ -13,5 +13,6 @@ class TaskCoordinatorServerTest {
         assertTrue(usage.contains("taskflow-coordinator-<version>-coordinator-runtime.jar"));
         assertTrue(usage.contains("TASKFLOW_TRANSPORT=tcp"));
         assertTrue(usage.contains("TASKFLOW_TRANSPORT=rabbitmq"));
+        assertTrue(usage.contains("status [summary|jobs|peers|outbox|queues|dlq] [count]"));
     }
 }

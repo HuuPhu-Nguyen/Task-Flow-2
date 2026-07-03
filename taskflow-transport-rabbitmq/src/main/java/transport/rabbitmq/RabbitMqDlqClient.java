@@ -126,6 +126,39 @@ public class RabbitMqDlqClient implements AutoCloseable {
         }
     }
 
+    public List<RabbitMqQueueStatus> inspectQueueStatus() throws Exception {
+        List<QueueTarget> targets = queueTargets();
+        List<RabbitMqQueueStatus> statuses = new ArrayList<>();
+        synchronized (channel) {
+            for (int i = 0; i < targets.size(); i++) {
+                QueueTarget target = targets.get(i);
+                try {
+                    AMQP.Queue.DeclareOk declared = channel.queueDeclarePassive(target.queueName());
+                    statuses.add(new RabbitMqQueueStatus(
+                            target.role(),
+                            target.queueName(),
+                            declared.getMessageCount(),
+                            declared.getConsumerCount(),
+                            true,
+                            ""
+                    ));
+                } catch (IOException e) {
+                    statuses.add(new RabbitMqQueueStatus(
+                            target.role(),
+                            target.queueName(),
+                            0L,
+                            0L,
+                            false,
+                            e.getMessage()
+                    ));
+                    appendUnavailableRemainingQueues(statuses, targets, i + 1);
+                    break;
+                }
+            }
+        }
+        return List.copyOf(statuses);
+    }
+
     public List<RabbitMqDlqDecisionResult> redrive(int maxMessages) throws Exception {
         validateMaxMessages(maxMessages);
         return applyDecision(maxMessages, this::redriveNext);
@@ -292,6 +325,34 @@ public class RabbitMqDlqClient implements AutoCloseable {
             }
         }
         return List.copyOf(results);
+    }
+
+    private List<QueueTarget> queueTargets() {
+        List<QueueTarget> targets = new ArrayList<>();
+        for (TransportRoute route : TransportRoute.values()) {
+            targets.add(new QueueTarget(route.name(), topology.queueName(route)));
+        }
+        if (topology.deadLetterEnabled()) {
+            targets.add(new QueueTarget("DLQ", topology.deadLetterQueueName()));
+            targets.add(new QueueTarget("DLQ_QUARANTINE", topology.deadLetterQuarantineQueueName()));
+        }
+        return targets;
+    }
+
+    private void appendUnavailableRemainingQueues(List<RabbitMqQueueStatus> statuses,
+                                                  List<QueueTarget> targets,
+                                                  int startIndex) {
+        for (int i = startIndex; i < targets.size(); i++) {
+            QueueTarget target = targets.get(i);
+            statuses.add(new RabbitMqQueueStatus(
+                    target.role(),
+                    target.queueName(),
+                    0L,
+                    0L,
+                    false,
+                    "not inspected after passive queue declare failure"
+            ));
+        }
     }
 
     private RabbitMqDlqMessage toMessage(GetResponse response) {
@@ -677,6 +738,9 @@ public class RabbitMqDlqClient implements AutoCloseable {
     }
 
     private record DecodeResult(TransportRoute route, boolean explicitRoute, String error) {
+    }
+
+    private record QueueTarget(String role, String queueName) {
     }
 
     private record XDeath(

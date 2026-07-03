@@ -15,6 +15,7 @@ import transport.TransportRoute;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayDeque;
@@ -72,6 +73,51 @@ class RabbitMqDlqClientTest {
         assertEquals(List.of(7L), fakeChannel.nackedTags);
         assertEquals(List.of(true), fakeChannel.nackRequeueFlags);
         assertTrue(fakeChannel.ackedTags.isEmpty());
+    }
+
+    @Test
+    void inspectQueueStatusReportsSharedDlqAndQuarantineDepths() throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        RabbitMqTopology topology = new RabbitMqTopology(config());
+        for (TransportRoute route : TransportRoute.values()) {
+            fakeChannel.passiveQueues.put(topology.queueName(route), declareOk(topology.queueName(route), 0, 1));
+        }
+        fakeChannel.passiveQueues.put(topology.deadLetterQueueName(), declareOk(topology.deadLetterQueueName(), 3, 0));
+        fakeChannel.passiveQueues.put(
+                topology.deadLetterQuarantineQueueName(),
+                declareOk(topology.deadLetterQuarantineQueueName(), 1, 0)
+        );
+
+        List<RabbitMqQueueStatus> statuses;
+        try (RabbitMqDlqClient client = client(fakeChannel)) {
+            statuses = client.inspectQueueStatus();
+        }
+
+        assertEquals(7, statuses.size());
+        assertEquals("JOB_SUBMIT", statuses.getFirst().role());
+        assertEquals("taskflow.jobs", statuses.getFirst().queueName());
+        assertEquals(0L, statuses.getFirst().messageCount());
+        assertEquals(1L, statuses.getFirst().consumerCount());
+        RabbitMqQueueStatus dlq = statuses.stream()
+                .filter(status -> "DLQ".equals(status.role()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(3L, dlq.messageCount());
+        assertTrue(dlq.available());
+        RabbitMqQueueStatus quarantine = statuses.stream()
+                .filter(status -> "DLQ_QUARANTINE".equals(status.role()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(1L, quarantine.messageCount());
+        assertEquals(List.of(
+                "taskflow.jobs",
+                "taskflow.tasks",
+                "taskflow.task-results",
+                "taskflow.job-results",
+                "taskflow.heartbeats",
+                "taskflow.dead-letter",
+                "taskflow.dead-letter.quarantine"
+        ), fakeChannel.passiveDeclareNames);
     }
 
     @Test
@@ -260,6 +306,19 @@ class RabbitMqDlqClientTest {
         );
     }
 
+    private static AMQP.Queue.DeclareOk declareOk(String queue, int messageCount, int consumerCount) {
+        return (AMQP.Queue.DeclareOk) Proxy.newProxyInstance(
+                AMQP.Queue.DeclareOk.class.getClassLoader(),
+                new Class<?>[] { AMQP.Queue.DeclareOk.class },
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getQueue" -> queue;
+                    case "getMessageCount" -> messageCount;
+                    case "getConsumerCount" -> consumerCount;
+                    default -> defaultValue(method.getReturnType());
+                }
+        );
+    }
+
     private static Object defaultValue(Class<?> returnType) {
         if (returnType == void.class) {
             return null;
@@ -285,6 +344,8 @@ class RabbitMqDlqClientTest {
     private static final class FakeChannel implements InvocationHandler {
         private final Queue<GetResponse> deliveries = new ArrayDeque<>();
         private final List<String> declaredQueues = new ArrayList<>();
+        private final Map<String, AMQP.Queue.DeclareOk> passiveQueues = new LinkedHashMap<>();
+        private final List<String> passiveDeclareNames = new ArrayList<>();
         private final List<String> bindings = new ArrayList<>();
         private final List<Long> ackedTags = new ArrayList<>();
         private final List<Long> nackedTags = new ArrayList<>();
@@ -322,6 +383,15 @@ class RabbitMqDlqClientTest {
                 case "queueDeclare" -> {
                     declaredQueues.add((String) args[0]);
                     yield null;
+                }
+                case "queueDeclarePassive" -> {
+                    String queue = (String) args[0];
+                    passiveDeclareNames.add(queue);
+                    AMQP.Queue.DeclareOk declared = passiveQueues.get(queue);
+                    if (declared == null) {
+                        throw new IOException("queue not found: " + queue);
+                    }
+                    yield declared;
                 }
                 case "queueBind" -> {
                     bindings.add(args[0] + "|" + args[1] + "|" + args[2]);

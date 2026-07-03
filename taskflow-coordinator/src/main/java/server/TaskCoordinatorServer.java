@@ -42,6 +42,11 @@ public class TaskCoordinatorServer {
             return;
         }
 
+        if (StatusCommand.isCommand(args)) {
+            StatusCommand.run(args, System.out);
+            return;
+        }
+
         if (isRabbitMqTransportSelected()) {
             RabbitMqTaskCoordinatorServer.main(args);
             return;
@@ -148,7 +153,8 @@ public class TaskCoordinatorServer {
     static String usage() {
         return String.join(System.lineSeparator(),
                 "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
-                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar");
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
+                "java -jar taskflow-coordinator-<version>-coordinator-runtime.jar status [summary|jobs|peers|outbox|queues|dlq] [count]");
     }
 
     private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,

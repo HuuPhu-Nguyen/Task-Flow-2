@@ -137,6 +137,17 @@ java -jar taskflow-peer\target\taskflow-peer-1.0-SNAPSHOT-executor-runtime.jar -
 java -cp taskflow-gui\target\taskflow-gui-1.0-SNAPSHOT.jar gui.PeerAppLauncher --help
 ```
 
+The coordinator package also exposes the operator inspection command:
+
+```powershell
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status summary
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status jobs 20
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status peers 20
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status outbox 20
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status queues
+java -jar taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar status dlq 20
+```
+
 The GUI smoke command intentionally uses only the GUI jar. It verifies the
 package entry point and help path; full GUI launch still requires the JavaFX
 runtime dependencies on the module path as shown above.

@@ -5,9 +5,10 @@ deferred before adding a dedicated metrics backend.
 
 ## Current Position
 
-TaskFlow currently relies on structured SLF4J/Logback event logs plus scheduler
-metrics snapshots. These logs are suitable for local runs, CI output, Docker
-demo inspection, and focused troubleshooting.
+TaskFlow currently relies on structured SLF4J/Logback event logs, scheduler
+metrics snapshots, and coordinator operator status commands. These outputs are
+suitable for local runs, CI output, Docker demo inspection, and focused
+troubleshooting.
 
 TaskFlow does not yet provide a metrics exporter, dashboard, alerting rules,
 distributed tracing, log retention policy, DLQ dashboard, or aggregated DLQ
@@ -20,6 +21,10 @@ Queue pressure and scheduler health:
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`,
   `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `success_count`,
   and `failure_count`.
+- Coordinator `status summary`, `status jobs`, `status peers`, `status outbox`,
+  `status queues`, and `status dlq` commands report persisted job/task state,
+  retry and lease counts, last-known peers, pending coordinator outbox rows,
+  RabbitMQ queue depths, and DLQ inspection summaries.
 - `scheduler_ingress_requeued reason=mailbox_full` records RabbitMQ
   scheduler-delivery requeue when the bounded scheduler mailbox is full.
 - TCP coordinator `peer_status` logs include peer connection state and active
@@ -121,9 +126,10 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 
 ## Current Limits
 
-Current observability is log-based. Operators can grep logs for structured
-events, but TaskFlow does not aggregate those events into a metrics backend or
-provide stable dashboard contracts.
+Current observability is log-based plus command-line status inspection.
+Operators can grep logs for structured events or run the coordinator status
+command against SQLite/RabbitMQ state, but TaskFlow does not aggregate those
+events into a metrics backend or provide stable dashboard contracts.
 
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and
@@ -132,8 +138,9 @@ assigned work. SQLite broker outbox rows record coordinator-originated
 RabbitMQ task assignments and final job results until they are marked sent.
 TaskFlow DLQ commands emit decision logs and preserve redrive counts in broker
 headers, but TaskFlow still does not provide promoted lease dashboards, outbox
-dashboards, DLQ dashboards, or aggregated DLQ metrics. Those remaining
-behaviors are deferred in the recovery and RabbitMQ scope documents.
+dashboards, DLQ dashboards, or aggregated DLQ metrics. The status command is a
+terminal inspection surface, not a dashboard contract. Those remaining behaviors
+are deferred in the recovery and RabbitMQ scope documents.
 
 ## Metrics Backend Deferral
 
@@ -156,7 +163,7 @@ Before adding a metrics exporter, define:
 ## Public Claim Rule
 
 Public docs should describe current observability as structured logs,
-log-based scheduler metrics, SQLite task-attempt audit rows, SQLite task lease
-fields, and SQLite coordinator outbox rows. Avoid claiming built-in dashboards,
-alerting, tracing, promoted lease timelines, outbox dashboards, or DLQ
-dashboards until those systems exist and are tested.
+log-based scheduler metrics, coordinator status commands, SQLite task-attempt
+audit rows, SQLite task lease fields, and SQLite coordinator outbox rows. Avoid
+claiming built-in dashboards, alerting, tracing, promoted lease timelines,
+outbox dashboards, or DLQ dashboards until those systems exist and are tested.
