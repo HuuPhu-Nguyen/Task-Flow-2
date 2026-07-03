@@ -38,3 +38,53 @@ jobs:
 
       - name: Check whitespace
         run: git diff-tree --check --no-commit-id --root -r HEAD
+
+  rabbitmq-integration:
+    name: RabbitMQ Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-management
+        ports:
+          - 5672:5672
+          - 15672:15672
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_listener 5672"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run RabbitMQ broker integration tests
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -pl taskflow-transport-rabbitmq,taskflow-coordinator,taskflow-peer,taskflow-gui
+          -am
+          -Dtaskflow.rabbitmq.live=true
+          -Dtest=RabbitMqTransportLiveTest,RabbitMqCoordinatorLiveIntegrationTest,PeerNodeTest,RabbitMqJobSubmissionClientTest,RabbitMqCoordinatorConnectionTest
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
+        env:
+          TASKFLOW_RABBITMQ_HOST: localhost
+          TASKFLOW_RABBITMQ_PORT: "5672"
+          TASKFLOW_RABBITMQ_USERNAME: guest
+          TASKFLOW_RABBITMQ_PASSWORD: guest
+          TASKFLOW_RABBITMQ_MANAGEMENT_URL: http://localhost:15672
+          TASKFLOW_RABBITMQ_MANAGEMENT_USERNAME: guest
+          TASKFLOW_RABBITMQ_MANAGEMENT_PASSWORD: guest
+          TASKFLOW_RABBITMQ_LIVE_TEST: "true"

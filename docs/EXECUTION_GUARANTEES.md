@@ -38,7 +38,7 @@ This document defines the current runtime guarantees of TaskFlow.
 
 - RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and JavaFX GUI peers.
 - TCP remains the current default local runtime and compatibility/demo path until RabbitMQ replacement gates pass.
-- This direction does not change current defaults: TCP remains default, RabbitMQ live broker tests are opt-in, and RabbitMQ is still transitional until its documented gates are implemented and tested.
+- This direction does not change current defaults: TCP remains default, RabbitMQ live broker tests are opt-in for local runs, and RabbitMQ is still transitional until its remaining documented gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
 - `docs/RUNTIME_STRATEGY.md` records the default-flip, support-promotion, TCP-deprecation, and TCP-removal gates.
 
 ## RabbitMQ Publication

@@ -13,8 +13,8 @@ RabbitMQ reaches the replacement gates below. TCP must keep working while the
 RabbitMQ path is completed, documented, and verified.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
-documented as transitional in `docs/RABBITMQ_SCOPE.md` because broker-backed
-CI, broader broker-failure coverage, and desktop GUI evidence gates are not
+documented as transitional in `docs/RABBITMQ_SCOPE.md` because broader
+broker-failure coverage and desktop GUI evidence gates are not
 complete.
 
 ## Rationale
@@ -65,8 +65,8 @@ compatibility while the identity, recovery, and operational gaps are closed.
   artifact, redriven to their original routing key when they contain valid
   TaskFlow broker envelopes, quarantined, or discarded.
 - RabbitMQ has focused live broker coverage, including coordinator outbox
-  crash-window scenarios, and a Docker Compose demo, but live broker tests are
-  still opt-in.
+  crash-window scenarios, a dedicated GitHub Actions broker integration job,
+  and a Docker Compose demo. Live broker tests remain opt-in for local runs.
 
 ## RabbitMQ Primary Runtime Gates
 
@@ -79,11 +79,11 @@ runtime, or start TCP deprecation until all of these are complete:
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- Broker-failure integration tests for coordinator, command-line peer, GUI
-  service adapters, publisher confirms, requeue/reject/DLQ behavior, and result
-  routing.
-- A RabbitMQ-backed CI integration profile that starts a broker and runs the
-  focused live broker gates reliably.
+- Broader broker-failure integration tests for coordinator, command-line peer,
+  GUI service adapters, publisher confirms, requeue/reject/DLQ behavior, and
+  result routing.
+- The RabbitMQ-backed CI integration profile remains reliable for the focused
+  live broker gates.
 - README and docs updated so quick-start, demos, execution guarantees, and
   limitations all describe the same runtime behavior.
 

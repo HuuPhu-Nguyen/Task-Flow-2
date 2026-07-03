@@ -17,7 +17,7 @@ SQLite-backed outbox replay for its outbound RabbitMQ task assignments and
 final job results, with live broker coverage for seeded pending rows and
 replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
 redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
-Broker-backed CI, desktop GUI evidence, and broader outage coverage remain incomplete. TCP
+Desktop GUI evidence and broader outage coverage remain incomplete. TCP
 remains the current default compatibility/demo runtime until the replacement
 gates in `docs/RUNTIME_STRATEGY.md` pass.
 
@@ -71,6 +71,10 @@ The current RabbitMQ path includes:
   replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
   publish-before-sent-marking, and duplicate task-result rejection after
   replayed task assignments.
+- A dedicated GitHub Actions RabbitMQ integration job starts a
+  `rabbitmq:3.13-management` service container and runs the focused live
+  transport/coordinator gates plus command-line peer and JavaFX GUI RabbitMQ
+  service-adapter tests.
 - Docker Compose demo coverage for a RabbitMQ-backed image conversion job when
   Docker is available.
 
@@ -111,12 +115,12 @@ Then close remaining durable outbox/replay decisions:
 - Decide whether peer-side durable `TASK_RESULT` outbox persistence is needed
   beyond the current deferred-ack/requeue behavior.
 - Keep live coordinator outbox crash-window coverage in the broker-backed CI
-  profile when that profile is added.
+  profile.
 
 Then promote evidence:
 
-- Add a RabbitMQ-backed CI profile that starts a broker and runs focused live
-  integration gates, including DLQ redrive/quarantine behavior.
+- Keep the RabbitMQ-backed CI profile passing for focused live integration
+  gates, including DLQ redrive/quarantine behavior.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,
