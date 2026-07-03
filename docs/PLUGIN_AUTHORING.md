@@ -10,9 +10,10 @@ runtime classpath:
 - `client.ClientJobPlugin` for client-side payload creation and final-result handling.
 - `peer.engine.PeerProcessorPlugin` for peer-side task execution.
 
-The existing `plugins/conversion` and `plugins/text` bundles are the reference
-implementations. A new domain should follow the same role split unless it has a
-clear reason to omit a role.
+The `plugins/example` bundle is the executable authoring template and harness.
+The existing `plugins/conversion` and `plugins/text` bundles are production
+feature examples. A new domain should follow the same role split unless it has
+a clear reason to omit a role.
 
 ## Module Layout
 
@@ -42,6 +43,36 @@ Use the modules this way:
 Add the domain parent POM to the root reactor, then add its role modules to the
 domain parent. Add artifacts to root dependency management if they need to be
 referenced by runtime modules.
+
+## Executable Example Harness
+
+Use `plugins/example` as the first template when adding a new task type. It is a
+small word-count plugin with the same role split expected from production
+plugins:
+
+- `model` defines `ExampleTaskTypes`, a submitted payload record, a per-task
+  result record, and a semantic final summary record.
+- `server` validates submissions, creates deterministic task IDs, emits
+  `TaskAssignMessage` instances, records task results, and overrides
+  `aggregateResultPayload()` with a semantic final summary.
+- `client` reads local `.txt` files through `ClientJobPlugin.buildPayloads(...)`
+  and writes a final report through `ClientJobPlugin.handleResult(...)`.
+- `peer` registers a `PeerProcessorPlugin` and executes assigned word-count
+  tasks.
+- `harness` runs a cross-role contract test that discovers the three service
+  providers, builds payloads, validates and splits a job, processes assignments,
+  aggregates the semantic result, handles the final result, and verifies the
+  example plugin is not wired into core or runtime POMs.
+
+Run the executable template with:
+
+```powershell
+.\mvnw.cmd -pl plugins/example/model,plugins/example/server,plugins/example/client,plugins/example/peer,plugins/example/harness -am test
+```
+
+The example plugin is deliberately not added to `taskflow-coordinator`,
+`taskflow-peer`, or `taskflow-gui` runtime dependencies. Treat it as a copyable
+test harness and shape reference, not as a supported user-facing job type.
 
 ## Task Type Names
 
@@ -211,7 +242,8 @@ shared protocol tests with the framework change.
 ## Focused Tests
 
 Add tests in the plugin role modules before relying on the new type in a demo.
-Use the conversion and text tests as templates.
+Use `plugins/example` for the minimum executable harness, then use the
+conversion and text tests as richer production examples.
 
 Server module tests should cover:
 
@@ -252,6 +284,12 @@ Peer module tests should cover:
 If a new plugin changes runtime dependencies or role classpaths, run dependency
 tree checks for the affected modules in addition to focused tests.
 
+For new domains, keep a harness test similar to
+`plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java`.
+That test should prove the new plugin can run across client, server, peer, and
+result-handler contracts without core, scheduler, transport, GUI, or peer-engine
+source changes.
+
 ## Add A New Task Type Without Touching Core
 
 Use this checklist for each new task type:
@@ -269,9 +307,10 @@ Use this checklist for each new task type:
 6. Add server artifacts to `taskflow-coordinator` runtime dependencies.
 7. Add client and peer artifacts to `taskflow-peer` and `taskflow-gui` profiles
    according to `combined-runtime`, `submitter-runtime`, and `executor-runtime`.
-8. Add focused server, client, and peer tests for discovery, validation,
-   payload creation, final-result handling, processing, and aggregation.
-9. Run the focused tests for the new plugin modules.
+8. Add focused server, client, peer, and harness tests for discovery,
+   validation, payload creation, final-result handling, processing,
+   aggregation, and no-core-change wiring.
+9. Run the focused tests for the new plugin modules and harness.
 10. Run `git diff --check`; run broader Maven and dependency-tree gates if the
     plugin changed runtime classpaths or packaged runtime behavior.
 
