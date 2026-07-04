@@ -723,7 +723,7 @@ Inside the GUI:
 5. Click **Start Job**
 6. Select a folder to save results
 
-For a repeatable desktop smoke checklist covering connection refusal, successful TCP job submit/execute/save, job history refresh, and coordinator disconnect behavior, see [docs/GUI_MANUAL_SMOKE.md](docs/GUI_MANUAL_SMOKE.md). JavaFX end-to-end UI smoke remains a manual gate until CI has a stable desktop automation harness; see [docs/GUI_AUTOMATION_SCOPE.md](docs/GUI_AUTOMATION_SCOPE.md).
+For a repeatable desktop smoke checklist covering connection refusal, successful TCP job submit/execute/save, job history refresh, and coordinator disconnect behavior, see [docs/GUI_MANUAL_SMOKE.md](docs/GUI_MANUAL_SMOKE.md). For the RabbitMQ JavaFX desktop smoke gate, see [docs/GUI_RABBITMQ_DESKTOP_SMOKE.md](docs/GUI_RABBITMQ_DESKTOP_SMOKE.md). JavaFX end-to-end UI smoke remains a manual gate until CI has a stable desktop automation harness; see [docs/GUI_AUTOMATION_SCOPE.md](docs/GUI_AUTOMATION_SCOPE.md).
 
 For RabbitMQ GUI use, set `TASKFLOW_TRANSPORT=rabbitmq` before launching the JavaFX app and connect to the broker host/port instead of the TCP coordinator port.
 

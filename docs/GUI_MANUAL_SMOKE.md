@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-30 23:37 Asia/Bangkok
 
-This is the repeatable desktop smoke check for the default TCP JavaFX GUI path. It complements the headless GUI service tests, including RabbitMQ GUI adapter tests; it does not claim automated JavaFX end-to-end coverage.
+This is the repeatable desktop smoke check for the default TCP JavaFX GUI path. It complements the headless GUI service tests, including RabbitMQ GUI adapter tests; it does not claim automated JavaFX end-to-end coverage. The RabbitMQ JavaFX desktop smoke gate is documented separately in `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md`.
 
 JavaFX end-to-end UI smoke remains manual until CI has a stable desktop automation harness. See `docs/GUI_AUTOMATION_SCOPE.md` for the automation decision and prerequisites.
 
@@ -16,10 +16,8 @@ JavaFX end-to-end UI smoke remains manual until CI has a stable desktop automati
 - Coordinator disconnect alert
 
 RabbitMQ GUI behavior is covered by headless service tests for broker publish,
-task assignment execution, result routing, and failure handling. A manual
-RabbitMQ desktop smoke can use the same GUI flow after launching the coordinator
-and GUI with `TASKFLOW_TRANSPORT=rabbitmq`, connecting to broker port `5672`,
-and keeping a broker available.
+task assignment execution, result routing, and failure handling. Use
+`docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` for the desktop RabbitMQ smoke procedure.
 
 ## Preflight
 

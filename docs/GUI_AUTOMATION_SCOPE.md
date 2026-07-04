@@ -27,16 +27,16 @@ The stable automated GUI coverage is therefore service-level and headless:
 ## Required Manual Gate
 
 `docs/GUI_MANUAL_SMOKE.md` remains the required desktop smoke gate for the
-user-facing JavaFX path. It covers:
+default TCP JavaFX path. It covers:
 
 - connection refusal;
 - successful TCP job submit, execute, result receive, and save;
 - job history refresh;
 - coordinator disconnect alert.
 
-RabbitMQ GUI behavior currently has headless service coverage. Add a desktop
-RabbitMQ smoke step before promoting RabbitMQ as the primary supported GUI
-runtime.
+RabbitMQ GUI behavior currently has headless service coverage. Use
+`docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` for the manual desktop RabbitMQ smoke step
+before promoting RabbitMQ as the primary supported GUI runtime.
 
 ## Deferred CI End-To-End UI Smoke
 
