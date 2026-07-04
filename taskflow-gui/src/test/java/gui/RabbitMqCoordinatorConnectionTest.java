@@ -121,6 +121,30 @@ class RabbitMqCoordinatorConnectionTest {
     }
 
     @Test
+    void taskExecutionFailureRequeuesAssignment() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport();
+        RecordingListener listener = new RecordingListener();
+        RabbitMqCoordinatorConnection connection = newConnection(
+                transport,
+                listener,
+                new FailingWorkerRuntime(),
+                config -> {
+                });
+        connection.start();
+        assertTrue(listener.awaitConnected());
+        transport.published.clear();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+
+        transport.deliverToPeer(TransportRoute.TASK_ASSIGN, taskAssignment("peer-1"), acknowledgement);
+
+        assertTrue(acknowledgement.deferred);
+        assertTrue(acknowledgement.requeued);
+        assertFalse(acknowledgement.acked);
+        assertEquals(List.of(), transport.published);
+        connection.close();
+    }
+
+    @Test
     void assignmentForDifferentPeerIsIgnoredAndAcked() throws Exception {
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         RecordingListener listener = new RecordingListener();
@@ -215,9 +239,30 @@ class RabbitMqCoordinatorConnectionTest {
         assertFalse(connection.isOpen());
     }
 
+    @Test
+    void startupHeartbeatPublishFailureReportsConnectionFailureAndClosesTransport() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport();
+        transport.failHeartbeatPublish = true;
+        RecordingListener listener = new RecordingListener();
+        RabbitMqCoordinatorConnection connection = newConnection(
+                transport,
+                listener,
+                new FakeWorkerRuntime(),
+                config -> {
+                });
+
+        connection.start();
+
+        assertTrue(listener.awaitConnectionFailed());
+        assertEquals("Heartbeat publish was not confirmed.", listener.connectionFailure.get());
+        assertFalse(connection.isOpen());
+        assertTrue(transport.closed);
+        assertEquals(List.of("TASK_ASSIGN-tag", "JOB_RESULT-tag"), transport.cancelledTags);
+    }
+
     private static RabbitMqCoordinatorConnection newConnection(RecordingBrokerTransport transport,
                                                               RecordingListener listener,
-                                                              FakeWorkerRuntime workerRuntime,
+                                                              GuiWorkerRuntime workerRuntime,
                                                               java.util.function.Consumer<RabbitMqTransportConfig> configCapture) {
         return new RabbitMqCoordinatorConnection(
                 "peer-1",
@@ -259,6 +304,7 @@ class RabbitMqCoordinatorConnectionTest {
         private boolean topologyDeclared;
         private boolean closed;
         private boolean failTaskResultPublish;
+        private boolean failHeartbeatPublish;
 
         @Override
         public void declareTopology() {
@@ -268,7 +314,10 @@ class RabbitMqCoordinatorConnectionTest {
         @Override
         public boolean publish(OutboundTransportMessage message) {
             published.add(message);
-            return !(failTaskResultPublish && message.route() == TransportRoute.TASK_RESULT);
+            if (failTaskResultPublish && message.route() == TransportRoute.TASK_RESULT) {
+                return false;
+            }
+            return !(failHeartbeatPublish && message.route() == TransportRoute.HEARTBEAT);
         }
 
         @Override
@@ -353,6 +402,32 @@ class RabbitMqCoordinatorConnectionTest {
                     "done",
                     true,
                     null));
+        }
+
+        @Override
+        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
+            throw new AssertionError("TCP submitTask should not be used by RabbitMQ connection");
+        }
+
+        @Override
+        public void shutdown() {
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return true;
+        }
+    }
+
+    private static final class FailingWorkerRuntime implements GuiWorkerRuntime {
+        @Override
+        public Set<String> supportedTaskTypes() {
+            return Set.of("TEXT_ANALYSIS");
+        }
+
+        @Override
+        public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+            return CompletableFuture.failedFuture(new IllegalStateException("processor failed"));
         }
 
         @Override

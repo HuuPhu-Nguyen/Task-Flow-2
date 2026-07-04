@@ -150,6 +150,22 @@ class PeerNodeTest {
     }
 
     @Test
+    void rabbitMqSubmitCommandPropagatesBrokerPublishException() {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport(true);
+        transport.publishFailure = new IOException("broker outage");
+
+        IOException error = assertThrows(IOException.class, () -> RabbitMqPeerNode.submitJob(
+                "peer-submit",
+                transport,
+                new String[] {"submit", "TEXT_ANALYSIS", "csv", "notes.txt"},
+                Map.of("TEXT_ANALYSIS", new CapturingClientPlugin())
+        ));
+
+        assertEquals("broker outage", error.getMessage());
+        assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());
+    }
+
+    @Test
     void rabbitMqResultHandlingSavesThroughClientPlugin() throws Exception {
         CapturingClientPlugin plugin = new CapturingClientPlugin();
         JobResultMessage result = new JobResultMessage(
@@ -280,6 +296,7 @@ class PeerNodeTest {
     private static final class RecordingBrokerTransport implements BrokerTransport {
         private final boolean publishConfirmed;
         private OutboundTransportMessage publishedMessage;
+        private IOException publishFailure;
 
         private RecordingBrokerTransport(boolean publishConfirmed) {
             this.publishConfirmed = publishConfirmed;
@@ -290,8 +307,11 @@ class PeerNodeTest {
         }
 
         @Override
-        public boolean publish(OutboundTransportMessage message) {
+        public boolean publish(OutboundTransportMessage message) throws IOException {
             this.publishedMessage = message;
+            if (publishFailure != null) {
+                throw publishFailure;
+            }
             return publishConfirmed;
         }
 

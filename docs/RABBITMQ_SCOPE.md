@@ -17,9 +17,11 @@ SQLite-backed outbox replay for its outbound RabbitMQ task assignments and
 final job results, with live broker coverage for seeded pending rows and
 replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
 redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
-Desktop GUI evidence and broader outage coverage remain incomplete. TCP
-remains the current default compatibility/demo runtime until the replacement
-gates in `docs/RUNTIME_STRATEGY.md` pass.
+Focused broker-failure coverage now spans coordinator, command-line peer, GUI
+service adapters, publisher confirms, requeue/reject/DLQ behavior, and result
+routing. Desktop GUI evidence and full broker outage/restart recovery remain
+incomplete. TCP remains the current default compatibility/demo runtime until
+the replacement gates in `docs/RUNTIME_STRATEGY.md` pass.
 
 ## Current RabbitMQ Guarantees
 
@@ -78,6 +80,10 @@ The current RabbitMQ path includes:
   `rabbitmq:3.13-management` service container and runs the focused live
   transport/coordinator gates plus command-line peer and JavaFX GUI RabbitMQ
   service-adapter tests.
+- Focused service-adapter failure-path tests cover command-line peer submit
+  publish exceptions, JavaFX RabbitMQ startup heartbeat publish failure,
+  task-result publish failure, task-execution failure requeue, and live
+  `JOB_RESULT` acknowledgement after GUI routing.
 - Docker Compose demo coverage for a RabbitMQ-backed image conversion job when
   Docker is available.
 
@@ -127,7 +133,8 @@ Then close remaining durable outbox/replay decisions:
 Then promote evidence:
 
 - Keep the RabbitMQ-backed CI profile passing for focused live integration
-  gates, including DLQ redrive/quarantine behavior.
+  gates, including DLQ redrive/quarantine behavior and the focused
+  broker-failure service-adapter tests.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,

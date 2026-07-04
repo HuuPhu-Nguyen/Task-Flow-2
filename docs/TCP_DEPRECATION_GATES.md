@@ -21,13 +21,13 @@ below are complete.
 | RabbitMQ GUI result-request behavior is decided. | Complete as a scoped limitation. | README, `docs/EXECUTION_GUARANTEES.md`, `docs/RUNTIME_STRATEGY.md`, and `docs/RABBITMQ_SCOPE.md` state that RabbitMQ GUI `JOB_RESULT_REQUEST` replay is not implemented and live `JOB_RESULT` delivery is the supported RabbitMQ GUI result path. | Revisit only if post-restart RabbitMQ GUI result replay becomes required before default flip. |
 | Shared peer identity and peer-scoped job IDs work across TCP, RabbitMQ, CLI, and GUI paths. | Complete. | `docs/PEER_IDENTITY.md`, `protocol.PeerIdentity`, `protocol.JobIds`, identity and submitter tests. | No TCP deprecation blocker. |
 | RabbitMQ coordinator outbox replay and DLQ workflow have live broker evidence. | Complete for current scope. | `RabbitMqCoordinatorLiveIntegrationTest`, `RabbitMqTransportLiveTest`, `docs/RABBITMQ_SCOPE.md`. | Keep broker-backed CI passing. |
-| Broader broker-failure integration coverage exists for coordinator, command-line peer, GUI service adapters, publisher confirms, requeue/reject/DLQ behavior, and result routing. | Partial. | Current live tests cover focused transport delivery, publisher confirms, connection-close recovery, requeue/reject/DLQ, coordinator completion, and coordinator outbox replay. | Add explicit outage/restart scenarios or document why existing focused cases are enough before deprecation. |
+| Broader broker-failure integration coverage exists for coordinator, command-line peer, GUI service adapters, publisher confirms, requeue/reject/DLQ behavior, and result routing. | Complete for focused failure-path coverage. | Live tests cover focused transport delivery, publisher confirms, connection-close recovery, requeue/reject/DLQ, coordinator completion, and coordinator outbox replay. Unit tests cover command-line peer submit publish exceptions plus JavaFX RabbitMQ startup heartbeat publish failure, task-result publish failure, task-execution failure requeue, and result routing acknowledgement. | Keep these tests in the broker-backed CI selector; full broker outage/restart recovery remains outside the current support claim. |
 | RabbitMQ-backed CI remains reliable. | Complete for focused gates. | GitHub Actions `RabbitMQ Integration Tests` job. | Keep the job green after each RabbitMQ behavior change. |
 | README, demos, execution guarantees, limitations, and runtime docs align with the same default and support status. | Complete for current transitional status. | README, `docs/RUNTIME_STRATEGY.md`, `docs/RABBITMQ_SCOPE.md`, `docs/EXECUTION_GUARANTEES.md`. | Update them again only when TCP is actually marked legacy or RabbitMQ becomes the default. |
 
 ## Deprecation Start Rule
 
-Do not mark TCP as legacy until the open and partial gates above are closed.
+Do not mark TCP as legacy until the open gates above are closed.
 When they are closed, TCP deprecation must be a documentation/runtime-warning
 slice that keeps TCP working and includes:
 

@@ -13,9 +13,9 @@ RabbitMQ reaches the replacement gates below. TCP must keep working while the
 RabbitMQ path is completed, documented, and verified.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
-documented as transitional in `docs/RABBITMQ_SCOPE.md` because broader
-broker-failure coverage and desktop GUI evidence gates are not
-complete.
+documented as transitional in `docs/RABBITMQ_SCOPE.md` because desktop GUI
+evidence and default-flip evidence gates are not complete, and full broker
+outage/restart recovery remains outside the current support claim.
 
 ## Rationale
 
@@ -67,6 +67,10 @@ compatibility while the identity, recovery, and operational gaps are closed.
 - RabbitMQ has focused live broker coverage, including coordinator outbox
   crash-window scenarios, a dedicated GitHub Actions broker integration job,
   and a Docker Compose demo. Live broker tests remain opt-in for local runs.
+- Focused RabbitMQ failure-path tests cover command-line peer submit publish
+  exceptions, JavaFX GUI heartbeat publish failure, task-result publish
+  failure, task-execution failure requeue, publisher confirms,
+  requeue/reject/DLQ behavior, and result routing.
 
 ## RabbitMQ Primary Runtime Gates
 
@@ -79,9 +83,9 @@ runtime, or start TCP deprecation until all of these are complete:
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- Broader broker-failure integration tests for coordinator, command-line peer,
-  GUI service adapters, publisher confirms, requeue/reject/DLQ behavior, and
-  result routing.
+- Keep broader broker-failure integration tests passing for coordinator,
+  command-line peer, GUI service adapters, publisher confirms,
+  requeue/reject/DLQ behavior, and result routing.
 - The RabbitMQ-backed CI integration profile remains reliable for the focused
   live broker gates.
 - README and docs updated so quick-start, demos, execution guarantees, and
