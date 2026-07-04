@@ -78,6 +78,14 @@ public class TaskScheduler implements Runnable {
     private void processEnvelope(MessageEnvelope envelope) {
         try {
             handleMessage(envelope);
+        } catch (MessageValidationException e) {
+            logErrorEvent("scheduler_message_validation_failed", fields(
+                    "message_type", messageType(envelope),
+                    "from_node_id", envelope.fromNodeId(),
+                    "error", e.getMessage()
+            ));
+            rejectEnvelope(envelope);
+            return;
         } catch (Exception e) {
             logErrorEvent("scheduler_message_processing_failed", fields(
                     "message_type", messageType(envelope),
@@ -120,6 +128,24 @@ public class TaskScheduler implements Runnable {
                 Thread.currentThread().interrupt();
             }
             logErrorEvent("scheduler_message_requeue_failed", fields(
+                    "message_type", messageType(envelope),
+                    "from_node_id", envelope.fromNodeId(),
+                    "error", e.getMessage()
+            ));
+        }
+    }
+
+    private void rejectEnvelope(MessageEnvelope envelope) {
+        if (envelope.acknowledgement() == null) {
+            return;
+        }
+        try {
+            envelope.acknowledgement().reject();
+        } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            logErrorEvent("scheduler_message_reject_failed", fields(
                     "message_type", messageType(envelope),
                     "from_node_id", envelope.fromNodeId(),
                     "error", e.getMessage()
@@ -192,9 +218,7 @@ public class TaskScheduler implements Runnable {
 
         if (msg instanceof JobSubmitMessage submit) {
             try {
-                if (submit.getJobId() == null || submit.getJobId().isBlank()) {
-                    throw new IllegalArgumentException("Job id is required.");
-                }
+                MessageValidator.validate(submit);
                 if (activeJobs.containsKey(submit.getJobId())) {
                     sendJobStartFailure(envelope.fromNodeId(), submit,
                             "Job id is already active: " + submit.getJobId());
@@ -239,12 +263,14 @@ public class TaskScheduler implements Runnable {
             }
         }
         else if (msg instanceof TaskResultMessage result) {
+            MessageValidator.validate(result);
             handleTaskResult(envelope, result);
         }
         else if (msg instanceof JobResultRequestMessage request) {
             handleJobResultRequest(envelope, request);
         }
         else if (msg instanceof PeerDisconnectedMessage disconnected) {
+            MessageValidator.validate(disconnected);
             String peerId = disconnected.getNodeId();
             if (peerId == null || peerId.isBlank()) {
                 peerId = envelope.fromNodeId();
@@ -256,15 +282,17 @@ public class TaskScheduler implements Runnable {
     private void handleJobResultRequest(MessageEnvelope envelope, JobResultRequestMessage request) throws Exception {
         String requesterId = envelope.fromNodeId();
         String jobId = request.getJobId();
-        if (jobId == null || jobId.isBlank()) {
+        try {
+            MessageValidator.validate(request);
+        } catch (MessageValidationException e) {
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
                     java.time.Instant.now().toString(),
-                    "",
+                    safeJobResultId(jobId),
                     "",
                     false,
                     List.of(),
-                    "Job id is required."
+                    e.getMessage()
             ));
             return;
         }
@@ -1210,8 +1238,8 @@ public class TaskScheduler implements Runnable {
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
                 java.time.Instant.now().toString(),
-                submit.getJobId(),
-                submit.getTaskType(),
+                safeJobResultId(submit.getJobId()),
+                safeTaskType(submit.getTaskType()),
                 false,
                 List.of(),
                 reason == null || reason.isBlank() ? "Job could not be started." : reason
@@ -1232,6 +1260,24 @@ public class TaskScheduler implements Runnable {
                     "error", sendError.getMessage()
             ));
             throw sendError;
+        }
+    }
+
+    private static String safeJobResultId(String jobId) {
+        try {
+            MessageValidator.validateJobId(jobId, "Job id");
+            return jobId;
+        } catch (RuntimeException ignored) {
+            return "";
+        }
+    }
+
+    private static String safeTaskType(String taskType) {
+        try {
+            MessageValidator.validateTaskType(taskType, "Task type");
+            return taskType;
+        } catch (RuntimeException ignored) {
+            return "";
         }
     }
 

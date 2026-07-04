@@ -95,6 +95,21 @@ class MessageFactoryTest {
     }
 
     @Test
+    void rejectsInvalidParsedMessageFields() {
+        MessageFactory factory = new MessageFactory();
+        factory.register(MessageType.PING, json -> gson.fromJson(json, PingMessage.class));
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> factory.fromJson("""
+                        {"type":"PING","nodeId":"peer/unsafe","time":"2026-06-12T00:00:00Z"}
+                        """)
+        );
+
+        assertEquals("Message nodeId contains unsupported characters.", error.getMessage());
+    }
+
+    @Test
     void rejectsInvalidRegistrations() {
         MessageFactory factory = new MessageFactory();
 

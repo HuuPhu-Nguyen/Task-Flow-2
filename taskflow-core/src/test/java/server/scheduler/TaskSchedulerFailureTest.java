@@ -2,6 +2,7 @@ package server.scheduler;
 
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
+import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.PeerDisconnectedMessage;
 import protocol.TaskAssignMessage;
@@ -172,6 +173,126 @@ class TaskSchedulerFailureTest {
 
             assertTrue(output.awaitResult());
             assertTrue(acknowledgement.awaitAck());
+            assertEquals(1, acknowledgement.ackCount());
+            assertEquals(0, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void invalidJobIdReturnsSafeFailureAndAcknowledgesBrokerDelivery() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-invalid-job-id-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage invalidJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-07-04T00:00:00Z",
+                    "../job",
+                    "TEST_TASK",
+                    List.of("payload"),
+                    "",
+                    "token-invalid-job"
+            );
+            mailbox.put(new MessageEnvelope(invalidJob, "requester-1", acknowledgement));
+
+            assertTrue(output.awaitResult());
+            assertTrue(acknowledgement.awaitAck());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertEquals("", result.getJobId());
+            assertFalse(result.isSuccessful());
+            assertTrue(result.getErrorMessage().contains("Job id may contain only"));
+            assertEquals(1, acknowledgement.ackCount());
+            assertEquals(0, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void invalidBrokerTaskResultIsRejectedWithoutRequeue() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-invalid-task-result-test");
+        schedulerThread.start();
+
+        try {
+            TaskResultMessage invalidResult = new TaskResultMessage(
+                    "peer-1",
+                    "2026-07-04T00:00:00Z",
+                    "task/unsafe",
+                    "job-1",
+                    "payload",
+                    true,
+                    null
+            );
+            mailbox.put(new MessageEnvelope(invalidResult, "peer-1", acknowledgement));
+
+            assertTrue(acknowledgement.awaitReject());
+            assertEquals(0, acknowledgement.ackCount());
+            assertEquals(0, acknowledgement.requeueCount());
+            assertEquals(1, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void invalidJobResultRequestReturnsSafeFailureAndAcknowledgesBrokerDelivery() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-invalid-result-request-test");
+        schedulerThread.start();
+
+        try {
+            JobResultRequestMessage invalidRequest = new JobResultRequestMessage(
+                    "requester-1",
+                    "2026-07-04T00:00:00Z",
+                    "../job",
+                    "token"
+            );
+            mailbox.put(new MessageEnvelope(invalidRequest, "requester-1", acknowledgement));
+
+            assertTrue(output.awaitResult());
+            assertTrue(acknowledgement.awaitAck());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertEquals("", result.getJobId());
+            assertFalse(result.isSuccessful());
+            assertTrue(result.getErrorMessage().contains("Job id may contain only"));
             assertEquals(1, acknowledgement.ackCount());
             assertEquals(0, acknowledgement.requeueCount());
             assertEquals(0, acknowledgement.rejectCount());
@@ -948,6 +1069,7 @@ class TaskSchedulerFailureTest {
     private static class RecordingAcknowledgement implements TransportAcknowledgement {
         private final CountDownLatch acked = new CountDownLatch(1);
         private final CountDownLatch requeued = new CountDownLatch(1);
+        private final CountDownLatch rejected = new CountDownLatch(1);
         private final AtomicInteger ackCount = new AtomicInteger();
         private final AtomicInteger requeueCount = new AtomicInteger();
         private final AtomicInteger rejectCount = new AtomicInteger();
@@ -967,6 +1089,7 @@ class TaskSchedulerFailureTest {
         @Override
         public void reject() {
             rejectCount.incrementAndGet();
+            rejected.countDown();
         }
 
         boolean awaitAck() throws InterruptedException {
@@ -975,6 +1098,10 @@ class TaskSchedulerFailureTest {
 
         boolean awaitRequeue() throws InterruptedException {
             return requeued.await(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitReject() throws InterruptedException {
+            return rejected.await(2, TimeUnit.SECONDS);
         }
 
         int ackCount() {

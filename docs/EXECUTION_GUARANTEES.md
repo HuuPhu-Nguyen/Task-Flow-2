@@ -12,12 +12,15 @@ This document defines the current runtime guarantees of TaskFlow.
 
 - GUI and command-line submitters generate peer-scoped job IDs with the
   sanitized submitting peer ID, a timestamp, and a full UUID suffix.
+- Protocol parsing validates required framework fields, safe peer/job/task
+  identifiers, safe task-type names, task-count limits, inline job-payload
+  size, and result-payload size through the shared `MessageValidator`.
 - The scheduler rejects duplicate submitted job IDs that are already active.
   When persistence is enabled, it also rejects IDs already present in persisted
   job history.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid Base64 file data, and invalid conversion payload-reference shapes.
-- Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work.
+- Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
 
 ## Peer Submitter and Result Handling
 
@@ -63,7 +66,7 @@ This document defines the current runtime guarantees of TaskFlow.
 ## RabbitMQ Dead Lettering
 
 - RabbitMQ topology declaration can configure a dead-letter exchange, dead-letter queue, and quarantine queue for normal TaskFlow queues.
-- Malformed broker deliveries are rejected, and handler failures can be rejected when `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+- Malformed or validation-failing broker deliveries are rejected, and handler failures can be rejected when `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
 - Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
 - `peer.PeerNode dlq inspect` reads dead-letter metadata and body previews without acknowledging the DLQ entry.
 - `peer.PeerNode dlq redrive` republishes only valid TaskFlow broker envelopes to the original routing key captured in RabbitMQ dead-letter metadata, increments `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after RabbitMQ confirms the publish.
@@ -141,6 +144,13 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - JavaFX submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file. TCP result requests can use those tokens across later GUI processes; RabbitMQ GUI result-request replay is not implemented. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
 - On POSIX-compatible filesystems, TaskFlow attempts to restrict that token file to owner read/write and its parent directory to owner read/write/execute. On Windows or unsupported filesystems, token-file protection depends on the normal user-profile and filesystem access controls.
 - This is a per-job token plus local-signing-key ownership model, not full user/account authentication, login sessions, authorization roles, replay prevention, or a credential vault.
+
+## Transport Security Scope
+
+- RabbitMQ credentials are supplied through environment variables and default to the local-only `guest` / `guest` demo credentials.
+- Non-demo RabbitMQ deployments should use a dedicated vhost, a least-privilege RabbitMQ user, secret storage outside source control, restricted management API access, and trusted network boundaries.
+- TaskFlow does not currently expose native RabbitMQ TLS/certificate options. Use a verified TLS-terminating tunnel/proxy for untrusted networks or add tested RabbitMQ Java client TLS configuration before claiming direct broker TLS support.
+- These transport controls are separate from TaskFlow requester-token ownership and do not add user/account authentication.
 
 ## Persistence
 

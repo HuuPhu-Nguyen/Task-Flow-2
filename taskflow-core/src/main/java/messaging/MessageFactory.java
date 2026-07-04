@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import protocol.Message;
+import protocol.MessageValidator;
 import protocol.ProtocolVersions;
 
 import java.util.HashMap;
@@ -50,6 +51,8 @@ public class MessageFactory {
         if (parser == null) {
             throw new IllegalArgumentException("Unknown message type: " + type);
         }
-        return parser.apply(obj.toString());
+        Message message = parser.apply(obj.toString());
+        MessageValidator.validate(message);
+        return message;
     }
 }

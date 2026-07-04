@@ -39,6 +39,9 @@ The current RabbitMQ path includes:
 - JSON protocol serialization through the same protocol message types used by
   TCP, with version checks on both the RabbitMQ envelope and the inner protocol
   message.
+- Shared message validation for broker envelope sender IDs, required protocol
+  fields, safe peer/job/task identifiers, task-type names, task-count limits,
+  inline job payload size, and result payload size.
 - Command-line peer submit mode builds payloads and handles successful final
   results through `ClientJobPlugin.handleResult(...)`.
 - JavaFX GUI mode can select RabbitMQ with `TASKFLOW_TRANSPORT=rabbitmq`,
@@ -89,6 +92,10 @@ TaskFlow does not yet provide:
   assignment acknowledgement until `TASK_RESULT` publication is confirmed.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
+- Native RabbitMQ TLS/certificate configuration. Current configuration exposes
+  host, port, username, password, vhost, and topology settings; use a trusted
+  network or verified TLS-terminating tunnel/proxy until direct TLS support is
+  added and tested.
 - A DLQ dashboard, bulk editor, or automatic message repair workflow. Current
   DLQ actions are explicit command-line operator decisions.
 - Adaptive broker/peer backpressure beyond bounded scheduler ingress and broker
@@ -125,6 +132,8 @@ Then promote evidence:
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,
   and transport scope describe the same default and support status.
+- Add direct RabbitMQ TLS/certificate configuration and live verification if
+  TaskFlow is expected to connect to brokers across untrusted networks.
 
 Only after those gates should documentation describe RabbitMQ as the primary
 supported runtime rather than a transitional adapter.

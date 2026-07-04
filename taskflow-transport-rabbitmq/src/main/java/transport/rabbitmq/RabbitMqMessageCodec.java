@@ -10,6 +10,7 @@ import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.MessageType;
+import protocol.MessageValidator;
 import protocol.PingMessage;
 import protocol.PongMessage;
 import protocol.ProtocolVersions;
@@ -30,6 +31,8 @@ public class RabbitMqMessageCodec {
     private final Gson gson = new Gson();
 
     public byte[] encode(OutboundTransportMessage outbound) {
+        MessageValidator.validatePeerId(outbound.fromNodeId(), "RabbitMQ envelope fromNodeId");
+        MessageValidator.validate(outbound.message());
         JsonObject root = new JsonObject();
         root.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT);
         root.addProperty(FIELD_ROUTE, outbound.route().name());
@@ -45,12 +48,9 @@ public class RabbitMqMessageCodec {
     ) {
         JsonObject root = parseObject(new String(body, StandardCharsets.UTF_8), "RabbitMQ broker envelope");
         ProtocolVersions.normalizeSupportedVersion(root, "RabbitMQ envelope");
-        TransportRoute route = root.has(FIELD_ROUTE)
-                ? TransportRoute.valueOf(root.get(FIELD_ROUTE).getAsString())
-                : fallbackRoute;
-        String fromNodeId = root.has(FIELD_FROM_NODE_ID)
-                ? root.get(FIELD_FROM_NODE_ID).getAsString()
-                : "";
+        TransportRoute route = route(root, fallbackRoute);
+        String fromNodeId = requiredString(root, FIELD_FROM_NODE_ID, "RabbitMQ envelope fromNodeId");
+        MessageValidator.validatePeerId(fromNodeId, "RabbitMQ envelope fromNodeId");
         Message message = parseMessage(requiredMessage(root));
         return new InboundTransportMessage(route, fromNodeId, message, acknowledgement);
     }
@@ -66,7 +66,7 @@ public class RabbitMqMessageCodec {
             throw new IllegalArgumentException("RabbitMQ message type is required.");
         }
         String json = gson.toJson(messageJson);
-        return switch (type) {
+        Message message = switch (type) {
             case MessageType.JOB_SUBMIT -> gson.fromJson(json, JobSubmitMessage.class);
             case MessageType.JOB_RESULT_REQUEST -> gson.fromJson(json, JobResultRequestMessage.class);
             case MessageType.TASK_ASSIGN -> gson.fromJson(json, TaskAssignMessage.class);
@@ -76,6 +76,8 @@ public class RabbitMqMessageCodec {
             case MessageType.PONG -> gson.fromJson(json, PongMessage.class);
             default -> throw new IllegalArgumentException("Unknown message type: " + type);
         };
+        MessageValidator.validate(message);
+        return message;
     }
 
     private static JsonObject requiredMessage(JsonObject root) {
@@ -96,5 +98,31 @@ public class RabbitMqMessageCodec {
         } catch (IllegalStateException | JsonParseException e) {
             throw new IllegalArgumentException(context + " must be a valid JSON object.", e);
         }
+    }
+
+    private static TransportRoute route(JsonObject root, TransportRoute fallbackRoute) {
+        if (!root.has(FIELD_ROUTE) || root.get(FIELD_ROUTE).isJsonNull()) {
+            if (fallbackRoute == null) {
+                throw new IllegalArgumentException("RabbitMQ envelope route is required.");
+            }
+            return fallbackRoute;
+        }
+        JsonElement routeElement = root.get(FIELD_ROUTE);
+        if (!routeElement.isJsonPrimitive()) {
+            throw new IllegalArgumentException("RabbitMQ envelope route must be a string.");
+        }
+        try {
+            return TransportRoute.valueOf(routeElement.getAsString());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Unknown RabbitMQ envelope route: " + routeElement.getAsString(), e);
+        }
+    }
+
+    private static String requiredString(JsonObject root, String fieldName, String description) {
+        JsonElement value = root.get(fieldName);
+        if (value == null || value.isJsonNull() || !value.isJsonPrimitive()) {
+            throw new IllegalArgumentException(description + " is required.");
+        }
+        return value.getAsString();
     }
 }

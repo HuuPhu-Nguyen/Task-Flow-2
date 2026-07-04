@@ -3,9 +3,11 @@ package transport.rabbitmq;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Test;
+import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.MessageType;
+import protocol.PayloadLimits;
 import protocol.PongMessage;
 import protocol.ProtocolVersions;
 import protocol.RequesterIdentity;
@@ -22,6 +24,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqMessageCodecTest {
     private final RabbitMqMessageCodec codec = new RabbitMqMessageCodec();
@@ -204,6 +207,73 @@ class RabbitMqMessageCodecTest {
         assertEquals("request-token", decodedMessage.getRequesterToken());
         assertEquals(identity.publicKey(), decodedMessage.getRequesterPublicKey());
         assertEquals(signature, decodedMessage.getRequesterSignature());
+    }
+
+    @Test
+    void rejectsInvalidEnvelopePeerIdsBeforeEncode() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> codec.encode(new OutboundTransportMessage(
+                        TransportRoute.HEARTBEAT,
+                        "peer/unsafe",
+                        new PongMessage("peer-1", "2026-06-04T00:00:00Z")
+                ))
+        );
+
+        assertEquals("RabbitMQ envelope fromNodeId contains unsupported characters.", error.getMessage());
+    }
+
+    @Test
+    void rejectsInvalidDecodedJobIds() {
+        JsonObject envelope = new JsonObject();
+        envelope.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT);
+        envelope.addProperty("route", TransportRoute.JOB_SUBMIT.name());
+        envelope.addProperty("fromNodeId", "requester-1");
+        envelope.add("message", JsonParser.parseString("""
+                {
+                  "protocolVersion":1,
+                  "type":"JOB_RESULT_REQUEST",
+                  "nodeId":"requester-1",
+                  "time":"2026-07-04T00:00:00Z",
+                  "jobId":"../job",
+                  "requesterToken":"token"
+                }
+                """).getAsJsonObject());
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> codec.decode(body(envelope), TransportRoute.JOB_SUBMIT, new NoopAcknowledgement())
+        );
+
+        assertTrue(error.getMessage().contains("Job id may contain only"));
+    }
+
+    @Test
+    void rejectsOversizeOutboundResults() {
+        System.setProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY, "48");
+        try {
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-04T00:00:00Z",
+                    "job-oversize-result",
+                    "TEXT_ANALYSIS",
+                    true,
+                    List.of("this-result-is-longer-than-the-test-limit")
+            );
+
+            IllegalArgumentException error = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> codec.encode(new OutboundTransportMessage(
+                            TransportRoute.JOB_RESULT,
+                            "COORDINATOR",
+                            result
+                    ))
+            );
+
+            assertTrue(error.getMessage().contains(PayloadLimits.MAX_RESULT_BYTES_ENV));
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY);
+        }
     }
 
     private InboundTransportMessage decode(OutboundTransportMessage outbound) {
