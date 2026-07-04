@@ -92,6 +92,9 @@ runtime, or start TCP deprecation until all of these are complete:
 TCP removal must happen only after the RabbitMQ primary runtime gates pass and
 in two separate steps.
 
+`docs/TCP_DEPRECATION_GATES.md` tracks the current gate status and the remaining
+evidence needed before TCP can be marked legacy.
+
 First, deprecate TCP:
 
 - keep the TCP runtime working;
