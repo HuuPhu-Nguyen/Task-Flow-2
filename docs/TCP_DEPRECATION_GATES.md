@@ -8,10 +8,10 @@ RabbitMQ and not a plan to remove TCP immediately.
 
 TCP is deprecated as the legacy local compatibility/demo path.
 
-RabbitMQ is the recommended path for new demos and feature work, but it still
-requires `TASKFLOW_TRANSPORT=rabbitmq`. TCP remains the unset default for
-compatibility and must keep working until a later removal slice closes the
-removal gates below.
+RabbitMQ is the default path for new demos and feature work when
+`TASKFLOW_TRANSPORT` is unset or blank. TCP remains available only when selected
+explicitly with `TASKFLOW_TRANSPORT=tcp` and must keep working until a later
+removal slice closes the removal gates below.
 
 ## Gate Status
 
@@ -24,14 +24,14 @@ removal gates below.
 | RabbitMQ coordinator outbox replay and DLQ workflow have live broker evidence. | Complete for current scope. | `RabbitMqCoordinatorLiveIntegrationTest`, `RabbitMqTransportLiveTest`, `docs/RABBITMQ_SCOPE.md`. | Keep broker-backed CI passing. |
 | Broader broker-failure integration coverage exists for coordinator, command-line peer, GUI service adapters, publisher confirms, requeue/reject/DLQ behavior, and result routing. | Complete for focused failure-path coverage. | Live tests cover focused transport delivery, publisher confirms, connection-close recovery, requeue/reject/DLQ, coordinator completion, and coordinator outbox replay. Unit tests cover command-line peer submit publish exceptions plus JavaFX RabbitMQ startup heartbeat publish failure, task-result publish failure, task-execution failure requeue, and result routing acknowledgement. | Keep these tests in the broker-backed CI selector; full broker outage/restart recovery remains outside the current support claim. |
 | RabbitMQ-backed CI remains reliable. | Complete for focused gates. | GitHub Actions `RabbitMQ Integration Tests` job. | Keep the job green after each RabbitMQ behavior change. |
-| README, demos, execution guarantees, limitations, and runtime docs align with the same default and support status. | Complete for TCP deprecation. | README, `docs/RUNTIME_STRATEGY.md`, `docs/RABBITMQ_SCOPE.md`, `docs/EXECUTION_GUARANTEES.md`. | Update them again when RabbitMQ becomes the default or TCP removal starts. |
+| README, demos, execution guarantees, limitations, and runtime docs align with the same default and support status. | Complete for RabbitMQ default. | README, `docs/RUNTIME_STRATEGY.md`, `docs/RABBITMQ_SCOPE.md`, `docs/EXECUTION_GUARANTEES.md`. | Update them again when RabbitMQ support is promoted or TCP removal starts. |
 
 ## Deprecation Start Rule
 
 TCP deprecation has started. This slice keeps TCP working and includes:
 
 - migration notes from TCP commands to RabbitMQ commands;
-- RabbitMQ as the recommended quick-start/demo path;
+- RabbitMQ as the default quick-start/demo path;
 - JavaFX RabbitMQ desktop smoke or automation evidence;
 - no TCP code removal.
 

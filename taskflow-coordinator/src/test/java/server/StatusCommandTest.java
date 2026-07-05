@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatusCommandTest {
@@ -46,6 +47,37 @@ class StatusCommandTest {
         assertTrue(output.contains("outbox pendingVisible=1 limit=1000 failedAttempts=1"));
         assertTrue(output.contains("rabbitmq status=available queues=2 availableQueues=2 queuedMessages=3 dlqVisible=1 dlqRedrivable=1"));
         assertTrue(rabbitMq.declaredTopology);
+    }
+
+    @Test
+    void summaryUsesRabbitMqWhenTransportIsUnset() throws Exception {
+        FakeRabbitMqStatusClient rabbitMq = new FakeRabbitMqStatusClient(
+                List.of(new RabbitMqQueueStatus("JOB_SUBMIT", "taskflow.jobs", 0L, 0L, true, "")),
+                List.of()
+        );
+
+        String output = runStatus(fakeDataSource(), rabbitMq, Map.of(), "status", "summary");
+
+        assertTrue(output.contains("rabbitmq status=available queues=1"));
+        assertTrue(rabbitMq.declaredTopology);
+    }
+
+    @Test
+    void summarySkipsRabbitMqOnlyWhenTcpIsExplicit() throws Exception {
+        FakeRabbitMqStatusClient rabbitMq = FakeRabbitMqStatusClient.empty();
+
+        String output = runStatus(fakeDataSource(), rabbitMq, Map.of("TASKFLOW_TRANSPORT", "tcp"),
+                "status", "summary");
+
+        assertTrue(output.contains("rabbitmq status=not_selected transport=tcp"));
+        assertFalse(rabbitMq.declaredTopology);
+    }
+
+    @Test
+    void summaryRejectsUnknownTransport() {
+        assertThrows(IllegalArgumentException.class, () ->
+                runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(),
+                        Map.of("TASKFLOW_TRANSPORT", "udp"), "status", "summary"));
     }
 
     @Test

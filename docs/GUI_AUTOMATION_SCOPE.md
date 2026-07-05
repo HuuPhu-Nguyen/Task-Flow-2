@@ -33,7 +33,7 @@ stable JavaFX display backend.
 ## Required Manual Gate
 
 `docs/GUI_MANUAL_SMOKE.md` remains the required desktop smoke gate for the
-deprecated default TCP JavaFX path. It covers:
+deprecated explicit TCP JavaFX path. It covers:
 
 - connection refusal;
 - successful TCP job submit, execute, result receive, and save;

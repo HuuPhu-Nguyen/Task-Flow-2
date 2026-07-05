@@ -10,17 +10,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GuiTransportModeTest {
     @Test
-    void defaultsToTcp() {
-        assertEquals(GuiTransportMode.TCP, GuiTransportMode.fromEnvironment(Map.of()));
+    void defaultsToRabbitMq() {
+        assertEquals(GuiTransportMode.RABBITMQ, GuiTransportMode.fromEnvironment(Map.of()));
+        assertEquals(GuiTransportMode.RABBITMQ, GuiTransportMode.fromEnvironment(Map.of("TASKFLOW_TRANSPORT", " ")));
         assertEquals(6789, GuiTransportMode.TCP.defaultPort());
+        assertEquals(RabbitMqTransportConfig.DEFAULT_PORT, GuiTransportMode.RABBITMQ.defaultPort());
     }
 
     @Test
-    void selectsRabbitMqByEnvironment() {
-        GuiTransportMode mode = GuiTransportMode.fromEnvironment(Map.of("TASKFLOW_TRANSPORT", "rabbitmq"));
+    void selectsExplicitTcpByEnvironment() {
+        GuiTransportMode mode = GuiTransportMode.fromEnvironment(Map.of("TASKFLOW_TRANSPORT", "tcp"));
 
-        assertEquals(GuiTransportMode.RABBITMQ, mode);
-        assertEquals(RabbitMqTransportConfig.DEFAULT_PORT, mode.defaultPort());
+        assertEquals(GuiTransportMode.TCP, mode);
+        assertEquals(6789, mode.defaultPort());
     }
 
     @Test

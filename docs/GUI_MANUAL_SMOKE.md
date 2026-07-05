@@ -1,8 +1,8 @@
 # GUI Manual Smoke Run
 
-Last updated: 2026-06-30 23:37 Asia/Bangkok
+Last updated: 2026-07-05 Asia/Bangkok
 
-This is the repeatable desktop smoke check for the deprecated default TCP JavaFX GUI path. It complements the headless GUI service tests and the RabbitMQ desktop smoke helper; it does not claim CI-grade JavaFX end-to-end coverage. The RabbitMQ JavaFX desktop smoke gate is documented separately in `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md`.
+This is the repeatable desktop smoke check for the deprecated TCP JavaFX GUI path selected with `TASKFLOW_TRANSPORT=tcp`. It complements the headless GUI service tests and the RabbitMQ desktop smoke helper; it does not claim CI-grade JavaFX end-to-end coverage. The RabbitMQ JavaFX desktop smoke gate is documented separately in `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md`.
 
 JavaFX end-to-end UI smoke remains manual until CI has a stable desktop automation harness. See `docs/GUI_AUTOMATION_SCOPE.md` for the automation decision and prerequisites.
 
@@ -34,6 +34,7 @@ Set-Content -Path target\gui-smoke\input\sample.txt -Encoding UTF8 -Value @(
 ```
 
 Close old TaskFlow coordinator, peer, and GUI processes before starting the smoke run.
+Set `TASKFLOW_TRANSPORT=tcp` in each terminal used for this legacy smoke run.
 
 ## Connection Failure Check
 
@@ -41,6 +42,7 @@ Close old TaskFlow coordinator, peer, and GUI processes before starting the smok
 2. Start the GUI:
 
 ```powershell
+$env:TASKFLOW_TRANSPORT = "tcp"
 .\mvnw.cmd -pl taskflow-gui javafx:run
 ```
 
@@ -56,6 +58,7 @@ Close the GUI before continuing.
 Start the coordinator in terminal 1:
 
 ```powershell
+$env:TASKFLOW_TRANSPORT = "tcp"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
@@ -68,6 +71,7 @@ event=coordinator_started transport=tcp port=6789
 Start the GUI in terminal 2:
 
 ```powershell
+$env:TASKFLOW_TRANSPORT = "tcp"
 .\mvnw.cmd -pl taskflow-gui javafx:run
 ```
 

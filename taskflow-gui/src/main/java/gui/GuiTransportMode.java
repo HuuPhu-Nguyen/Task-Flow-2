@@ -44,9 +44,9 @@ enum GuiTransportMode {
     }
 
     static GuiTransportMode fromEnvironment(Map<String, String> env) {
-        String configured = env.getOrDefault(TRANSPORT_ENV, "tcp");
+        String configured = env.getOrDefault(TRANSPORT_ENV, "rabbitmq");
         if (configured == null || configured.isBlank()) {
-            return TCP;
+            return RABBITMQ;
         }
         return switch (configured.trim().toLowerCase(Locale.ROOT)) {
             case "tcp" -> TCP;

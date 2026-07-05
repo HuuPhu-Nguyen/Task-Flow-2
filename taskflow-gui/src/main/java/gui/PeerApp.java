@@ -41,7 +41,7 @@ public class PeerApp extends Application {
     private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
     private GuiDownloadWindow downloadWindow =
             new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
-    private GuiTransportMode transportMode = GuiTransportMode.TCP;
+    private GuiTransportMode transportMode = GuiTransportMode.RABBITMQ;
     private String peerNodeId;
     private GuiSmokeAutomation smokeAutomation;
 

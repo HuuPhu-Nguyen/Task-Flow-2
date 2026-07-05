@@ -7,7 +7,7 @@ record.
 
 ## Records
 
-- [0001: Use RabbitMQ as the planned primary runtime while deprecating TCP](0001-rabbitmq-planned-primary-runtime.md)
+- [0001: Use RabbitMQ as the default runtime while deprecating TCP](0001-rabbitmq-planned-primary-runtime.md)
 - [0002: Use role-split ServiceLoader plugins for task domains](0002-role-split-service-loader-plugins.md)
 - [0003: Keep SQLite as the first state store and defer PostgreSQL/Flyway](0003-sqlite-first-recovery.md)
 - [0004: Use semantic final result payloads with compatibility task-result lists](0004-semantic-final-result-payloads.md)

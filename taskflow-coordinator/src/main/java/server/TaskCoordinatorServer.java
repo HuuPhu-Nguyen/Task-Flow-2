@@ -143,7 +143,20 @@ public class TaskCoordinatorServer {
     }
 
     private static boolean isRabbitMqTransportSelected() {
-        return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
+        return isRabbitMqTransportSelected(System.getenv());
+    }
+
+    static boolean isRabbitMqTransportSelected(Map<String, String> environment) {
+        String configured = environment.get(TRANSPORT_ENV);
+        if (configured == null || configured.isBlank()) {
+            return true;
+        }
+        return switch (configured.trim().toLowerCase(Locale.ROOT)) {
+            case "rabbitmq" -> true;
+            case "tcp" -> false;
+            default -> throw new IllegalArgumentException(
+                    TRANSPORT_ENV + " must be either tcp or rabbitmq, not '" + configured + "'.");
+        };
     }
 
     private static void logTcpDeprecationWarning() {
@@ -158,6 +171,7 @@ public class TaskCoordinatorServer {
 
     static String usage() {
         return String.join(System.lineSeparator(),
+                "java -jar taskflow-coordinator-<version>-coordinator-runtime.jar (default RabbitMQ transport)",
                 "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar (legacy; prefer TASKFLOW_TRANSPORT=rabbitmq)",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
                 "java -jar taskflow-coordinator-<version>-coordinator-runtime.jar status [summary|jobs|peers|outbox|queues|dlq] [count]");

@@ -39,10 +39,10 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## Runtime Direction
 
-- RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and JavaFX GUI peers.
-- TCP is deprecated as the legacy local compatibility/demo path, but remains the unset default until a later default-flip/removal slice.
-- RabbitMQ is recommended for new demos and feature work through explicit `TASKFLOW_TRANSPORT=rabbitmq`, while RabbitMQ live broker tests remain opt-in for local runs and RabbitMQ is still transitional until its remaining documented gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
-- `docs/RUNTIME_STRATEGY.md` records the default-flip, support-promotion, TCP-deprecation, and TCP-removal gates.
+- RabbitMQ is the default runtime for the coordinator, command-line peers, and JavaFX GUI peers when `TASKFLOW_TRANSPORT` is unset or blank.
+- TCP is deprecated as the legacy local compatibility/demo path and remains available only through explicit `TASKFLOW_TRANSPORT=tcp` until a later removal slice.
+- RabbitMQ live broker tests remain opt-in for local runs, and RabbitMQ is still transitional until its remaining documented support-promotion gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
+- `docs/RUNTIME_STRATEGY.md` records the support-promotion, TCP-deprecation, and TCP-removal gates.
 
 ## RabbitMQ Publication
 
@@ -76,7 +76,7 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## JavaFX GUI Transport Scope
 
-- The JavaFX GUI uses deprecated TCP by default for compatibility and selects RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq` is set before launch.
+- The JavaFX GUI uses RabbitMQ by default and selects deprecated TCP only when `TASKFLOW_TRANSPORT=tcp` is set before launch.
 - GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and worker-runtime boundaries for both TCP and RabbitMQ.
 - RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI peer publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
 - RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.

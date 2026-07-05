@@ -49,6 +49,20 @@ class PeerNodeTest {
     }
 
     @Test
+    void unsetTransportSelectsRabbitMqByDefault() {
+        assertTrue(PeerNode.isRabbitMqTransportSelected(Map.of()));
+        assertTrue(PeerNode.isRabbitMqTransportSelected(Map.of("TASKFLOW_TRANSPORT", " ")));
+        assertTrue(PeerNode.isRabbitMqTransportSelected(Map.of("TASKFLOW_TRANSPORT", "rabbitmq")));
+        assertFalse(PeerNode.isRabbitMqTransportSelected(Map.of("TASKFLOW_TRANSPORT", "tcp")));
+    }
+
+    @Test
+    void unknownTransportIsRejected() {
+        assertThrows(IllegalArgumentException.class,
+                () -> PeerNode.isRabbitMqTransportSelected(Map.of("TASKFLOW_TRANSPORT", "udp")));
+    }
+
+    @Test
     void submitJobWritesJobSubmitMessage() {
         PeerNode node = new PeerNode("peer-submit");
         StringWriter buffer = new StringWriter();

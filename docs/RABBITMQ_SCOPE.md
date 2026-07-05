@@ -6,9 +6,9 @@ transport direction is recorded in `docs/RUNTIME_STRATEGY.md`.
 
 ## Decision
 
-RabbitMQ is the planned primary runtime, but the current RabbitMQ
-implementation remains a transitional broker adapter, not a fully supported
-production runtime.
+RabbitMQ is the default runtime, but the current RabbitMQ implementation
+remains a transitional broker adapter, not a fully supported production
+runtime.
 
 The current implementation is useful for broker-backed demos and focused
 integration coverage, but it does not yet provide every operational workflow
@@ -21,16 +21,16 @@ Focused broker-failure coverage now spans coordinator, command-line peer, GUI
 service adapters, publisher confirms, requeue/reject/DLQ behavior, and result
 routing. Automated JavaFX RabbitMQ desktop smoke evidence covers live
 submit/execute/result/save and broker-failure heartbeat handling. Full broker
-outage/restart recovery remains incomplete. TCP is deprecated but remains the
-unset compatibility default until a later default-flip/removal slice passes the
-gates in `docs/RUNTIME_STRATEGY.md`.
+outage/restart recovery remains incomplete. TCP is deprecated and available
+only when selected explicitly with `TASKFLOW_TRANSPORT=tcp` until a later
+removal slice passes the gates in `docs/RUNTIME_STRATEGY.md`.
 
 ## Current RabbitMQ Guarantees
 
 The current RabbitMQ path includes:
 
-- Coordinator and command-line peer entry points selected with
-  `TASKFLOW_TRANSPORT=rabbitmq`.
+- Coordinator and command-line peer entry points use RabbitMQ by default when
+  `TASKFLOW_TRANSPORT` is unset or blank.
 - Shared broker routes for heartbeat, job submission, and task result messages.
 - Peer-specific broker routes for task assignment and job result messages.
 - Explicit sanitized peer IDs shared with TCP, command-line peers, and JavaFX
@@ -48,10 +48,10 @@ The current RabbitMQ path includes:
   inline job payload size, and result payload size.
 - Command-line peer submit mode builds payloads and handles successful final
   results through `ClientJobPlugin.handleResult(...)`.
-- JavaFX GUI mode can select RabbitMQ with `TASKFLOW_TRANSPORT=rabbitmq`,
-  publish signed job submissions, send heartbeats, consume peer-specific task
-  assignments and job results, publish task results, and route successful final
-  results through `ClientJobPlugin.handleResult(...)`.
+- JavaFX GUI mode uses RabbitMQ by default, publishes signed job submissions,
+  sends heartbeats, consumes peer-specific task assignments and job results,
+  publishes task results, and routes successful final results through
+  `ClientJobPlugin.handleResult(...)`.
 - Publisher confirms for broker publishes.
 - Mandatory-return detection for unroutable peer-targeted publishes.
 - SQLite-backed coordinator broker outbox rows for `TASK_ASSIGN` and final
@@ -114,11 +114,11 @@ the tested behavior above.
 
 ## Gates For Supported Runtime Status
 
-RabbitMQ can be reconsidered as the primary supported runtime only after the
-replacement gates in `docs/RUNTIME_STRATEGY.md` and the behavior gates below
-are implemented and tested.
+RabbitMQ can be reconsidered as the primary supported production runtime only
+after the support-promotion gates in `docs/RUNTIME_STRATEGY.md` and the
+behavior gates below are implemented and tested.
 
-First keep replacement evidence current:
+First keep support-promotion evidence current:
 
 - Keep JavaFX RabbitMQ live broker and desktop smoke or automation evidence
   passing, including broker-failure handling.
@@ -144,8 +144,8 @@ Then promote evidence:
 - Add direct RabbitMQ TLS/certificate configuration and live verification if
   TaskFlow is expected to connect to brokers across untrusted networks.
 
-Only after those gates should documentation describe RabbitMQ as the primary
-supported runtime rather than a transitional adapter.
+Only after those gates should documentation describe RabbitMQ as a primary
+supported production runtime rather than a transitional adapter.
 
 ## Public Claim Rule
 

@@ -66,7 +66,7 @@ final class StatusCommand {
         return String.join(System.lineSeparator(),
                 "Usage: java -jar taskflow-coordinator-<version>-coordinator-runtime.jar status [summary|jobs|peers|outbox|queues|dlq] [count]",
                 "Views:",
-                "  summary  SQLite jobs/tasks/attempts/peers/outbox plus RabbitMQ summary when TASKFLOW_TRANSPORT=rabbitmq",
+                "  summary  SQLite jobs/tasks/attempts/peers/outbox plus RabbitMQ summary unless TASKFLOW_TRANSPORT=tcp",
                 "  jobs     Recent persisted jobs with task, retry, and lease counts",
                 "  peers    Last-known persisted peer registry rows",
                 "  outbox   Pending coordinator RabbitMQ outbox rows",
@@ -117,7 +117,7 @@ final class StatusCommand {
             printRabbitMqSummary(out, rabbitMqStatusClientFactory, limit);
         } else {
             out.printf("rabbitmq status=not_selected transport=%s%n",
-                    value(environment.getOrDefault(TRANSPORT_ENV, "tcp")));
+                    value(environment.getOrDefault(TRANSPORT_ENV, "rabbitmq")));
         }
     }
 
@@ -354,7 +354,16 @@ final class StatusCommand {
     }
 
     private static boolean isRabbitMqSelected(Map<String, String> environment) {
-        return "rabbitmq".equalsIgnoreCase(environment.getOrDefault(TRANSPORT_ENV, "tcp"));
+        String configured = environment.get(TRANSPORT_ENV);
+        if (configured == null || configured.isBlank()) {
+            return true;
+        }
+        return switch (configured.trim().toLowerCase(Locale.ROOT)) {
+            case "rabbitmq" -> true;
+            case "tcp" -> false;
+            default -> throw new IllegalArgumentException(
+                    TRANSPORT_ENV + " must be either tcp or rabbitmq, not '" + configured + "'.");
+        };
     }
 
     private static StatusOptions parse(String[] args) {

@@ -7,6 +7,8 @@ import java.io.PrintWriter;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -179,7 +181,20 @@ public class PeerNode {
     }
 
     private static boolean isRabbitMqTransportSelected() {
-        return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
+        return isRabbitMqTransportSelected(System.getenv());
+    }
+
+    static boolean isRabbitMqTransportSelected(Map<String, String> environment) {
+        String configured = environment.get(TRANSPORT_ENV);
+        if (configured == null || configured.isBlank()) {
+            return true;
+        }
+        return switch (configured.trim().toLowerCase(Locale.ROOT)) {
+            case "rabbitmq" -> true;
+            case "tcp" -> false;
+            default -> throw new IllegalArgumentException(
+                    TRANSPORT_ENV + " must be either tcp or rabbitmq, not '" + configured + "'.");
+        };
     }
 
     private static void logTcpDeprecationWarning() {
@@ -194,11 +209,12 @@ public class PeerNode {
 
     static String usage() {
         return String.join(System.lineSeparator(),
-                tcpUsageLine(),
+                "java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]] (default RabbitMQ transport)",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-submitter-runtime.jar submit <task-type> <parameter> <file> [file...]",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-executor-runtime.jar",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]]",
-                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|redrive|quarantine|discard> [count]");
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|redrive|quarantine|discard> [count]",
+                tcpUsageLine());
     }
 
     private static String tcpUsageLine() {
