@@ -45,6 +45,8 @@ taskflow.db-journal
 config/taskflow.yml
 java/in_PEER_*/
 java/out_PEER_*/
+*/java/in_PEER_*/
+*/java/out_PEER_*/
 
 # Local environment/tool state
 .env

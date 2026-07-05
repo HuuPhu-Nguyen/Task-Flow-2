@@ -13,6 +13,7 @@ import server.job.TaskUnit;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,7 +27,7 @@ public class ImageConversionJob extends EmbarrassinglyParallelJob<FilePayload, F
 
     public ImageConversionJob(String jobId, String requesterId, String targetFormat) {
         super(jobId, requesterId, ConversionTaskTypes.IMAGE_CONVERSION);
-        this.targetFormat = targetFormat;
+        this.targetFormat = normalizeTargetFormat(targetFormat);
     }
 
     @Override
@@ -92,5 +93,13 @@ public class ImageConversionJob extends EmbarrassinglyParallelJob<FilePayload, F
         } catch (NumberFormatException ignored) {
             return Integer.MAX_VALUE;
         }
+    }
+
+    private static String normalizeTargetFormat(String targetFormat) {
+        if (targetFormat == null) {
+            return null;
+        }
+        String normalized = targetFormat.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("jpeg") ? "jpg" : normalized;
     }
 }

@@ -8,14 +8,14 @@ current runtime defaults or add guarantees beyond `docs/EXECUTION_GUARANTEES.md`
 RabbitMQ is the planned primary runtime for the coordinator, command-line peers,
 and JavaFX GUI peers.
 
-TCP remains the current default local runtime and compatibility/demo path until
-RabbitMQ reaches the replacement gates below. TCP must keep working while the
-RabbitMQ path is completed, documented, and verified.
+TCP is deprecated as the legacy local compatibility/demo path. It remains the
+unset default for compatibility, and TCP must keep working until a later
+removal slice closes the removal gates below.
 
 This is a direction decision, not a support-status promotion. RabbitMQ is still
-documented as transitional in `docs/RABBITMQ_SCOPE.md` because desktop GUI
-evidence and default-flip evidence gates are not complete, and full broker
-outage/restart recovery remains outside the current support claim.
+documented as transitional in `docs/RABBITMQ_SCOPE.md` because default-flip
+evidence is not complete, and full broker outage/restart recovery remains
+outside the current support claim.
 
 ## Rationale
 
@@ -28,12 +28,13 @@ The broker-backed runtime is the better long-term fit for the framework:
   dead-lettering, and later operator workflows;
 - the Docker Compose demo already exercises a distributed broker-backed path.
 
-TCP remains useful for simple local demos, manual JavaFX smoke runs, and
-compatibility while the identity, recovery, and operational gaps are closed.
+TCP remains available for compatibility while the remaining default-flip,
+recovery, and operational gaps are closed.
 
 ## Current State
 
-- TCP is still the default when `TASKFLOW_TRANSPORT` is unset.
+- TCP is deprecated but still the default when `TASKFLOW_TRANSPORT` is unset
+  for compatibility.
 - The JavaFX GUI submits jobs, executes assigned work, and receives live results
   through TCP by default or RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq`.
 - RabbitMQ is selected explicitly with `TASKFLOW_TRANSPORT=rabbitmq` for the
@@ -57,6 +58,10 @@ compatibility while the identity, recovery, and operational gaps are closed.
   peer-specific task assignment, task-result publication, live `JOB_RESULT`
   routing, and plugin-backed result handling. RabbitMQ GUI result-request replay
   after restart is not implemented.
+- Automated JavaFX RabbitMQ desktop smoke evidence covers GUI startup,
+  broker-backed text-analysis submission, assigned-task execution, live
+  `JOB_RESULT` routing, plugin-backed result saving, and broker-failure
+  heartbeat handling.
 - SQLite-backed RabbitMQ coordinator runs persist outbound `TASK_ASSIGN` and
   final `JOB_RESULT` messages in a broker outbox transactionally with scheduler
   state changes, replay pending rows on startup, and retry unsent rows while the
@@ -74,12 +79,13 @@ compatibility while the identity, recovery, and operational gaps are closed.
 
 ## RabbitMQ Primary Runtime Gates
 
-Do not flip the default transport, describe RabbitMQ as the primary supported
-runtime, or start TCP deprecation until all of these are complete:
+Do not flip the default transport or describe RabbitMQ as the primary supported
+runtime until the remaining gates are complete. TCP deprecation has started,
+but TCP removal remains separate.
 
-- JavaFX RabbitMQ desktop smoke or automation evidence for job submission,
-  assigned-task execution, `JOB_RESULT` reception, result handling, and
-  disconnect/broker-failure handling.
+- Keep JavaFX RabbitMQ desktop smoke or automation evidence passing for job
+  submission, assigned-task execution, `JOB_RESULT` reception, result handling,
+  and disconnect/broker-failure handling.
 - A clear RabbitMQ GUI result-request decision: implement broker-backed
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
@@ -93,13 +99,13 @@ runtime, or start TCP deprecation until all of these are complete:
 
 ## TCP Deprecation And Removal Gates
 
-TCP removal must happen only after the RabbitMQ primary runtime gates pass and
-in two separate steps.
+TCP removal must happen only after the RabbitMQ default-flip/support-promotion
+gates pass and after a compatibility window.
 
-`docs/TCP_DEPRECATION_GATES.md` tracks the current gate status and the remaining
-evidence needed before TCP can be marked legacy.
+`docs/TCP_DEPRECATION_GATES.md` tracks the deprecation evidence and the
+remaining limits before TCP can be removed.
 
-First, deprecate TCP:
+TCP deprecation keeps the runtime working:
 
 - keep the TCP runtime working;
 - mark TCP as legacy in docs and runtime logs;
@@ -119,7 +125,8 @@ Only in a later cleanup, remove TCP:
 ## Public Claim Rule
 
 Use wording such as planned primary runtime, target broker runtime, current
-TCP default, and transitional RabbitMQ support.
+compatibility default, deprecated TCP compatibility path, and transitional
+RabbitMQ support.
 
 Avoid saying RabbitMQ is the default runtime, production-ready runtime, fully
 supported runtime, durable broker runtime, or TCP replacement until the gates in

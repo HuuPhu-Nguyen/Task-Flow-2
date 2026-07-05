@@ -52,6 +52,8 @@ public class TaskCoordinatorServer {
             return;
         }
 
+        logTcpDeprecationWarning();
+
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
 
@@ -144,6 +146,10 @@ public class TaskCoordinatorServer {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
     }
 
+    private static void logTcpDeprecationWarning() {
+        LOGGER.warn("event=tcp_transport_deprecated component=coordinator recommendation=TASKFLOW_TRANSPORT=rabbitmq");
+    }
+
     static boolean isHelpRequested(String[] args) {
         return args != null
                 && args.length > 0
@@ -152,7 +158,7 @@ public class TaskCoordinatorServer {
 
     static String usage() {
         return String.join(System.lineSeparator(),
-                "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
+                "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar (legacy; prefer TASKFLOW_TRANSPORT=rabbitmq)",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",
                 "java -jar taskflow-coordinator-<version>-coordinator-runtime.jar status [summary|jobs|peers|outbox|queues|dlq] [count]");
     }

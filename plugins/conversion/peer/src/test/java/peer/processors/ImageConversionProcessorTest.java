@@ -65,7 +65,25 @@ class ImageConversionProcessorTest {
         }
     }
 
+    @Test
+    void normalizesTargetFormatBeforeWritingImage() throws Exception {
+        FilePayload input = new FilePayload(
+                "sample.jpg",
+                Base64.getEncoder().encodeToString(jpegBytes())
+        );
+
+        FilePayload result = new ImageConversionProcessor().process(task(input, " PNG "));
+
+        assertEquals("sample.png", result.fileName());
+        byte[] outputBytes = Base64.getDecoder().decode(result.base64Data());
+        assertNotNull(ImageIO.read(new ByteArrayInputStream(outputBytes)));
+    }
+
     private TaskAssignMessage task(FilePayload input) {
+        return task(input, "png");
+    }
+
+    private TaskAssignMessage task(FilePayload input, String format) {
         return new TaskAssignMessage(
                 "COORDINATOR",
                 Instant.now().toString(),
@@ -73,7 +91,7 @@ class ImageConversionProcessorTest {
                 "job-1",
                 ConversionTaskTypes.IMAGE_CONVERSION,
                 input,
-                "png"
+                format
         );
     }
 
@@ -85,6 +103,17 @@ class ImageConversionProcessorTest {
         image.setRGB(1, 1, Color.WHITE.getRGB());
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         ImageIO.write(image, "png", output);
+        return output.toByteArray();
+    }
+
+    private byte[] jpegBytes() throws Exception {
+        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
+        image.setRGB(0, 0, Color.RED.getRGB());
+        image.setRGB(1, 0, Color.GREEN.getRGB());
+        image.setRGB(0, 1, Color.BLUE.getRGB());
+        image.setRGB(1, 1, Color.WHITE.getRGB());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ImageIO.write(image, "jpg", output);
         return output.toByteArray();
     }
 

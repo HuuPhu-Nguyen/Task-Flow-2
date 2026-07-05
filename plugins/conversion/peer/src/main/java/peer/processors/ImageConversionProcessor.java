@@ -26,7 +26,7 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
 
     @Override
     public FilePayload process(TaskAssignMessage task) throws Exception {
-        String format = task.getParam();
+        String format = normalizeFormat(task.getParam());
         FilePayload input = gson.fromJson(gson.toJson(task.getPayload()), FilePayload.class);
         long maxInputBytes = PayloadLimits.maxInputBytes();
         byte[] rawBytes = readPayloadBytes(input, maxInputBytes, "Image task has no input data.");
@@ -104,6 +104,14 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
             return new FilePayload(fileName, null, LocalPayloadStorage.storeBytes(fileName, bytes));
         }
         return new FilePayload(fileName, Base64.getEncoder().encodeToString(bytes));
+    }
+
+    private String normalizeFormat(String format) throws IOException {
+        if (format == null || format.isBlank()) {
+            throw new IOException("Image conversion target format is required.");
+        }
+        String normalized = format.trim().toLowerCase(Locale.ROOT);
+        return normalized.equals("jpeg") ? "jpg" : normalized;
     }
 
     private String stripExtension(String fileName) {

@@ -40,8 +40,8 @@ This document defines the current runtime guarantees of TaskFlow.
 ## Runtime Direction
 
 - RabbitMQ is the planned primary runtime for the coordinator, command-line peers, and JavaFX GUI peers.
-- TCP remains the current default local runtime and compatibility/demo path until RabbitMQ replacement gates pass.
-- This direction does not change current defaults: TCP remains default, RabbitMQ live broker tests are opt-in for local runs, and RabbitMQ is still transitional until its remaining documented gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
+- TCP is deprecated as the legacy local compatibility/demo path, but remains the unset default until a later default-flip/removal slice.
+- RabbitMQ is recommended for new demos and feature work through explicit `TASKFLOW_TRANSPORT=rabbitmq`, while RabbitMQ live broker tests remain opt-in for local runs and RabbitMQ is still transitional until its remaining documented gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
 - `docs/RUNTIME_STRATEGY.md` records the default-flip, support-promotion, TCP-deprecation, and TCP-removal gates.
 
 ## RabbitMQ Publication
@@ -76,11 +76,11 @@ This document defines the current runtime guarantees of TaskFlow.
 
 ## JavaFX GUI Transport Scope
 
-- The JavaFX GUI uses TCP by default and selects RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq` is set before launch.
+- The JavaFX GUI uses deprecated TCP by default for compatibility and selects RabbitMQ when `TASKFLOW_TRANSPORT=rabbitmq` is set before launch.
 - GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and worker-runtime boundaries for both TCP and RabbitMQ.
 - RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI peer publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
 - RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.
-- Current JavaFX RabbitMQ coverage is service-level and headless. Full JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
+- JavaFX RabbitMQ coverage includes service-level tests plus an automated desktop smoke helper for the text-analysis submit/execute/result/save path. Broader CI-grade JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
 
 ## Scheduler Ingress and Backpressure
 

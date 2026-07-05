@@ -50,6 +50,8 @@ public class PeerNode {
             return;
         }
 
+        logTcpDeprecationWarning();
+
         if (args.length < 2) {
             LOGGER.info("event=peer_usage command=\"{}\"", tcpUsageLine());
             return;
@@ -180,6 +182,10 @@ public class PeerNode {
         return "rabbitmq".equalsIgnoreCase(System.getenv().getOrDefault(TRANSPORT_ENV, "tcp"));
     }
 
+    private static void logTcpDeprecationWarning() {
+        LOGGER.warn("event=tcp_transport_deprecated component=peer recommendation=TASKFLOW_TRANSPORT=rabbitmq");
+    }
+
     static boolean isHelpRequested(String[] args) {
         return args != null
                 && args.length > 0
@@ -196,6 +202,6 @@ public class PeerNode {
     }
 
     private static String tcpUsageLine() {
-        return "TASKFLOW_TRANSPORT=tcp java -jar taskflow-peer-<version>-combined-runtime.jar <host> <port>";
+        return "TASKFLOW_TRANSPORT=tcp java -jar taskflow-peer-<version>-combined-runtime.jar <host> <port> (legacy; prefer TASKFLOW_TRANSPORT=rabbitmq)";
     }
 }

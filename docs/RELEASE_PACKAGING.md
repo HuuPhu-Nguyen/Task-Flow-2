@@ -99,7 +99,8 @@ Coordinator package:
 Command-line peer packages:
 
 - `combined-runtime` includes both client plugins and peer processors. It is
-  the current default for local demos and Docker Compose.
+  the default command-line peer package profile for local demos and Docker
+  Compose.
 - `submitter-runtime` includes client plugins only. Use it for one-shot
   RabbitMQ submissions or DLQ commands that should not carry processor/native
   dependencies.

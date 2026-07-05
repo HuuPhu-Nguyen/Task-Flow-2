@@ -26,14 +26,25 @@ On a Windows desktop with Docker Desktop available, run:
 .\scripts\smoke-rabbitmq-gui.ps1
 ```
 
+For an automated desktop smoke that launches JavaFX and drives the RabbitMQ
+text-analysis path through GUI services without manual clicks, run:
+
+```powershell
+.\scripts\smoke-rabbitmq-gui.ps1 -AutoRun
+```
+
 The helper:
 
 - builds the coordinator and GUI modules with tests skipped;
 - starts the Compose RabbitMQ service;
 - starts a RabbitMQ coordinator with an isolated exchange and queue prefix;
 - prepares `target\gui-rabbitmq-smoke\input\sample.txt`;
-- launches the JavaFX GUI in RabbitMQ mode;
-- prompts you through the manual GUI steps;
+- launches the JavaFX GUI in RabbitMQ mode with `Text Analysis` preselected;
+- opens GUI file/save choosers in the smoke input and output directories;
+- prompts you through the manual GUI steps, unless `-AutoRun` is used;
+- in `-AutoRun` mode, submits the prepared text input after the JavaFX GUI
+  connects, saves the live result through the normal client plugin, and waits
+  for evidence logs and the result file;
 - stops RabbitMQ to exercise broker-failure observation;
 - writes `target\gui-rabbitmq-smoke\evidence.md`.
 
@@ -41,15 +52,15 @@ Use `-SkipDocker` when a broker is already running on `localhost:5672`.
 Use `-NoLaunchGui` to prepare the broker, coordinator, and input while launching
 the GUI yourself. In that mode, copy the environment-variable commands printed
 by the helper so the GUI uses the same isolated exchange and queue prefix as the
-coordinator.
+coordinator. `-AutoRun` cannot be combined with `-NoLaunchGui`.
 
 ## Manual Steps
 
 In the JavaFX window:
 
 1. Connect to broker host `localhost` and port `5672`.
-2. Select `Text Analysis`.
-3. Keep target `csv`.
+2. Confirm `Text Analysis` is selected.
+3. Confirm target `csv`.
 4. Click `Upload Files` and choose
    `target\gui-rabbitmq-smoke\input\sample.txt`.
 5. Click `Start Job`.
@@ -75,5 +86,5 @@ Broker-failure observation should also be recorded. With the current service
 behavior, the expected evidence is the GUI staying open and the heartbeat
 failure event being logged after RabbitMQ is stopped.
 
-If any evidence line is false, keep TCP deprecation blocked and inspect the
-logs under `target\gui-rabbitmq-smoke\logs`.
+If any evidence line is false, do not use that run as promotion evidence; inspect
+the logs under `target\gui-rabbitmq-smoke\logs`.

@@ -19,9 +19,11 @@ replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
 redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
 Focused broker-failure coverage now spans coordinator, command-line peer, GUI
 service adapters, publisher confirms, requeue/reject/DLQ behavior, and result
-routing. Desktop GUI evidence and full broker outage/restart recovery remain
-incomplete. TCP remains the current default compatibility/demo runtime until
-the replacement gates in `docs/RUNTIME_STRATEGY.md` pass.
+routing. Automated JavaFX RabbitMQ desktop smoke evidence covers live
+submit/execute/result/save and broker-failure heartbeat handling. Full broker
+outage/restart recovery remains incomplete. TCP is deprecated but remains the
+unset compatibility default until a later default-flip/removal slice passes the
+gates in `docs/RUNTIME_STRATEGY.md`.
 
 ## Current RabbitMQ Guarantees
 
@@ -116,10 +118,10 @@ RabbitMQ can be reconsidered as the primary supported runtime only after the
 replacement gates in `docs/RUNTIME_STRATEGY.md` and the behavior gates below
 are implemented and tested.
 
-First close remaining runtime replacement gaps:
+First keep replacement evidence current:
 
-- Broaden JavaFX RabbitMQ evidence from headless service tests to live broker
-  and desktop smoke or automation evidence, including broker-failure handling.
+- Keep JavaFX RabbitMQ live broker and desktop smoke or automation evidence
+  passing, including broker-failure handling.
 - Define RabbitMQ result-request behavior or keep it explicitly unsupported
   while live `JOB_RESULT` delivery is the GUI RabbitMQ result path.
 

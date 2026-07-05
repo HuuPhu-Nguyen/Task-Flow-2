@@ -14,17 +14,17 @@ A TaskFlow peer can combine three capabilities:
 - receive terminal `JOB_RESULT` messages for jobs it submitted and handle
   successful final results through the matching `ClientJobPlugin`.
 
-The JavaFX GUI is the peer-facing UI for the default TCP path and the selectable
-RabbitMQ path, not a separate client/server application. The command-line peer
-is the headless peer runtime.
+The JavaFX GUI is the peer-facing UI for the deprecated default TCP path and the
+selectable RabbitMQ path, not a separate client/server application. The
+command-line peer is the headless peer runtime.
 Both are expected to use the same plugin ownership rules when they submit jobs
 or handle successful final results.
 
 RabbitMQ is the planned primary runtime for these peer roles. The GUI now has
 RabbitMQ service adapters for live broker-backed submit, execute, result
-routing, and result handling, while TCP remains the default. `docs/RUNTIME_STRATEGY.md`
-records the runtime direction and the gates before TCP can be deprecated or
-removed.
+routing, and result handling, while deprecated TCP remains the unset default for
+compatibility. `docs/RUNTIME_STRATEGY.md` records the runtime direction and the
+gates before TCP can be removed.
 
 ## Lifecycle
 

@@ -13,7 +13,7 @@ final class GuiUsage {
 
     static String usage() {
         return String.join(System.lineSeparator(),
-                "TASKFLOW_TRANSPORT=tcp java --module-path <lib> --add-modules javafx.controls,javafx.fxml -cp \"taskflow-gui-<version>.jar;<lib>/*\" gui.PeerAppLauncher",
+                "TASKFLOW_TRANSPORT=tcp java --module-path <lib> --add-modules javafx.controls,javafx.fxml -cp \"taskflow-gui-<version>.jar;<lib>/*\" gui.PeerAppLauncher (legacy; prefer TASKFLOW_TRANSPORT=rabbitmq)",
                 "TASKFLOW_TRANSPORT=rabbitmq java --module-path <lib> --add-modules javafx.controls,javafx.fxml -cp \"taskflow-gui-<version>.jar;<lib>/*\" gui.PeerAppLauncher");
     }
 }

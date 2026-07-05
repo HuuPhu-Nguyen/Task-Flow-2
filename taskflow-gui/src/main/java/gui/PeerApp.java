@@ -43,6 +43,7 @@ public class PeerApp extends Application {
             new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
     private GuiTransportMode transportMode = GuiTransportMode.TCP;
     private String peerNodeId;
+    private GuiSmokeAutomation smokeAutomation;
 
     @Override
     public void init() {
@@ -50,6 +51,9 @@ public class PeerApp extends Application {
             // Generate unique folders for this GUI instance
             this.sessionId = "PEER_" + (System.currentTimeMillis() % 100000);
             this.transportMode = GuiTransportMode.fromEnvironment();
+            if (transportMode == GuiTransportMode.TCP) {
+                LOGGER.warn("event=tcp_transport_deprecated component=gui recommendation=TASKFLOW_TRANSPORT=rabbitmq");
+            }
             this.peerNodeId = PeerIdentity.configuredOrGenerated("GUI_PEER");
             inputStagingService = GuiInputStagingService.forSession(sessionId);
             inputStagingService.prepareDirectories();
@@ -76,6 +80,16 @@ public class PeerApp extends Application {
             Map<String, ClientJobPlugin> clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
             downloadWindow = new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
+            if (GuiSmokeAutomation.enabled(System.getenv())) {
+                smokeAutomation = new GuiSmokeAutomation(
+                        System.getenv(),
+                        clientJobPlugins,
+                        inputStagingService,
+                        jobSubmissionService,
+                        connectionService,
+                        resultSaveService);
+                LOGGER.info("event=gui_smoke_automation_enabled");
+            }
             LOGGER.info("event=gui_client_plugins_registered task_types={}", clientJobPluginsByType.keySet());
         } catch (Exception e) {
             LOGGER.error("event=gui_init_failed error={}", e.getMessage(), e);
@@ -126,6 +140,9 @@ public class PeerApp extends Application {
         window.setScene(new Scene(root, 300, 250));
         window.setTitle("Connect Peer");
         window.show();
+        if (smokeAutomation != null) {
+            Platform.runLater(connectBtn::fire);
+        }
     }
 
     private void showMainGallery() {
@@ -143,6 +160,9 @@ public class PeerApp extends Application {
 
         window.setScene(new Scene(tabPane, 900, 650));
         window.show();
+        if (smokeAutomation != null) {
+            smokeAutomation.start();
+        }
     }
 
     private Node buildConversionPane() {
@@ -163,7 +183,12 @@ public class PeerApp extends Application {
         ComboBox<ClientJobPlugin> jobTypeBox = new ComboBox<>();
         configurePluginComboBox(jobTypeBox);
         jobTypeBox.getItems().addAll(clientJobPlugins);
-        jobTypeBox.getSelectionModel().selectFirst();
+        ClientJobPlugin defaultPlugin = GuiDefaultTaskSelection.choose(clientJobPlugins, System.getenv());
+        if (defaultPlugin != null) {
+            jobTypeBox.getSelectionModel().select(defaultPlugin);
+            LOGGER.info("event=gui_default_task_selected task_type={} display_name={}",
+                    defaultPlugin.taskType(), defaultPlugin.displayName());
+        }
 
         ComboBox<String> formatBox = new ComboBox<>();
         refreshParameterOptions(jobTypeBox.getValue(), formatBox);
@@ -254,6 +279,12 @@ public class PeerApp extends Application {
 
             FileChooser fileChooser = new FileChooser();
             fileChooser.setTitle("Select " + plugin.displayName() + " Inputs");
+            File initialInputDirectory = GuiChooserDefaults.existingDirectory(
+                    System.getenv(),
+                    GuiChooserDefaults.INITIAL_INPUT_DIR_ENV);
+            if (initialInputDirectory != null) {
+                fileChooser.setInitialDirectory(initialInputDirectory);
+            }
             List<String> extensionPatterns = plugin.supportedInputExtensions().stream()
                     .map(GuiInputStagingService::fileChooserPattern)
                     .toList();
@@ -420,6 +451,9 @@ public class PeerApp extends Application {
     private void handleJobResult(JobResultMessage result) {
         GuiJobResultRouter.RoutedJobResult routed = GuiJobResultRouter.route(result, myActiveJobIds);
         if (routed.action() == GuiJobResultRouter.Action.IGNORE) {
+            return;
+        }
+        if (smokeAutomation != null && smokeAutomation.handleRoutedResult(routed)) {
             return;
         }
 

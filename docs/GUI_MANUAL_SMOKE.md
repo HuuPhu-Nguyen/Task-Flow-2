@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-30 23:37 Asia/Bangkok
 
-This is the repeatable desktop smoke check for the default TCP JavaFX GUI path. It complements the headless GUI service tests, including RabbitMQ GUI adapter tests; it does not claim automated JavaFX end-to-end coverage. The RabbitMQ JavaFX desktop smoke gate is documented separately in `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md`.
+This is the repeatable desktop smoke check for the deprecated default TCP JavaFX GUI path. It complements the headless GUI service tests and the RabbitMQ desktop smoke helper; it does not claim CI-grade JavaFX end-to-end coverage. The RabbitMQ JavaFX desktop smoke gate is documented separately in `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md`.
 
 JavaFX end-to-end UI smoke remains manual until CI has a stable desktop automation harness. See `docs/GUI_AUTOMATION_SCOPE.md` for the automation decision and prerequisites.
 

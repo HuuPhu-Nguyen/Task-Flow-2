@@ -24,19 +24,26 @@ The stable automated GUI coverage is therefore service-level and headless:
 - RabbitMQ GUI task assignment execution, task-result publish acknowledgement,
   result routing, and startup failure behavior.
 
+The local RabbitMQ desktop smoke helper can also launch the JavaFX GUI and drive
+one text-analysis submit/execute/result/save path with
+`scripts/smoke-rabbitmq-gui.ps1 -AutoRun`. That helper records desktop smoke
+evidence, but it is not yet a CI gate because the CI environment still lacks a
+stable JavaFX display backend.
+
 ## Required Manual Gate
 
 `docs/GUI_MANUAL_SMOKE.md` remains the required desktop smoke gate for the
-default TCP JavaFX path. It covers:
+deprecated default TCP JavaFX path. It covers:
 
 - connection refusal;
 - successful TCP job submit, execute, result receive, and save;
 - job history refresh;
 - coordinator disconnect alert.
 
-RabbitMQ GUI behavior currently has headless service coverage. Use
-`docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` for the manual desktop RabbitMQ smoke step
-before promoting RabbitMQ as the primary supported GUI runtime.
+RabbitMQ GUI behavior has headless service coverage and a local automated
+desktop smoke helper. Use `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` for the
+RabbitMQ desktop smoke procedure before promoting RabbitMQ as the primary
+supported GUI runtime.
 
 ## Deferred CI End-To-End UI Smoke
 
@@ -52,9 +59,9 @@ includes:
   shutdown;
 - deterministic file chooser or save-dialog handling;
 - a timeout and cleanup strategy for coordinator and GUI processes;
-- a local TCP submit-to-save scenario that passes repeatedly in CI;
-- a RabbitMQ-backed GUI submit-to-save scenario once broker-backed GUI behavior
-  becomes a release gate.
+- a local deprecated-TCP submit-to-save scenario that passes repeatedly in CI;
+- a RabbitMQ-backed GUI submit-to-save scenario based on the current local
+  smoke helper.
 
-Until those prerequisites exist, keep JavaFX end-to-end smoke manual and keep
+Until those prerequisites exist, keep JavaFX end-to-end smoke out of CI and keep
 CI coverage focused on the GUI services behind the JavaFX presentation layer.

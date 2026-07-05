@@ -3,6 +3,7 @@ param(
     [switch]$SkipDocker,
     [switch]$KeepRabbitMq,
     [switch]$NoLaunchGui,
+    [switch]$AutoRun,
     [switch]$Help
 )
 
@@ -20,6 +21,7 @@ Options:
   -SkipDocker   Use an already-running RabbitMQ broker on localhost:5672
   -KeepRabbitMq Leave the Docker RabbitMQ service running after the smoke
   -NoLaunchGui  Prepare broker/coordinator/input only; print GUI launch env
+  -AutoRun      Launch the JavaFX GUI and run the text-analysis smoke automatically
 
 Outputs:
   target\gui-rabbitmq-smoke\input
@@ -28,6 +30,10 @@ Outputs:
   target\gui-rabbitmq-smoke\evidence.md
 "@
     exit 0
+}
+
+if ($AutoRun -and $NoLaunchGui) {
+    throw "-AutoRun cannot be combined with -NoLaunchGui."
 }
 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -183,6 +189,21 @@ function Start-TaskFlowProcess {
     if ($PeerId) {
         $lines += "`$env:TASKFLOW_PEER_ID = $(ConvertTo-SingleQuotedLiteral $PeerId)"
     }
+    if ($Module -eq "taskflow-gui") {
+        $lines += "`$env:TASKFLOW_GUI_DEFAULT_TASK_TYPE = 'TEXT_ANALYSIS'"
+        $lines += "`$env:TASKFLOW_GUI_INITIAL_INPUT_DIR = $(ConvertTo-SingleQuotedLiteral $InputDir)"
+        $lines += "`$env:TASKFLOW_GUI_INITIAL_OUTPUT_DIR = $(ConvertTo-SingleQuotedLiteral $OutputDir)"
+        $lines += "if ([string]::IsNullOrWhiteSpace(`$env:JAVA_TOOL_OPTIONS)) {"
+        $lines += "    `$env:JAVA_TOOL_OPTIONS = '-Dtaskflow.gui.defaultTaskType=TEXT_ANALYSIS'"
+        $lines += "} else {"
+        $lines += "    `$env:JAVA_TOOL_OPTIONS = `$env:JAVA_TOOL_OPTIONS + ' -Dtaskflow.gui.defaultTaskType=TEXT_ANALYSIS'"
+        $lines += "}"
+        if ($AutoRun) {
+            $lines += "`$env:TASKFLOW_GUI_SMOKE_AUTORUN = 'true'"
+            $lines += "`$env:TASKFLOW_GUI_SMOKE_INPUT_FILE = $(ConvertTo-SingleQuotedLiteral (Join-Path $InputDir "sample.txt"))"
+            $lines += "`$env:TASKFLOW_GUI_SMOKE_OUTPUT_DIR = $(ConvertTo-SingleQuotedLiteral $OutputDir)"
+        }
+    }
 
     $lines += "& .\mvnw.cmd --batch-mode --no-transfer-progress -pl $Module $Goal"
     $command = $lines -join [Environment]::NewLine
@@ -237,6 +258,23 @@ function Wait-ProcessLogPattern {
     }
 
     throw "Timed out waiting for $Name readiness log: $Pattern"
+}
+
+function Wait-PathExists {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $Path) {
+            return
+        }
+        Start-Sleep -Seconds 1
+    }
+
+    throw "Timed out waiting for path: $Path"
 }
 
 function Stop-ProcessTree {
@@ -316,8 +354,9 @@ try {
         -Pattern "event=coordinator_started transport=rabbitmq" `
         -TimeoutSeconds 60
 
+    $gui = $null
     if (-not $NoLaunchGui) {
-        $null = Start-TaskFlowProcess -Name "gui" -Module "taskflow-gui" -Goal "javafx:run" -PeerId "gui-smoke-peer"
+        $gui = Start-TaskFlowProcess -Name "gui" -Module "taskflow-gui" -Goal "javafx:run" -PeerId "gui-smoke-peer"
     } else {
         Write-Host ""
         Write-Host "Launch the GUI in another PowerShell window with:"
@@ -329,7 +368,46 @@ try {
         Write-Host "`$env:TASKFLOW_RABBITMQ_EXCHANGE = '$RabbitMqExchange'"
         Write-Host "`$env:TASKFLOW_RABBITMQ_QUEUE_PREFIX = '$RabbitMqQueuePrefix'"
         Write-Host "`$env:TASKFLOW_PEER_ID = 'gui-smoke-peer'"
+        Write-Host "`$env:TASKFLOW_GUI_DEFAULT_TASK_TYPE = 'TEXT_ANALYSIS'"
+        Write-Host "`$env:TASKFLOW_GUI_INITIAL_INPUT_DIR = '$InputDir'"
+        Write-Host "`$env:TASKFLOW_GUI_INITIAL_OUTPUT_DIR = '$OutputDir'"
+        Write-Host "`$env:JAVA_TOOL_OPTIONS = '-Dtaskflow.gui.defaultTaskType=TEXT_ANALYSIS'"
+        Write-Host "# Optional automation variables:"
+        Write-Host "`$env:TASKFLOW_GUI_SMOKE_AUTORUN = 'true'"
+        Write-Host "`$env:TASKFLOW_GUI_SMOKE_INPUT_FILE = '$(Join-Path $InputDir "sample.txt")'"
+        Write-Host "`$env:TASKFLOW_GUI_SMOKE_OUTPUT_DIR = '$OutputDir'"
         Write-Host ".\mvnw.cmd --batch-mode --no-transfer-progress -pl taskflow-gui javafx:run"
+    }
+
+    if ($AutoRun) {
+        $resultFile = Join-Path $OutputDir "text-analysis-results.csv"
+        Wait-ProcessLogPattern `
+            -Process $gui `
+            -Name "gui" `
+            -Pattern "event=gui_smoke_job_submitted" `
+            -TimeoutSeconds 120
+        Wait-ProcessLogPattern `
+            -Process $gui `
+            -Name "gui" `
+            -Pattern "event=gui_results_saved" `
+            -TimeoutSeconds 120
+        Wait-PathExists -Path $resultFile -TimeoutSeconds 120
+
+        if (-not $SkipDocker) {
+            Write-Host "Stopping RabbitMQ to exercise broker-failure handling."
+            Invoke-DockerCompose -Arguments @("stop", "rabbitmq")
+            Wait-ProcessLogPattern `
+                -Process $gui `
+                -Name "gui" `
+                -Pattern "event=gui_rabbitmq_heartbeat_failed" `
+                -TimeoutSeconds 90
+        } else {
+            Write-Host "SkipDocker is set. Stop your external broker manually if you want broker-failure evidence."
+        }
+
+        Write-Evidence -Status "automated-completed"
+        Write-Host "Automated smoke helper complete. Review $EvidencePath before recording gate evidence."
+        return
     }
 
     Write-Host ""

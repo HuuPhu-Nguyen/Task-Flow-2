@@ -50,6 +50,12 @@ final class GuiDownloadWindow {
         public String chooseOutputFolder() {
             DirectoryChooser directoryChooser = new DirectoryChooser();
             directoryChooser.setTitle("Select Save Location");
+            File initialOutputDirectory = GuiChooserDefaults.existingDirectory(
+                    System.getenv(),
+                    GuiChooserDefaults.INITIAL_OUTPUT_DIR_ENV);
+            if (initialOutputDirectory != null) {
+                directoryChooser.setInitialDirectory(initialOutputDirectory);
+            }
             File selectedDirectory = directoryChooser.showDialog(downloadStage);
             return selectedDirectory == null ? null : selectedDirectory.getAbsolutePath();
         }
