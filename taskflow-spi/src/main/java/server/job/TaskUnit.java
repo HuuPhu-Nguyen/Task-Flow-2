@@ -1,5 +1,11 @@
 package server.job;
 
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
+
+import java.util.Objects;
 import java.util.Optional;
 
 public abstract class TaskUnit<T> {
@@ -18,6 +24,8 @@ public abstract class TaskUnit<T> {
     private int retryCount;
     private int assignmentAttemptNumber;
     private AssignmentIdentity assignmentIdentity;
+    private TaskFlowClock clock;
+    private AssignmentIdGenerator assignmentIdGenerator;
 
     public enum FailureOutcome {
         RETRY_SCHEDULED,
@@ -30,14 +38,49 @@ public abstract class TaskUnit<T> {
     }
 
     public TaskUnit(String taskId, String jobId, T payload) {
+        this(
+                taskId,
+                jobId,
+                payload,
+                SystemTaskFlowClock.INSTANCE,
+                UuidAssignmentIdGenerator.INSTANCE
+        );
+    }
+
+    public TaskUnit(String taskId,
+                    String jobId,
+                    T payload,
+                    TaskFlowClock clock,
+                    AssignmentIdGenerator assignmentIdGenerator) {
         this.taskId = taskId;
         this.jobId = jobId;
         this.payload = payload;
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.assignmentIdGenerator = Objects.requireNonNull(
+                assignmentIdGenerator,
+                "assignmentIdGenerator"
+        );
         this.retryCount = 0;
         this.assignmentAttemptNumber = 0;
         this.assignmentIdentity = null;
-        this.status= TaskStatus.PENDING;
-        this.pendingSinceMillis = System.currentTimeMillis();
+        this.status = TaskStatus.PENDING;
+        this.pendingSinceMillis = clock.nowEpochMillis();
+    }
+
+    /**
+     * Binds runtime transition ports after a plugin has initialized its task map.
+     * Pending age is rebased to the supplied runtime clock at that boundary.
+     */
+    public synchronized void configureTransitionPorts(TaskFlowClock clock,
+                                                      AssignmentIdGenerator assignmentIdGenerator) {
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.assignmentIdGenerator = Objects.requireNonNull(
+                assignmentIdGenerator,
+                "assignmentIdGenerator"
+        );
+        if (this.status == TaskStatus.PENDING) {
+            this.pendingSinceMillis = clock.nowEpochMillis();
+        }
     }
 
     /**
@@ -51,7 +94,7 @@ public abstract class TaskUnit<T> {
         if (this.assignedPeerId == null || !this.assignedPeerId.equals(peerId)) {
             return -1;
         }
-        long now = System.currentTimeMillis();
+        long now = clock.nowEpochMillis();
         long duration = (this.startTime > 0) ? (now - this.startTime) : -1;
         this.status = TaskStatus.COMPLETED;
         this.assignedPeerId = null;
@@ -121,7 +164,8 @@ public abstract class TaskUnit<T> {
                 taskId,
                 nextAttemptNumber,
                 peerId,
-                normalizedLeaseExpiry
+                normalizedLeaseExpiry,
+                assignmentIdGenerator
         );
         applyAssignment(nextIdentity, startAtMillis, leaseOwnerId);
         return true;
@@ -180,7 +224,7 @@ public abstract class TaskUnit<T> {
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
         this.assignmentIdentity = null;
-        this.pendingSinceMillis = System.currentTimeMillis();
+        this.pendingSinceMillis = clock.nowEpochMillis();
         this.status = TaskStatus.PENDING;
     }
 
@@ -204,7 +248,7 @@ public abstract class TaskUnit<T> {
             return FailureOutcome.TERMINAL_FAILURE;
         }
 
-        this.pendingSinceMillis = System.currentTimeMillis();
+        this.pendingSinceMillis = clock.nowEpochMillis();
         this.status = TaskStatus.PENDING;
         return FailureOutcome.RETRY_SCHEDULED;
     }
@@ -274,7 +318,7 @@ public abstract class TaskUnit<T> {
         this.startTime = 0L;
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
-        this.pendingSinceMillis = System.currentTimeMillis();
+        this.pendingSinceMillis = clock.nowEpochMillis();
         this.status = TaskStatus.PENDING;
     }
 

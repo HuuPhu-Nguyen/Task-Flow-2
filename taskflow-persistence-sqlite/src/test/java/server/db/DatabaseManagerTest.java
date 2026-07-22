@@ -342,6 +342,7 @@ class DatabaseManagerTest {
                     123L,
                     "coordinator-lease",
                     456L,
+                    ASSIGNMENT_ID,
                     taskAssignmentOutboxTemplate("peer-1", "task-outbox-0", "job-outbox")
             ).orElseThrow();
 
@@ -351,6 +352,7 @@ class DatabaseManagerTest {
             assertEquals("coordinator-lease", tasks.getFirst().leaseOwnerId());
             assertEquals(456L, tasks.getFirst().leaseExpiresAt());
             assertEquals(1, tasks.getFirst().attemptNumber());
+            assertEquals(ASSIGNMENT_ID, committed.identity().assignmentId());
             assertEquals(committed.identity().assignmentId(), tasks.getFirst().assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-outbox");
@@ -362,6 +364,7 @@ class DatabaseManagerTest {
             List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
             assertEquals(1, pending.size());
             assertEquals(committed.outboxRecord().outboxId(), pending.getFirst().outboxId());
+            assertEquals(123L, pending.getFirst().createdAt());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
             assertEquals("peer-1", pending.getFirst().message().peerNodeId());
             TaskAssignMessage message = assertInstanceOf(

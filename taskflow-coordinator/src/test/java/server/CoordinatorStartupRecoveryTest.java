@@ -8,11 +8,13 @@ import server.db.JobStateStore;
 import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
+import server.runtime.TaskFlowClock;
 
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -78,8 +80,11 @@ class CoordinatorStartupRecoveryTest {
                 ))
         )));
 
-        CoordinatorStartupRecovery.RecoveryResult result =
-                CoordinatorStartupRecovery.recoverPersistedJobs(store, 123L);
+        CoordinatorStartupRecovery.RecoveryResult result = CoordinatorStartupRecovery.recoverPersistedJobs(
+                store,
+                new FixedClock(123L),
+                () -> ASSIGNMENT_ID
+        );
 
         assertTrue(result.successful());
         assertEquals(1, result.resumedJobs().size());
@@ -93,6 +98,9 @@ class CoordinatorStartupRecoveryTest {
         TaskUnit<?> task = job.getTasks().get("task-job-resume-0");
         assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
         assertEquals(2, task.getRetryCount());
+        assertEquals(123L, task.getPendingSinceMillis());
+        assertTrue(task.markAssigned("peer-recovered", 123L));
+        assertEquals(ASSIGNMENT_ID, task.getAssignmentIdentity().orElseThrow().assignmentId());
     }
 
     @Test
@@ -697,6 +705,18 @@ class CoordinatorStartupRecoveryTest {
 
         private List<String> failedJobs() {
             return List.copyOf(failedJobs);
+        }
+    }
+
+    private record FixedClock(long epochMillis) implements TaskFlowClock {
+        @Override
+        public Instant now() {
+            return Instant.ofEpochMilli(epochMillis);
+        }
+
+        @Override
+        public long nowEpochMillis() {
+            return epochMillis;
         }
     }
 }

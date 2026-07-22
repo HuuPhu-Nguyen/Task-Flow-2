@@ -16,6 +16,10 @@ import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.registry.PeerTransport;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
 import server.scheduler.SchedulerConfig;
 import server.scheduler.SchedulerMailbox;
 import server.scheduler.TaskScheduler;
@@ -39,6 +43,8 @@ public class RabbitMqTaskCoordinatorServer {
         transport.declareTopology();
 
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
+        TaskFlowClock clock = SystemTaskFlowClock.INSTANCE;
+        AssignmentIdGenerator assignmentIdGenerator = UuidAssignmentIdGenerator.INSTANCE;
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
 
         DatabaseManager db = null;
@@ -48,7 +54,11 @@ public class RabbitMqTaskCoordinatorServer {
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
-            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(db);
+            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(
+                    db,
+                    clock,
+                    assignmentIdGenerator
+            );
             if (!recovery.successful()) {
                 db.close();
                 db = null;
@@ -78,7 +88,9 @@ public class RabbitMqTaskCoordinatorServer {
                 registry,
                 db,
                 schedulerOutput,
-                schedulerConfig
+                schedulerConfig,
+                clock,
+                assignmentIdGenerator
         );
         schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");

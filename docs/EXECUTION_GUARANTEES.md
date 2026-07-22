@@ -83,7 +83,7 @@ nodes may enable the requester role, executor role, or both.
 - `publish` and `publishToPeer` return success only after RabbitMQ confirms the publish within `TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS`.
 - A broker nack or publisher-confirm timeout is reported as a failed publish.
 - Peer-targeted publishes also use RabbitMQ mandatory-return detection; an unroutable peer-targeted publish is reported as failed.
-- With SQLite persistence available, SQLite owns RabbitMQ assignment creation: it conditionally reads a `PENDING` task, advances the persisted generation, creates the assignment UUID, and stores task state, attempt audit, and the exact serialized `TASK_ASSIGN` envelope in one transaction. Final `JOB_RESULT` publications are stored transactionally with the corresponding terminal job-state update.
+- With SQLite persistence available, SQLite owns the conditional RabbitMQ assignment transaction: it reads a `PENDING` task, advances the persisted generation, validates the scheduler-supplied assignment UUID candidate, and stores task state, attempt audit, and the exact serialized `TASK_ASSIGN` envelope in one transaction. Final `JOB_RESULT` publications are stored transactionally with the corresponding terminal job-state update.
 - Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
 - Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance is fenced by the complete persisted assignment identity, and terminal job completion is persisted once.
 - Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
@@ -172,6 +172,29 @@ observability, and forbidden edges. Normal task execution uses
 `ASSIGNED -> FAILED`. Job-wide terminalization also has an explicit
 `PENDING -> FAILED` administrative path; recovery hydration and pending
 normalization are distinguished from new execution transitions.
+
+## Deterministic Transition Inputs
+
+- `TaskFlowClock` supplies both `Instant now()` and epoch-millisecond time for
+  coordinator lifecycle decisions, startup recovery, retry/pending timestamps,
+  lease and timeout checks, persistence timestamps supplied by the scheduler,
+  and scheduler-created protocol timestamps.
+- `AssignmentIdGenerator` supplies the UUID candidate for each new assignment.
+  SQLite still calculates and conditionally commits the monotonic attempt
+  number; RabbitMQ assignment state, attempt audit, and the exact outbox
+  envelope remain one transaction.
+- Production coordinator entry points share `SystemTaskFlowClock` and
+  `UuidAssignmentIdGenerator`. Plugin-created tasks are rebound to those ports
+  after task initialization, and recovered jobs receive the same runtime ports
+  before hydration.
+- Focused tests use mutable/fixed clocks and exact UUID sequences. Evidence is
+  [`TaskUnitDeterministicPortsTest#injectedClockAndIdsDriveEveryTaskTransitionExactly`](../taskflow-spi/src/test/java/server/job/TaskUnitDeterministicPortsTest.java),
+  [`TaskSchedulerFailureTest#expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java),
+  [`TaskSchedulerPersistenceTest#brokerOutboxAssignmentStaysPendingWhenPublishFails`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  and [`CoordinatorStartupRecoveryTest#resumesRunningJobsWithPersistedPendingPayloads`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java).
+- No schema, protocol field, lease calculation, retry limit, or transport
+  acknowledgement behavior changes at this boundary. Participant liveness and
+  compatibility peer/job-ID generation remain separate infrastructure concerns.
 
 ## Retry and Timeout Policy
 

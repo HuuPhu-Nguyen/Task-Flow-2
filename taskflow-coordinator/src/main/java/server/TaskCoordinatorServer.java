@@ -22,6 +22,10 @@ import server.monitor.PeerLivenessMonitor;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
 import server.scheduler.PeerRegistrySchedulerOutput;
 import server.scheduler.SchedulerConfig;
 import server.scheduler.SchedulerMailbox;
@@ -55,6 +59,8 @@ public class TaskCoordinatorServer {
         logTcpDeprecationWarning();
 
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
+        TaskFlowClock clock = SystemTaskFlowClock.INSTANCE;
+        AssignmentIdGenerator assignmentIdGenerator = UuidAssignmentIdGenerator.INSTANCE;
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
 
         DatabaseManager db = null;
@@ -64,7 +70,11 @@ public class TaskCoordinatorServer {
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
-            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(db);
+            CoordinatorStartupRecovery.RecoveryResult recovery = CoordinatorStartupRecovery.recoverPersistedJobs(
+                    db,
+                    clock,
+                    assignmentIdGenerator
+            );
             if (!recovery.successful()) {
                 db.close();
                 db = null;
@@ -90,7 +100,9 @@ public class TaskCoordinatorServer {
                 registry,
                 db,
                 new PeerRegistrySchedulerOutput(registry),
-                schedulerConfig
+                schedulerConfig,
+                clock,
+                assignmentIdGenerator
         );
         schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
         Thread schedulerThread = new Thread(schedulerLogic, "task-scheduler");

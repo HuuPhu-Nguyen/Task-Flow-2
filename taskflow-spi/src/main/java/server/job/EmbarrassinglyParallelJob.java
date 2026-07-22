@@ -2,6 +2,10 @@ package server.job;
 
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,6 +20,7 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
     protected final Map<String, TaskUnit<T>> tasks = new ConcurrentHashMap<>();
 
     protected final AtomicInteger completedCount = new AtomicInteger(0);
+    private TaskFlowClock clock = SystemTaskFlowClock.INSTANCE;
 
     public EmbarrassinglyParallelJob(String jobId, String requesterNodeId, String taskType) {
         this.jobId = jobId;
@@ -24,6 +29,19 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
     }
 
     public abstract void initializeTasks(JobSubmitMessage message);
+
+    /**
+     * Applies runtime transition dependencies to every task created by a plugin.
+     */
+    public synchronized void configureTransitionPorts(TaskFlowClock clock,
+                                                      AssignmentIdGenerator assignmentIdGenerator) {
+        this.clock = Objects.requireNonNull(clock, "clock");
+        AssignmentIdGenerator generator = Objects.requireNonNull(
+                assignmentIdGenerator,
+                "assignmentIdGenerator"
+        );
+        tasks.values().forEach(task -> task.configureTransitionPorts(this.clock, generator));
+    }
 
     public record TaskCompletion(boolean accepted, long durationMs) {}
 
@@ -86,7 +104,7 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
                 reportingPeerId,
                 current.attemptNumber(),
                 current.assignmentId(),
-                System.currentTimeMillis(),
+                clock.nowEpochMillis(),
                 prepareTaskResult(rawResultData)
         );
     }

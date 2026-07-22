@@ -118,9 +118,12 @@ not new business-state edges.
   `TASK_ASSIGN` envelope in the same transaction as the task/audit writes.
   Direct-output compatibility mode has no durable outbox.
 - **In-memory projection:** RabbitMQ mode installs the identity returned by the
-  committed store transaction. Direct-output mode creates the identity in
-  `TaskUnit`, persists that exact tuple, then sends. Participant active-work
-  capacity increments once.
+  committed store transaction. The scheduler supplies an assignment UUID from
+  `AssignmentIdGenerator`; SQLite still owns the conditional next-attempt
+  number and atomically validates/persists that UUID with the task, audit, and
+  outbox row. Direct-output mode creates the identity through the same injected
+  generator in `TaskUnit`, persists that exact tuple, then sends. Participant
+  active-work capacity increments once.
 - **Idempotent replay:** the SQLite predicate accepts only `PENDING`. Repeating
   assignment creation for an already assigned task changes nothing. Replaying
   the committed outbox row republishes the same attempt and UUID.
@@ -492,8 +495,17 @@ never one ambiguous edge.
 
 ## Current Boundaries and Follow-on Ownership
 
-- Time and assignment UUID creation still use system sources in runtime paths;
-  deterministic ports are TF-0202.
+- Coordinator lifecycle time comes from `TaskFlowClock`; assignment UUID
+  candidates come from `AssignmentIdGenerator`. Production entry points share
+  `SystemTaskFlowClock` and `UuidAssignmentIdGenerator` across startup recovery,
+  the scheduler, plugin-created task units, scheduler protocol timestamps, and
+  transactional assignment creation. Tests can instead bind fixed/mutable
+  clocks and exact UUID sequences. The database retains ownership of the
+  conditional monotonic attempt number and the atomic assignment/outbox commit.
+- These ports deliberately cover coordinator task/job transition inputs.
+  Participant liveness sampling, compatibility peer/job-ID creation, and
+  payload-storage keys are separate runtime concerns and are not transition
+  decision inputs in this state machine.
 - Transition decisions and infrastructure effects remain distributed across
   scheduler, domain object, and SQLite adapter code; TF-0203/TF-0204 will
   extract the pure decision/effect boundary.

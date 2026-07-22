@@ -55,8 +55,9 @@ The implemented contract records:
 
 Covered behavior:
 
-- For RabbitMQ, SQLite reads only a `PENDING` task, calculates persisted
-  generation plus one, creates the assignment UUID, and commits task state,
+- For RabbitMQ, the scheduler obtains an assignment UUID candidate from its
+  injected generator. SQLite reads only a `PENDING` task, calculates persisted
+  generation plus one, validates the supplied UUID, and commits task state,
   attempt audit, and the exact `TASK_ASSIGN` outbox envelope together before
   dispatch. Retrying publication reuses that envelope without advancing the
   generation.

@@ -19,6 +19,7 @@ import server.registry.PeerRegistryRecord;
 import server.registry.PeerRegistryStore;
 import server.registry.PeerStatus;
 import server.registry.PeerTransport;
+import server.runtime.UuidAssignmentIdGenerator;
 import transport.TransportRoute;
 
 import java.sql.*;
@@ -758,6 +759,18 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private AssignmentIdentity nextAssignmentIdentity(String taskId,
                                                        String peerId,
                                                        long leaseExpiresAt) throws SQLException {
+        return nextAssignmentIdentity(
+                taskId,
+                peerId,
+                leaseExpiresAt,
+                UuidAssignmentIdGenerator.INSTANCE.nextAssignmentId()
+        );
+    }
+
+    private AssignmentIdentity nextAssignmentIdentity(String taskId,
+                                                       String peerId,
+                                                       long leaseExpiresAt,
+                                                       String assignmentId) throws SQLException {
         String sql = "SELECT attempt_number FROM tasks WHERE task_id=? AND status='PENDING'";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, taskId);
@@ -771,7 +784,13 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 } catch (ArithmeticException e) {
                     throw new SQLException("Assignment attempt number overflow for task " + taskId, e);
                 }
-                return AssignmentIdentity.create(taskId, nextAttemptNumber, peerId, leaseExpiresAt);
+                return new AssignmentIdentity(
+                        taskId,
+                        nextAttemptNumber,
+                        assignmentId,
+                        peerId,
+                        leaseExpiresAt
+                );
             }
         }
     }
@@ -1132,6 +1151,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             long startedAt,
             String leaseOwnerId,
             long leaseExpiresAt,
+            String assignmentId,
             OutboxMessage messageTemplate) {
         if (!outboxTemplateMatchesTask(messageTemplate, taskId, peerId)) {
             LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_outbox_template",
@@ -1143,7 +1163,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                AssignmentIdentity identity = nextAssignmentIdentity(taskId, peerId, leaseExpiresAt);
+                AssignmentIdentity identity = nextAssignmentIdentity(
+                        taskId,
+                        peerId,
+                        leaseExpiresAt,
+                        assignmentId
+                );
                 if (identity == null) {
                     conn.rollback();
                     return Optional.empty();
@@ -1155,7 +1180,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 }
                 OutboxRecord record = insertBrokerOutboxInCurrentTransaction(
                         committedMessage,
-                        System.currentTimeMillis()
+                        startedAt
                 );
                 CommittedTaskAssignment committed = new CommittedTaskAssignment(identity, record);
                 conn.commit();

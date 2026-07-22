@@ -200,8 +200,13 @@ rules below apply wherever that component appears:
 This matrix exposes target behavior before implementation so later mechanisms
 can be judged against a stable failure contract. On the current baseline:
 
-- assignment generation, UUID creation, task/audit persistence, and exact
-  `TASK_ASSIGN` outbox serialization share one SQLite transaction;
+- the scheduler obtains an assignment UUID candidate from the injected
+  generator, while SQLite conditionally owns the next attempt number and
+  atomically commits that UUID, task/audit state, and exact `TASK_ASSIGN`
+  outbox serialization;
+- lifecycle/recovery time and assignment UUID candidates are injectable; exact
+  clock and ID tests cover task transitions, timeout/lease expiry, recovery,
+  and the broker-outbox assignment boundary without sleeping for expiry;
 - successful-result commitment is database-conditional on the full assignment
   tuple, and the complete same-participant ABA sequence is proved at the
   store boundary, through deterministic scheduler/SQLite integration, and

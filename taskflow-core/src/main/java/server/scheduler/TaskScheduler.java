@@ -8,6 +8,10 @@ import server.db.JobStateStore;
 import server.job.*;
 import server.model.MessageEnvelope;
 import server.registry.*;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -22,6 +26,8 @@ public class TaskScheduler implements Runnable {
     private final SchedulerOutput output;
     private final SchedulerConfig config;
     private final String leaseOwnerId;
+    private final TaskFlowClock clock;
+    private final AssignmentIdGenerator assignmentIdGenerator;
     private final Map<String, EmbarrassinglyParallelJob<?,?>> activeJobs = new LinkedHashMap<>();
     private final Map<String, PendingJobCompletion> pendingJobCompletions = new LinkedHashMap<>();
     private final Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
@@ -45,12 +51,62 @@ public class TaskScheduler implements Runnable {
                          JobStateStore db,
                          SchedulerOutput output,
                          SchedulerConfig config) {
+        this(
+                mailbox,
+                registry,
+                db,
+                output,
+                config,
+                SystemTaskFlowClock.INSTANCE,
+                UuidAssignmentIdGenerator.INSTANCE
+        );
+    }
+
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
+                         PeerRegistry registry,
+                         JobStateStore db,
+                         SchedulerOutput output,
+                         SchedulerConfig config,
+                         TaskFlowClock clock,
+                         AssignmentIdGenerator assignmentIdGenerator) {
+        this(
+                mailbox,
+                registry,
+                db,
+                output,
+                config,
+                clock,
+                assignmentIdGenerator,
+                newLeaseOwnerId()
+        );
+    }
+
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
+                         PeerRegistry registry,
+                         JobStateStore db,
+                         SchedulerOutput output,
+                         SchedulerConfig config,
+                         TaskFlowClock clock,
+                         AssignmentIdGenerator assignmentIdGenerator,
+                         String leaseOwnerId) {
         this.inboundMailbox = mailbox;
         this.registry = registry;
         this.db = db;
         this.output = output;
         this.config = config == null ? SchedulerConfig.defaults() : config;
-        this.leaseOwnerId = "COORDINATOR_" + UUID.randomUUID();
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.assignmentIdGenerator = Objects.requireNonNull(
+                assignmentIdGenerator,
+                "assignmentIdGenerator"
+        );
+        if (leaseOwnerId == null || leaseOwnerId.isBlank()) {
+            throw new IllegalArgumentException("leaseOwnerId is required");
+        }
+        this.leaseOwnerId = leaseOwnerId.trim();
+    }
+
+    private static String newLeaseOwnerId() {
+        return "COORDINATOR_" + UuidAssignmentIdGenerator.INSTANCE.nextAssignmentId();
     }
 
     @Override
@@ -161,7 +217,7 @@ public class TaskScheduler implements Runnable {
     }
 
     private void checkTimeouts() {
-        long now = System.currentTimeMillis();
+        long now = clock.nowEpochMillis();
         Map<String, String> jobsToFail = new LinkedHashMap<>();
 
         for (EmbarrassinglyParallelJob<?,?> job : activeJobs.values()) {
@@ -238,6 +294,7 @@ public class TaskScheduler implements Runnable {
                 String requesterIdentityKey = requesterIdentityKey(submit);
                 EmbarrassinglyParallelJob<?,?> job = JobFactory.create(submit, envelope.fromNodeId());
                 job.initializeTasks(submit);
+                job.configureTransitionPorts(clock, assignmentIdGenerator);
                 if (job.getTasks().isEmpty()) {
                     throw new IllegalArgumentException("Job must create at least one task.");
                 }
@@ -289,7 +346,7 @@ public class TaskScheduler implements Runnable {
         } catch (MessageValidationException e) {
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
-                    java.time.Instant.now().toString(),
+                    clock.now().toString(),
                     safeJobResultId(jobId),
                     "",
                     false,
@@ -329,7 +386,7 @@ public class TaskScheduler implements Runnable {
             }
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
-                    java.time.Instant.now().toString(),
+                    clock.now().toString(),
                     jobId,
                     activeJob.getTaskType(),
                     false,
@@ -342,7 +399,7 @@ public class TaskScheduler implements Runnable {
         if (db == null) {
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
-                    java.time.Instant.now().toString(),
+                    clock.now().toString(),
                     jobId,
                     "",
                     false,
@@ -367,7 +424,7 @@ public class TaskScheduler implements Runnable {
             }
             sendRequestedJobResult(requesterId, new JobResultMessage(
                     "COORDINATOR",
-                    java.time.Instant.now().toString(),
+                    clock.now().toString(),
                     completed.jobId(),
                     completed.taskType(),
                     true,
@@ -379,7 +436,7 @@ public class TaskScheduler implements Runnable {
 
         sendRequestedJobResult(requesterId, new JobResultMessage(
                 "COORDINATOR",
-                java.time.Instant.now().toString(),
+                clock.now().toString(),
                 jobId,
                 "",
                 false,
@@ -424,7 +481,7 @@ public class TaskScheduler implements Runnable {
                         task,
                         outcome,
                         normalizedReason,
-                        System.currentTimeMillis()
+                        clock.nowEpochMillis()
                 );
                 logErrorEvent("task_peer_unavailable", fields(
                         "job_id", job.getJobId(),
@@ -498,7 +555,7 @@ public class TaskScheduler implements Runnable {
             return;
         }
 
-        LeaseExpiryResult leaseExpiry = expireTaskLeaseIfNeeded(job, task, System.currentTimeMillis());
+        LeaseExpiryResult leaseExpiry = expireTaskLeaseIfNeeded(job, task, clock.nowEpochMillis());
         if (leaseExpiry.handled()) {
             if (leaseExpiry.jobFailureReason() != null) {
                 failJob(job, leaseExpiry.jobFailureReason());
@@ -520,7 +577,7 @@ public class TaskScheduler implements Runnable {
                     task,
                     outcome,
                     result.getErrorMessage(),
-                    System.currentTimeMillis()
+                    clock.nowEpochMillis()
             );
             logErrorEvent("task_failed", fields(
                     "job_id", job.getJobId(),
@@ -539,7 +596,7 @@ public class TaskScheduler implements Runnable {
             return;
         }
 
-        long completedAt = System.currentTimeMillis();
+        long completedAt = clock.nowEpochMillis();
         long startedAt = task.getStartTime();
         long durationMs = startedAt > 0L ? Math.max(0L, completedAt - startedAt) : 0L;
         boolean matchesInMemory = task.matchesAssignment(
@@ -619,7 +676,7 @@ public class TaskScheduler implements Runnable {
     }
 
     private void checkLeaseExpirations() {
-        long now = System.currentTimeMillis();
+        long now = clock.nowEpochMillis();
         Map<String, String> jobsToFail = new LinkedHashMap<>();
 
         for (EmbarrassinglyParallelJob<?, ?> job : activeJobs.values()) {
@@ -720,7 +777,7 @@ public class TaskScheduler implements Runnable {
 
     private void assign(EmbarrassinglyParallelJob<?,?> job, TaskUnit<?> task, PeerInfo peer) {
         long pendingSince = task.getPendingSinceMillis();
-        long startedAt = System.currentTimeMillis();
+        long startedAt = clock.nowEpochMillis();
         long leaseExpiresAt = leaseExpiresAt(startedAt);
         long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
         BrokerOutboxStore outboxStore = brokerOutboxStore();
@@ -803,7 +860,7 @@ public class TaskScheduler implements Runnable {
                             task.getRetryCount(),
                             JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
                             e.getMessage(),
-                            System.currentTimeMillis()
+                            clock.nowEpochMillis()
                     )
             )) {
                 failJob(job, persistenceFailureReason("markTaskRetried"));
@@ -843,6 +900,7 @@ public class TaskScheduler implements Runnable {
                         startedAt,
                         leaseOwnerId,
                         leaseExpiresAt,
+                        assignmentIdGenerator.nextAssignmentId(),
                         outboxTemplate
                 );
         if (committedAssignment.isEmpty()) {
@@ -900,7 +958,7 @@ public class TaskScheduler implements Runnable {
     private boolean publishBrokerOutboxRecord(BrokerOutboxStore outboxStore,
                                               BrokerOutboxPublisher outboxPublisher,
                                               BrokerOutboxStore.OutboxRecord record) {
-        long attemptedAt = System.currentTimeMillis();
+        long attemptedAt = clock.nowEpochMillis();
         try {
             boolean published = outboxPublisher.publishOutbox(record);
             if (!published) {
@@ -1040,7 +1098,7 @@ public class TaskScheduler implements Runnable {
         List<Object> compatibilityResults = compatibilityResults(job, finalPayload);
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
-                java.time.Instant.now().toString(),
+                clock.now().toString(),
                 job.getJobId(),
                 job.getTaskType(),
                 success,
@@ -1063,7 +1121,7 @@ public class TaskScheduler implements Runnable {
     }
 
     private void tryDeliverJobResult(PendingJobCompletion completion, boolean force) {
-        long now = System.currentTimeMillis();
+        long now = clock.nowEpochMillis();
         if (!force && now - completion.lastAttemptAtMillis < RESULT_DELIVERY_RETRY_INTERVAL_MILLIS) {
             return;
         }
@@ -1160,7 +1218,7 @@ public class TaskScheduler implements Runnable {
     private List<BrokerOutboxStore.TaskFailureUpdate> taskFailureUpdatesForJobFailure(
             PendingJobCompletion completion
     ) {
-        long failedAt = System.currentTimeMillis();
+        long failedAt = clock.nowEpochMillis();
         String reason = completion.reason == null || completion.reason.isBlank()
                 ? "job_failed"
                 : completion.reason;
@@ -1216,7 +1274,7 @@ public class TaskScheduler implements Runnable {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
         boolean persisted = true;
         if (db != null) {
-            long failedAt = System.currentTimeMillis();
+            long failedAt = clock.nowEpochMillis();
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
@@ -1258,7 +1316,7 @@ public class TaskScheduler implements Runnable {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
         boolean persisted = true;
         if (!completion.success && db != null) {
-            long failedAt = System.currentTimeMillis();
+            long failedAt = clock.nowEpochMillis();
             for (TaskUnit<?> task : job.getTasks().values()) {
                 if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
                         && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
@@ -1323,7 +1381,7 @@ public class TaskScheduler implements Runnable {
     private void sendJobStartFailure(String requesterNodeId, JobSubmitMessage submit, String reason) throws Exception {
         JobResultMessage response = new JobResultMessage(
                 "COORDINATOR",
-                java.time.Instant.now().toString(),
+                clock.now().toString(),
                 safeJobResultId(submit.getJobId()),
                 safeTaskType(submit.getTaskType()),
                 false,
@@ -1404,7 +1462,7 @@ public class TaskScheduler implements Runnable {
 
         sendRequestedJobResult(requesterNodeId, new JobResultMessage(
                 "COORDINATOR",
-                java.time.Instant.now().toString(),
+                clock.now().toString(),
                 jobId == null ? "" : jobId,
                 taskType == null ? "" : taskType,
                 false,
@@ -1449,6 +1507,7 @@ public class TaskScheduler implements Runnable {
             if (job == null || activeJobs.containsKey(job.getJobId())) {
                 continue;
             }
+            job.configureTransitionPorts(clock, assignmentIdGenerator);
             activeJobs.put(job.getJobId(), job);
             String tokenHash = tokenHashes.get(job.getJobId());
             if (RequesterTokens.hasTokenHash(tokenHash)) {
@@ -1477,7 +1536,7 @@ public class TaskScheduler implements Runnable {
     }
 
     private void updateMetricsAndMaybeLog() {
-        long now = System.currentTimeMillis();
+        long now = clock.nowEpochMillis();
         metrics.setQueueDepth(inboundMailbox.size());
         metrics.setActiveJobs(activeJobs.size());
         if (now - lastMetricsLogAtMillis < config.metricsLogIntervalMillis()) {

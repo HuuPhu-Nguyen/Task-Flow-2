@@ -11,8 +11,14 @@ import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.TaskFlowClock;
 import transport.TransportAcknowledgement;
 
+import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -28,6 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskSchedulerFailureTest {
+    private static final String ASSIGNMENT_ONE = "00000000-0000-0000-0000-000000000201";
+    private static final String ASSIGNMENT_TWO = "00000000-0000-0000-0000-000000000202";
 
     @Test
     void unsupportedJobTypeReturnsFailedJobResult() throws Exception {
@@ -656,6 +664,8 @@ class TaskSchedulerFailureTest {
     @Test
     void expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(1_000_000L);
+        DeterministicIds assignmentIds = new DeterministicIds(ASSIGNMENT_ONE, ASSIGNMENT_TWO);
         SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
                 "TASKFLOW_TASK_TIMEOUT_MS", "100000",
                 "TASKFLOW_TASK_LEASE_MS", "150",
@@ -668,7 +678,16 @@ class TaskSchedulerFailureTest {
                 List.of("TEST_TASK")
         ));
         MultiAssignmentOutput output = new MultiAssignmentOutput();
-        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                config,
+                clock,
+                assignmentIds,
+                "COORDINATOR_test"
+        );
         Thread schedulerThread = new Thread(scheduler, "scheduler-expired-lease-retry-test");
         schedulerThread.start();
 
@@ -678,6 +697,8 @@ class TaskSchedulerFailureTest {
             MultiAssignmentOutput.Assignment first = output.awaitAssignment();
             assertNotNull(first);
             assertEquals("peer-1", first.peerId());
+            assertEquals(ASSIGNMENT_ONE, first.task().getAssignmentId());
+            assertEquals(1_000_150L, first.task().getLeaseExpiresAtEpochMillis());
 
             registry.remove("peer-1");
             registry.register("peer-2", new PeerInfo(
@@ -685,11 +706,22 @@ class TaskSchedulerFailureTest {
                     config,
                     List.of("TEST_TASK")
             ));
+            clock.advanceMillis(150L);
+            mailbox.put(new MessageEnvelope(
+                    new PeerDisconnectedMessage(
+                            "clock-wakeup",
+                            clock.now().toString(),
+                            "test_clock_advanced"
+                    ),
+                    "clock-wakeup"
+            ));
 
             MultiAssignmentOutput.Assignment retry = output.awaitAssignment();
             assertNotNull(retry);
             assertEquals("peer-2", retry.peerId());
             assertEquals(first.task().getTaskId(), retry.task().getTaskId());
+            assertEquals(ASSIGNMENT_TWO, retry.task().getAssignmentId());
+            assertEquals(1_000_300L, retry.task().getLeaseExpiresAtEpochMillis());
 
             mailbox.put(new MessageEnvelope(successResult(first.task(), "stale-result"), "peer-1"));
             mailbox.put(new MessageEnvelope(successResult(retry.task(), "accepted-result"), "peer-2"));
@@ -781,6 +813,7 @@ class TaskSchedulerFailureTest {
     @Test
     void taskTimeoutAtRetryLimitReturnsFailedJobResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(2_000_000L);
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         PeerInfo peer = new PeerInfo(
                 "slow-peer",
@@ -793,7 +826,16 @@ class TaskSchedulerFailureTest {
                 "TASKFLOW_TASK_TIMEOUT_MS", "1",
                 "TASKFLOW_MAX_TASK_RETRIES", "1"
         ));
-        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                config,
+                clock,
+                () -> ASSIGNMENT_ONE,
+                "COORDINATOR_test"
+        );
         Thread schedulerThread = new Thread(scheduler, "scheduler-timeout-failure-test");
         schedulerThread.start();
 
@@ -801,10 +843,20 @@ class TaskSchedulerFailureTest {
             mailbox.put(new MessageEnvelope(testJob("job-timeout", List.of("payload")), "requester-1"));
 
             assertTrue(output.awaitTask());
+            clock.advanceMillis(2L);
+            mailbox.put(new MessageEnvelope(
+                    new PeerDisconnectedMessage(
+                            "clock-wakeup",
+                            clock.now().toString(),
+                            "test_clock_advanced"
+                    ),
+                    "clock-wakeup"
+            ));
             assertTrue(output.awaitResult(2_000));
             JobResultMessage result = output.result();
             assertNotNull(result);
             assertEquals("job-timeout", result.getJobId());
+            assertEquals(clock.now().toString(), result.getTime());
             assertFalse(result.isSuccessful());
             assertTrue(result.getErrorMessage().contains("exceeded max retries"));
             assertEquals(0, peer.getActiveTasks());
@@ -1182,6 +1234,44 @@ class TaskSchedulerFailureTest {
 
         int rejectCount() {
             return rejectCount.get();
+        }
+    }
+
+    private static final class MutableClock implements TaskFlowClock {
+        private long epochMillis;
+
+        private MutableClock(long epochMillis) {
+            this.epochMillis = epochMillis;
+        }
+
+        private synchronized void advanceMillis(long deltaMillis) {
+            epochMillis = Math.addExact(epochMillis, deltaMillis);
+        }
+
+        @Override
+        public synchronized Instant now() {
+            return Instant.ofEpochMilli(epochMillis);
+        }
+
+        @Override
+        public synchronized long nowEpochMillis() {
+            return epochMillis;
+        }
+    }
+
+    private static final class DeterministicIds implements AssignmentIdGenerator {
+        private final Deque<String> ids;
+
+        private DeterministicIds(String... ids) {
+            this.ids = new ArrayDeque<>(Arrays.asList(ids));
+        }
+
+        @Override
+        public synchronized String nextAssignmentId() {
+            if (ids.isEmpty()) {
+                throw new IllegalStateException("No deterministic assignment ID remains.");
+            }
+            return ids.removeFirst();
         }
     }
 }

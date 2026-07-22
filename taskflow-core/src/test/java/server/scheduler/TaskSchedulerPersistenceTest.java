@@ -23,7 +23,9 @@ import server.job.TaskUnit;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
+import server.runtime.TaskFlowClock;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.ArrayDeque;
 import java.util.Collection;
@@ -261,6 +263,7 @@ class TaskSchedulerPersistenceTest {
     @Test
     void timeoutPersistsTerminalAttemptHistory() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(10_000L);
         InMemoryPeerRegistry registry = registryWithPeer("slow-peer");
         RecordingJobStateStore store = new RecordingJobStateStore();
         TaskCapturingOutput output = new TaskCapturingOutput();
@@ -268,7 +271,16 @@ class TaskSchedulerPersistenceTest {
                 "TASKFLOW_TASK_TIMEOUT_MS", "1",
                 "TASKFLOW_MAX_TASK_RETRIES", "1"
         ));
-        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                config,
+                clock,
+                () -> "00000000-0000-0000-0000-000000000302",
+                "COORDINATOR_test"
+        );
         Thread schedulerThread = new Thread(scheduler, "scheduler-attempt-timeout-history-test");
         schedulerThread.start();
 
@@ -276,6 +288,15 @@ class TaskSchedulerPersistenceTest {
             mailbox.put(new MessageEnvelope(testJob("job-timeout-history", List.of("payload")), "requester-1"));
 
             assertTrue(output.awaitTask());
+            clock.advanceMillis(2L);
+            mailbox.put(new MessageEnvelope(
+                    new protocol.PeerDisconnectedMessage(
+                            "clock-wakeup",
+                            clock.now().toString(),
+                            "test_clock_advanced"
+                    ),
+                    "clock-wakeup"
+            ));
             assertTrue(output.awaitResult());
             assertTrue(store.awaitJobFailed());
 
@@ -285,6 +306,7 @@ class TaskSchedulerPersistenceTest {
             assertEquals("slow-peer", attempt.peerId());
             assertEquals(JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE, attempt.outcome());
             assertEquals("task_timeout", attempt.failureReason());
+            assertEquals(10_002L, attempt.finishedAt());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -438,10 +460,21 @@ class TaskSchedulerPersistenceTest {
     @Test
     void brokerOutboxAssignmentStaysPendingWhenPublishFails() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(5_000L);
+        String assignmentId = "00000000-0000-0000-0000-000000000301";
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
         OutboxCapturingOutput output = new OutboxCapturingOutput(false);
-        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults(),
+                clock,
+                () -> assignmentId,
+                "COORDINATOR_test"
+        );
         Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-assignment-failure-test");
         schedulerThread.start();
 
@@ -461,9 +494,12 @@ class TaskSchedulerPersistenceTest {
             assertEquals(1, pending.size());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
             assertEquals("peer-1", pending.getFirst().message().peerNodeId());
+            assertEquals(5_000L, pending.getFirst().createdAt());
             JobStateStore.TaskAttemptRecord attempt = store.loadTaskAttempts("job-outbox-assignment").getFirst();
             assertEquals(attempt.attemptNumber(), publishedAssignment.getAttemptNumber());
             assertEquals(attempt.assignmentId(), publishedAssignment.getAssignmentId());
+            assertEquals(assignmentId, publishedAssignment.getAssignmentId());
+            assertEquals(125_000L, publishedAssignment.getLeaseExpiresAtEpochMillis());
             assertEquals(attempt.leaseExpiresAt(), publishedAssignment.getLeaseExpiresAtEpochMillis());
             assertTrue(awaitFailedOutboxIds(store, List.of(1L)));
             assertEquals(List.of(1L), store.failedOutboxIds());
@@ -2168,6 +2204,7 @@ class TaskSchedulerPersistenceTest {
                 long startedAt,
                 String leaseOwnerId,
                 long leaseExpiresAt,
+                String assignmentId,
                 OutboxMessage messageTemplate) {
             int attemptNumber = (int) outboxRecords.stream()
                     .map(OutboxRecord::message)
@@ -2176,9 +2213,10 @@ class TaskSchedulerPersistenceTest {
                     .map(TaskAssignMessage.class::cast)
                     .filter(message -> taskId.equals(message.getTaskId()))
                     .count() + 1;
-            AssignmentIdentity identity = AssignmentIdentity.create(
+            AssignmentIdentity identity = new AssignmentIdentity(
                     taskId,
                     attemptNumber,
+                    assignmentId,
                     peerId,
                     leaseExpiresAt
             );
@@ -2205,7 +2243,15 @@ class TaskSchedulerPersistenceTest {
             )) {
                 return Optional.empty();
             }
-            OutboxRecord record = enqueueBrokerOutbox(committedMessage).orElseThrow();
+            OutboxRecord record = new OutboxRecord(
+                    nextOutboxId++,
+                    committedMessage,
+                    startedAt,
+                    0,
+                    0L,
+                    ""
+            );
+            outboxRecords.add(record);
             return Optional.of(new CommittedTaskAssignment(identity, record));
         }
 
@@ -2265,6 +2311,28 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<Long> publishedOutboxIds() {
             return List.copyOf(publishedOutboxIds);
+        }
+    }
+
+    private static final class MutableClock implements TaskFlowClock {
+        private long epochMillis;
+
+        private MutableClock(long epochMillis) {
+            this.epochMillis = epochMillis;
+        }
+
+        private synchronized void advanceMillis(long deltaMillis) {
+            epochMillis = Math.addExact(epochMillis, deltaMillis);
+        }
+
+        @Override
+        public synchronized Instant now() {
+            return Instant.ofEpochMilli(epochMillis);
+        }
+
+        @Override
+        public synchronized long nowEpochMillis() {
+            return epochMillis;
         }
     }
 }

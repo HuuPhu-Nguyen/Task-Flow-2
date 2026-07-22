@@ -1,5 +1,9 @@
 package server.job;
 
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.UuidAssignmentIdGenerator;
+
+import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -32,10 +36,25 @@ public record AssignmentIdentity(
                                              int attemptNumber,
                                              String workerId,
                                              long leaseExpiresAtEpochMillis) {
+        return create(
+                taskId,
+                attemptNumber,
+                workerId,
+                leaseExpiresAtEpochMillis,
+                UuidAssignmentIdGenerator.INSTANCE
+        );
+    }
+
+    public static AssignmentIdentity create(String taskId,
+                                             int attemptNumber,
+                                             String workerId,
+                                             long leaseExpiresAtEpochMillis,
+                                             AssignmentIdGenerator assignmentIdGenerator) {
         return new AssignmentIdentity(
                 taskId,
                 attemptNumber,
-                UUID.randomUUID().toString(),
+                Objects.requireNonNull(assignmentIdGenerator, "assignmentIdGenerator")
+                        .nextAssignmentId(),
                 workerId,
                 leaseExpiresAtEpochMillis
         );

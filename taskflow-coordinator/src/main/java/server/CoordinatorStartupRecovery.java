@@ -9,12 +9,17 @@ import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
 import server.job.TaskUnit;
+import server.runtime.AssignmentIdGenerator;
+import server.runtime.SystemTaskFlowClock;
+import server.runtime.TaskFlowClock;
+import server.runtime.UuidAssignmentIdGenerator;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 final class CoordinatorStartupRecovery {
@@ -24,7 +29,14 @@ final class CoordinatorStartupRecovery {
     }
 
     static boolean reconcileAbandonedJobs(JobStateStore store) {
-        return reconcileAbandonedJobs(store, System.currentTimeMillis());
+        return reconcileAbandonedJobs(store, SystemTaskFlowClock.INSTANCE);
+    }
+
+    static boolean reconcileAbandonedJobs(JobStateStore store, TaskFlowClock clock) {
+        return reconcileAbandonedJobs(
+                store,
+                Objects.requireNonNull(clock, "clock").nowEpochMillis()
+        );
     }
 
     static boolean reconcileAbandonedJobs(JobStateStore store, long completedAt) {
@@ -41,10 +53,38 @@ final class CoordinatorStartupRecovery {
     }
 
     static RecoveryResult recoverPersistedJobs(JobStateStore store) {
-        return recoverPersistedJobs(store, System.currentTimeMillis());
+        return recoverPersistedJobs(
+                store,
+                SystemTaskFlowClock.INSTANCE,
+                UuidAssignmentIdGenerator.INSTANCE
+        );
     }
 
     static RecoveryResult recoverPersistedJobs(JobStateStore store, long completedAt) {
+        return recoverPersistedJobs(
+                store,
+                completedAt,
+                new EpochMillisClock(completedAt),
+                UuidAssignmentIdGenerator.INSTANCE
+        );
+    }
+
+    static RecoveryResult recoverPersistedJobs(JobStateStore store,
+                                               TaskFlowClock clock,
+                                               AssignmentIdGenerator assignmentIdGenerator) {
+        TaskFlowClock requiredClock = Objects.requireNonNull(clock, "clock");
+        return recoverPersistedJobs(
+                store,
+                requiredClock.nowEpochMillis(),
+                requiredClock,
+                Objects.requireNonNull(assignmentIdGenerator, "assignmentIdGenerator")
+        );
+    }
+
+    private static RecoveryResult recoverPersistedJobs(JobStateStore store,
+                                                        long completedAt,
+                                                        TaskFlowClock clock,
+                                                        AssignmentIdGenerator assignmentIdGenerator) {
         List<JobStateStore.ResumableJobState> persistedJobs = store.loadRunningJobsForResume();
         if (persistedJobs.isEmpty()) {
             return new RecoveryResult(true, List.of(), Map.of(), Map.of(), 0);
@@ -58,7 +98,13 @@ final class CoordinatorStartupRecovery {
 
         for (JobStateStore.ResumableJobState persistedJob : persistedJobs) {
             try {
-                EmbarrassinglyParallelJob<?, ?> restored = restoreJob(store, persistedJob, completedAt);
+                EmbarrassinglyParallelJob<?, ?> restored = restoreJob(
+                        store,
+                        persistedJob,
+                        completedAt,
+                        clock,
+                        assignmentIdGenerator
+                );
                 if (restored == null) {
                     if (!store.markRunningJobFailedOnStartup(persistedJob.jobId(), completedAt)) {
                         successful = false;
@@ -97,7 +143,9 @@ final class CoordinatorStartupRecovery {
 
     private static EmbarrassinglyParallelJob<?, ?> restoreJob(JobStateStore store,
                                                               JobStateStore.ResumableJobState persistedJob,
-                                                              long recoveredAt) {
+                                                              long recoveredAt,
+                                                              TaskFlowClock clock,
+                                                              AssignmentIdGenerator assignmentIdGenerator) {
         if (!RequesterTokens.hasTokenHash(persistedJob.requesterTokenHash())) {
             LOGGER.warn("event=running_job_not_resumable job_id={} reason=missing_requester_token_hash",
                     persistedJob.jobId());
@@ -120,7 +168,7 @@ final class CoordinatorStartupRecovery {
 
         JobSubmitMessage submit = new JobSubmitMessage(
                 persistedJob.requesterId(),
-                Instant.now().toString(),
+                Instant.ofEpochMilli(recoveredAt).toString(),
                 persistedJob.jobId(),
                 persistedJob.taskType(),
                 persistedJob.tasks().stream()
@@ -131,6 +179,7 @@ final class CoordinatorStartupRecovery {
         );
         EmbarrassinglyParallelJob<?, ?> job = JobFactory.create(submit, persistedJob.requesterId());
         job.initializeTasks(submit);
+        job.configureTransitionPorts(clock, assignmentIdGenerator);
         if (job.getTasks().size() != persistedJob.tasks().size()) {
             LOGGER.warn("event=running_job_not_resumable job_id={} reason=task_count_mismatch expected={} actual={}",
                     persistedJob.jobId(), persistedJob.tasks().size(), job.getTasks().size());
@@ -259,6 +308,18 @@ final class CoordinatorStartupRecovery {
 
     private static boolean hasCompleteLeaseMetadata(JobStateStore.ResumableTaskState taskState) {
         return hasText(taskState.leaseOwnerId()) && taskState.leaseExpiresAt() > 0L;
+    }
+
+    private record EpochMillisClock(long epochMillis) implements TaskFlowClock {
+        @Override
+        public Instant now() {
+            return Instant.ofEpochMilli(epochMillis);
+        }
+
+        @Override
+        public long nowEpochMillis() {
+            return epochMillis;
+        }
     }
 
     record RecoveryResult(boolean successful,

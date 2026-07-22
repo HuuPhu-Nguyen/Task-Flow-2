@@ -4,6 +4,7 @@ import protocol.Message;
 import protocol.MessageValidator;
 import protocol.TaskAssignMessage;
 import server.job.AssignmentIdentity;
+import server.runtime.UuidAssignmentIdGenerator;
 import transport.TransportRoute;
 
 import java.util.Collection;
@@ -100,7 +101,30 @@ public interface BrokerOutboxStore {
     /**
      * Creates the next assignment generation and its exact TASK_ASSIGN outbox
      * row in one durable transaction. The supplied message is an identity-free
-     * routing/payload template; the store owns the generation and UUID.
+     * routing/payload template. This compatibility overload uses the production
+     * UUID adapter; deterministic callers should supply an assignment ID below.
+     */
+    default Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
+            String taskId,
+            String peerId,
+            long startedAt,
+            String leaseOwnerId,
+            long leaseExpiresAt,
+            OutboxMessage messageTemplate) {
+        return createTaskAssignmentAndEnqueueBrokerOutbox(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                UuidAssignmentIdGenerator.INSTANCE.nextAssignmentId(),
+                messageTemplate
+        );
+    }
+
+    /**
+     * Creates the next durable attempt using the supplied assignment-ID
+     * candidate. The transaction still owns the monotonic attempt number.
      */
     Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
             String taskId,
@@ -108,6 +132,7 @@ public interface BrokerOutboxStore {
             long startedAt,
             String leaseOwnerId,
             long leaseExpiresAt,
+            String assignmentId,
             OutboxMessage messageTemplate);
 
     Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,

@@ -187,6 +187,7 @@ class RabbitMqOutboxReplayerTest {
                 long startedAt,
                 String leaseOwnerId,
                 long leaseExpiresAt,
+                String assignmentId,
                 OutboxMessage messageTemplate) {
             throw new UnsupportedOperationException();
         }
