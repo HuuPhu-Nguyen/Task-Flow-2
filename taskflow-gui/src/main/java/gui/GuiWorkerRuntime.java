@@ -1,5 +1,7 @@
 package gui;
 
+import peer.engine.AssignmentCacheSnapshot;
+import peer.engine.AssignmentExecution;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
@@ -12,6 +14,14 @@ interface GuiWorkerRuntime extends AutoCloseable {
     Set<String> supportedTaskTypes();
 
     CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task);
+
+    default AssignmentExecution executeAssignment(TaskAssignMessage task) {
+        return AssignmentExecution.started(executeTask(task));
+    }
+
+    default AssignmentCacheSnapshot assignmentCacheSnapshot() {
+        return AssignmentCacheSnapshot.empty();
+    }
 
     CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out);
 

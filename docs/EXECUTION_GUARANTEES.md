@@ -16,6 +16,31 @@ nodes may enable the requester role, executor role, or both.
 - **Implication:** a task may run more than once in failure or timeout scenarios.
 - **Idempotency guard:** SQLite commits a successful task result only when task ID, `ASSIGNED` state, attempt number, assignment ID, and the reporting executor-participant ID match the current persisted assignment. Existing peer-ID fields carry that participant identity.
 
+## Executor Assignment Deduplication
+
+- Each executor runtime keeps a bounded, process-local cache keyed by the
+  version-2 assignment ID. Running and completed entries share the same result
+  future and no cache state is durable.
+- A duplicate RabbitMQ delivery while the cached assignment is running is
+  acknowledged immediately, does not invoke the processor again, and does not
+  publish from the duplicate delivery. The original execution remains
+  responsible for result publication.
+- A duplicate delivery for a completed cached assignment republishes the exact
+  cached `TASK_RESULT`, including its attempt number, assignment ID, timestamp,
+  success disposition, and payload. That delivery is acknowledged only after
+  the republish is confirmed; failure requeues it.
+- `TASKFLOW_ASSIGNMENT_CACHE_MAX_ENTRIES` controls the maximum entry count
+  (default `4096`). `TASKFLOW_ASSIGNMENT_CACHE_TTL_MS` controls expiry (default
+  `900000` ms). Both values must be positive.
+- Capacity eviction, TTL expiry, and executor restart may cause the assignment
+  to execute again. This is permitted by the at-least-once contract: the cache
+  is a duplicate-work optimization, while SQLite's persisted assignment tuple
+  remains the authority for committing one result.
+- The engine exposes current running/completed entry counts, duplicate-hit
+  counts, and total/capacity/TTL eviction counts through its cache snapshot.
+  Assignment-ID reuse for a different task identity while an entry is live is
+  rejected as a permanent conflict.
+
 ## Job Submission Validation
 
 - GUI and command-line submitters generate peer-scoped job IDs with the

@@ -1,5 +1,7 @@
 package gui;
 
+import peer.engine.AssignmentCacheSnapshot;
+import peer.engine.AssignmentExecution;
 import peer.engine.PeerExecutionEngine;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
@@ -28,6 +30,16 @@ final class PeerEngineWorkerRuntime implements GuiWorkerRuntime {
     @Override
     public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
         return engine.executeTask(task);
+    }
+
+    @Override
+    public AssignmentExecution executeAssignment(TaskAssignMessage task) {
+        return engine.executeAssignment(task);
+    }
+
+    @Override
+    public AssignmentCacheSnapshot assignmentCacheSnapshot() {
+        return engine.assignmentCacheSnapshot();
     }
 
     @Override

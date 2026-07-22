@@ -70,6 +70,13 @@ The current RabbitMQ path includes:
   requeues without an in-memory completion. Live broker coverage also proves an
   obsolete attempt-1/X result from a participant reassigned under attempt-2/Y
   is acknowledged as stale without changing Y, and only Y commits.
+- Bounded executor-side assignment deduplication shared by command-line and
+  JavaFX RabbitMQ adapters. A duplicate running delivery is acknowledged
+  without another processor invocation; a completed cached assignment
+  republishes the exact cached result before acknowledgement. Maximum entries
+  and TTL are configurable, and capacity/TTL eviction counters are exposed.
+  Cache eviction or participant restart permits re-execution, with SQLite
+  generation fencing remaining authoritative.
 - RabbitMQ prefetch configuration.
 - Dead-letter exchange, dead-letter queue, and quarantine queue topology
   declaration.

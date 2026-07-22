@@ -4,8 +4,9 @@ Status: Accepted
 
 Date: 2026-07-22
 
-Scope: Frozen architecture for Phases 0–8; the database/scheduler mechanism and
-same-participant ABA proof are implemented through TF-0106.
+Scope: Frozen architecture for Phases 0–8; the database/scheduler mechanism,
+same-participant ABA proof, and bounded executor deduplication are implemented
+through TF-0107.
 
 ## Context
 
@@ -49,7 +50,9 @@ side effects exactly once.
 
 ## Consequences
 
-- Duplicate assignment delivery and task execution are expected and tested.
+- Executor participants suppress a duplicate delivery while its assignment is
+  cached as running and replay the exact cached result after completion.
+  Eviction or restart may still cause duplicate execution.
 - Plugins must declare whether retry is pure, idempotent, requires an
   idempotency key, or is unsafe.
 - The database, not scheduler memory, decides whether a result commits.
@@ -87,6 +90,10 @@ transport nor a different database invalidates generation fencing by itself.
   `RabbitMqCoordinatorLiveIntegrationTest#sameWorkerAbaResultCannotCommitThroughLiveBroker`
   prove the complete same-participant scenario through the scheduler, SQLite,
   and live RabbitMQ.
+- `WorkerAssignmentDeduplicationIntegrationTest#duplicateRunningAssignmentExecutesOnce`
+  and `#duplicateCompletedAssignmentRepublishesSameResult` prove the RabbitMQ
+  executor acknowledgement/execution/publication decisions; engine tests prove
+  bounds, TTL, cache-loss re-execution, and eviction counters.
 
 ## Related Documents
 

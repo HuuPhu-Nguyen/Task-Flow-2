@@ -1,6 +1,7 @@
 package gui;
 
 import org.junit.jupiter.api.Test;
+import peer.engine.AssignmentExecution;
 import protocol.JobResultMessage;
 import protocol.Message;
 import protocol.PongMessage;
@@ -143,6 +144,78 @@ class RabbitMqCoordinatorConnectionTest {
         assertTrue(acknowledgement.requeued);
         assertFalse(acknowledgement.acked);
         assertEquals(List.of(), transport.published);
+        connection.close();
+    }
+
+    @Test
+    void duplicateRunningAssignmentIsAckedWithoutPublishing() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport();
+        RecordingListener listener = new RecordingListener();
+        DeduplicationWorkerRuntime workerRuntime = new DeduplicationWorkerRuntime(
+                new AssignmentExecution(
+                        AssignmentExecution.Disposition.DUPLICATE_RUNNING,
+                        new CompletableFuture<>()
+                )
+        );
+        RabbitMqCoordinatorConnection connection = newConnection(
+                transport,
+                listener,
+                workerRuntime,
+                config -> {
+                });
+        connection.start();
+        assertTrue(listener.awaitConnected());
+        transport.published.clear();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+
+        transport.deliverToPeer(TransportRoute.TASK_ASSIGN, taskAssignment("peer-1"), acknowledgement);
+
+        assertTrue(acknowledgement.deferred);
+        assertTrue(acknowledgement.acked);
+        assertFalse(acknowledgement.requeued);
+        assertEquals(List.of(), transport.published);
+        connection.close();
+    }
+
+    @Test
+    void duplicateCompletedAssignmentRepublishesCachedResult() throws Exception {
+        RecordingBrokerTransport transport = new RecordingBrokerTransport();
+        RecordingListener listener = new RecordingListener();
+        TaskResultMessage cachedResult = new TaskResultMessage(
+                "peer-1",
+                Instant.EPOCH.toString(),
+                "task-1",
+                "job-1",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "done",
+                true,
+                null
+        );
+        DeduplicationWorkerRuntime workerRuntime = new DeduplicationWorkerRuntime(
+                new AssignmentExecution(
+                        AssignmentExecution.Disposition.DUPLICATE_COMPLETED,
+                        CompletableFuture.completedFuture(cachedResult)
+                )
+        );
+        RabbitMqCoordinatorConnection connection = newConnection(
+                transport,
+                listener,
+                workerRuntime,
+                config -> {
+                });
+        connection.start();
+        assertTrue(listener.awaitConnected());
+        transport.published.clear();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+
+        transport.deliverToPeer(TransportRoute.TASK_ASSIGN, taskAssignment("peer-1"), acknowledgement);
+
+        OutboundTransportMessage published = onlyPublished(transport, TransportRoute.TASK_RESULT);
+        assertSame(cachedResult, published.message());
+        assertTrue(acknowledgement.deferred);
+        assertTrue(acknowledgement.acked);
+        assertFalse(acknowledgement.requeued);
         connection.close();
     }
 
@@ -435,6 +508,43 @@ class RabbitMqCoordinatorConnectionTest {
         @Override
         public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
             return CompletableFuture.failedFuture(new IllegalStateException("processor failed"));
+        }
+
+        @Override
+        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
+            throw new AssertionError("TCP submitTask should not be used by RabbitMQ connection");
+        }
+
+        @Override
+        public void shutdown() {
+        }
+
+        @Override
+        public boolean awaitTermination(long timeout, TimeUnit unit) {
+            return true;
+        }
+    }
+
+    private static final class DeduplicationWorkerRuntime implements GuiWorkerRuntime {
+        private final AssignmentExecution execution;
+
+        private DeduplicationWorkerRuntime(AssignmentExecution execution) {
+            this.execution = execution;
+        }
+
+        @Override
+        public Set<String> supportedTaskTypes() {
+            return Set.of("TEXT_ANALYSIS");
+        }
+
+        @Override
+        public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+            throw new AssertionError("duplicate assignment must not start execution");
+        }
+
+        @Override
+        public AssignmentExecution executeAssignment(TaskAssignMessage task) {
+            return execution;
         }
 
         @Override

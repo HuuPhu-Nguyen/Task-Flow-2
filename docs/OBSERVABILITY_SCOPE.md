@@ -66,6 +66,18 @@ Task assignment, retry, and failure:
   retry or made terminal after peer disconnect or heartbeat timeout.
 - `task_dispatch_failed` records failed assignment sends before work reaches a
   peer.
+- `task_assignment_cache_hit`, command-line `task_assignment_duplicate`, and
+  JavaFX `gui_rabbitmq_task_assignment_duplicate` record running/completed
+  assignment-cache hits with peer, task, assignment, disposition, cache size,
+  and cumulative eviction count.
+- `assignment_cache_evicted` records capacity or TTL eviction with assignment
+  ID, entry state, post-eviction size, and cumulative eviction count. The
+  executor engine's cache snapshot also exposes current size, running/completed
+  entries, running/completed duplicate counts, and total/capacity/TTL eviction
+  counts for tests and runtime adapters.
+- `task_assignment_cache_conflict` and
+  `gui_rabbitmq_task_assignment_cache_conflict` record permanent rejection when
+  a live assignment ID is reused for a different task identity.
 
 Final result delivery and abandoned states:
 

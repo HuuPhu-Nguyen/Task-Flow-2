@@ -4,6 +4,9 @@ import client.ClientJobPlugin;
 import client.ClientJobPlugins;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import peer.engine.AssignmentCacheConflictException;
+import peer.engine.AssignmentCacheSnapshot;
+import peer.engine.AssignmentExecution;
 import peer.engine.PeerExecutionEngine;
 import protocol.JobResultMessage;
 import protocol.JobIds;
@@ -55,8 +58,14 @@ public class RabbitMqPeerNode {
 
         BlockingQueue<ReceivedJobResult> jobResults = new LinkedBlockingQueue<>();
         PeerExecutionEngine engine = new PeerExecutionEngine(nodeId);
-        LOGGER.info("event=peer_processors_registered transport=rabbitmq peer_id={} task_types={}",
-                nodeId, engine.getRegisteredTaskTypes());
+        LOGGER.info(
+                "event=peer_processors_registered transport=rabbitmq peer_id={} task_types={} "
+                        + "assignment_cache_max_entries={} assignment_cache_ttl_ms={}",
+                nodeId,
+                engine.getRegisteredTaskTypes(),
+                engine.assignmentCacheConfig().maxEntries(),
+                engine.assignmentCacheConfig().ttlMillis()
+        );
 
         transport.subscribePeer(TransportRoute.TASK_ASSIGN, nodeId,
                 delivery -> handleTaskAssignment(nodeId, transport, engine, delivery));
@@ -92,10 +101,10 @@ public class RabbitMqPeerNode {
         Thread.currentThread().join();
     }
 
-    private static void handleTaskAssignment(String nodeId,
-                                             RabbitMqTransport transport,
-                                             PeerExecutionEngine engine,
-                                             InboundTransportMessage delivery) throws Exception {
+    static void handleTaskAssignment(String nodeId,
+                                     BrokerTransport transport,
+                                     PeerExecutionEngine engine,
+                                     InboundTransportMessage delivery) throws Exception {
         Message message = delivery.message();
         if (!(message instanceof TaskAssignMessage task)) {
             reject(delivery.acknowledgement());
@@ -112,7 +121,13 @@ public class RabbitMqPeerNode {
             if (delivery.acknowledgement() != null) {
                 delivery.acknowledgement().defer();
             }
-            engine.executeTask(task).whenComplete((result, failure) -> {
+            AssignmentExecution execution = engine.executeAssignment(task);
+            logAssignmentCacheDecision(nodeId, task, execution, engine.assignmentCacheSnapshot());
+            if (execution.disposition() == AssignmentExecution.Disposition.DUPLICATE_RUNNING) {
+                ack(delivery.acknowledgement());
+                return;
+            }
+            execution.resultFuture().whenComplete((result, failure) -> {
                 if (failure != null) {
                     LOGGER.warn("event=task_execution_future_failed peer_id={} task_id={} error={}",
                             nodeId, task.getTaskId(), failure.getMessage(), failure);
@@ -132,10 +147,38 @@ public class RabbitMqPeerNode {
                     requeueQuietly(delivery.acknowledgement());
                 }
             });
+        } catch (AssignmentCacheConflictException conflict) {
+            LOGGER.warn(
+                    "event=task_assignment_cache_conflict peer_id={} task_id={} assignment_id={} error={}",
+                    nodeId,
+                    task.getTaskId(),
+                    task.getAssignmentId(),
+                    conflict.getMessage()
+            );
+            reject(delivery.acknowledgement());
         } catch (Exception e) {
             requeueQuietly(delivery.acknowledgement());
             throw e;
         }
+    }
+
+    private static void logAssignmentCacheDecision(String nodeId,
+                                                   TaskAssignMessage task,
+                                                   AssignmentExecution execution,
+                                                   AssignmentCacheSnapshot snapshot) {
+        if (execution.disposition() == AssignmentExecution.Disposition.STARTED) {
+            return;
+        }
+        LOGGER.info(
+                "event=task_assignment_duplicate transport=rabbitmq peer_id={} task_id={} assignment_id={} "
+                        + "disposition={} cache_size={} cache_evictions_total={}",
+                nodeId,
+                task.getTaskId(),
+                task.getAssignmentId(),
+                execution.disposition(),
+                snapshot.size(),
+                snapshot.evictionCount()
+        );
     }
 
     private static void handleJobResult(BlockingQueue<ReceivedJobResult> jobResults,

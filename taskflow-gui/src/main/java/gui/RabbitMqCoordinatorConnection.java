@@ -2,6 +2,9 @@ package gui;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import peer.engine.AssignmentCacheConflictException;
+import peer.engine.AssignmentCacheSnapshot;
+import peer.engine.AssignmentExecution;
 import protocol.JobResultMessage;
 import protocol.Message;
 import protocol.PeerIdentity;
@@ -184,12 +187,46 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
             if (acknowledgement != null) {
                 acknowledgement.defer();
             }
-            workerRuntime.executeTask(task).whenComplete((result, failure) ->
+            AssignmentExecution execution = workerRuntime.executeAssignment(task);
+            logAssignmentCacheDecision(task, execution, workerRuntime.assignmentCacheSnapshot());
+            if (execution.disposition() == AssignmentExecution.Disposition.DUPLICATE_RUNNING) {
+                ack(acknowledgement);
+                return;
+            }
+            execution.resultFuture().whenComplete((result, failure) ->
                     completeTaskAssignment(task, result, failure, acknowledgement));
+        } catch (AssignmentCacheConflictException conflict) {
+            LOGGER.warn(
+                    "event=gui_rabbitmq_task_assignment_cache_conflict peer_id={} task_id={} "
+                            + "assignment_id={} error={}",
+                    peerId,
+                    task.getTaskId(),
+                    task.getAssignmentId(),
+                    conflict.getMessage()
+            );
+            reject(acknowledgement);
         } catch (Exception e) {
             requeueQuietly(acknowledgement);
             throw e;
         }
+    }
+
+    private void logAssignmentCacheDecision(TaskAssignMessage task,
+                                            AssignmentExecution execution,
+                                            AssignmentCacheSnapshot snapshot) {
+        if (execution.disposition() == AssignmentExecution.Disposition.STARTED) {
+            return;
+        }
+        LOGGER.info(
+                "event=gui_rabbitmq_task_assignment_duplicate peer_id={} task_id={} assignment_id={} "
+                        + "disposition={} cache_size={} cache_evictions_total={}",
+                peerId,
+                task.getTaskId(),
+                task.getAssignmentId(),
+                execution.disposition(),
+                snapshot.size(),
+                snapshot.evictionCount()
+        );
     }
 
     private void completeTaskAssignment(TaskAssignMessage task,
