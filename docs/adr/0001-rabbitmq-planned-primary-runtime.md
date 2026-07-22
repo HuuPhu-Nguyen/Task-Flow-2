@@ -1,8 +1,14 @@
 # 0001: Use RabbitMQ As The Default Runtime While Deprecating TCP
 
-Status: Accepted, amended 2026-07-05
+Status: Superseded by [ADR 0009](0009-rabbitmq-sole-supported-transport.md)
 
 Date: 2026-07-04
+
+Superseded: 2026-07-22
+
+This record is retained as the historical decision that made RabbitMQ the
+default while TCP remained a compatibility path. ADR 0009 records the later
+frozen Phase 0–8 decision that RabbitMQ becomes the sole supported transport.
 
 ## Context
 

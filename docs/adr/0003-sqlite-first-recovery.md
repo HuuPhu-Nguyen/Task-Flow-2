@@ -1,8 +1,14 @@
 # 0003: Keep SQLite As The First State Store And Defer PostgreSQL/Flyway
 
-Status: Accepted
+Status: Superseded by [ADR 0008](0008-sqlite-single-writer-state-store.md)
 
 Date: 2026-07-04
+
+Superseded: 2026-07-22
+
+This record is retained as the historical SQLite-first decision. ADR 0008
+records the stronger frozen scope: SQLite remains the authoritative store
+because Phases 0–8 support exactly one coordinator writer.
 
 ## Context
 
