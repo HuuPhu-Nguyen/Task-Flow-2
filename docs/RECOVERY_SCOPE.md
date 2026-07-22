@@ -60,7 +60,9 @@ Covered behavior:
   attempt audit, and the exact `TASK_ASSIGN` outbox envelope together before
   dispatch. Retrying publication reuses that envelope without advancing the
   generation.
-- Successful completion closes only the current attempt.
+- Successful completion conditionally matches task ID, `ASSIGNED` state,
+  attempt number, assignment ID, and participant ID, then closes only that
+  exact running attempt in the same SQLite transaction before memory changes.
 - Timeout and peer-disconnect release close the current attempt and preserve
   retry count.
 - Processor failure records a failed attempt.

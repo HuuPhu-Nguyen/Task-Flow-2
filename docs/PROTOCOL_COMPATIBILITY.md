@@ -128,10 +128,12 @@ Version `2` prevents identity-less version-0/1 task results from entering the
 commit path and makes assignment identity available end to end. SQLite schema
 version `10` now persists that tuple in task state and attempt audit, restores
 complete unexpired identities, and releases incomplete legacy assignments. It
-does not yet make a supplied v2 result identity authoritative: conditionally
-matching attempt number, assignment ID, and worker during database result
-commitment remains a separate migration. Until that lands, do not describe
-same-worker ABA protection as complete.
+also makes the supplied v2 identity authoritative during successful-result
+commitment: task ID, `ASSIGNED` state, attempt number, assignment ID, and the
+reporting participant must all match in SQLite. Matching, duplicate, and stale
+store/scheduler dispositions are automated. Full same-participant ABA coverage
+is still described as partial until TF-0106 runs the complete scenario through
+deterministic scheduler and RabbitMQ integration tests.
 
 ## Plugin and Transport Expectations
 

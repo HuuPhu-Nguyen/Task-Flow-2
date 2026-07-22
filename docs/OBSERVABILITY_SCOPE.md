@@ -20,7 +20,8 @@ Queue pressure and scheduler health:
 
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`,
   `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `success_count`,
-  and `failure_count`.
+  `failure_count`, `duplicate_result_count`, `stale_result_count`,
+  `unknown_result_count`, and `result_storage_failure_count`.
 - Coordinator `status summary`, `status jobs`, `status peers`, `status outbox`,
   `status queues`, and `status dlq` commands report persisted job/task state,
   retry and lease counts, last-known peers, pending coordinator outbox rows,
@@ -51,7 +52,12 @@ Task assignment, retry, and failure:
   `peer_id`, and `dispatch_latency_ms`. RabbitMQ outbox assignments also include
   the database-committed `assignment_attempt`, `assignment_id`, `outbox_id`, and
   immediate `outbox_published` outcome.
-- `task_completed` records accepted successful task results.
+- `task_completed` records SQLite-committed successful task results with
+  `attempt_number`, `assignment_id`, `commit_outcome`, and `duration_ms`.
+- `task_result_not_committed` records duplicate, stale, unknown-task, and
+  storage-failure dispositions with the complete reported assignment identity.
+  Duplicate/stale/unknown broker results are acknowledged; storage failure is
+  requeued by the scheduler's processing-failure path.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
   attempts with `retry_count` and `terminal_failure`.
 - `task_lease_expired` records assigned work whose persisted lease expired

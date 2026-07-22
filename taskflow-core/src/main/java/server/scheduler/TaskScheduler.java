@@ -539,48 +539,74 @@ public class TaskScheduler implements Runnable {
             return;
         }
 
-        EmbarrassinglyParallelJob.TaskCompletion completion = job.recordResult(
-                result.getTaskId(),
+        long completedAt = System.currentTimeMillis();
+        long startedAt = task.getStartTime();
+        long durationMs = startedAt > 0L ? Math.max(0L, completedAt - startedAt) : 0L;
+        boolean matchesInMemory = task.matchesAssignment(
                 envelope.fromNodeId(),
-                result.getResultPayload()
+                result.getAttemptNumber(),
+                result.getAssignmentId()
         );
-        if (!completion.accepted()) {
+        EmbarrassinglyParallelJob.PreparedTaskResult preparedResult = matchesInMemory
+                ? job.prepareTaskResult(result.getResultPayload())
+                : null;
+
+        JobStateStore.ResultCommitOutcome commitOutcome;
+        if (db == null) {
+            commitOutcome = matchesInMemory
+                    ? JobStateStore.ResultCommitOutcome.COMMITTED
+                    : JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT;
+        } else {
+            commitOutcome = db.commitTaskResult(
+                    task.getTaskId(),
+                    result.getAttemptNumber(),
+                    result.getAssignmentId(),
+                    envelope.fromNodeId(),
+                    completedAt,
+                    durationMs,
+                    result.getResultPayload()
+            );
+        }
+        if (commitOutcome == null) {
+            commitOutcome = JobStateStore.ResultCommitOutcome.STORAGE_FAILURE;
+        }
+
+        if (commitOutcome != JobStateStore.ResultCommitOutcome.COMMITTED) {
+            metrics.recordResultCommitOutcome(commitOutcome);
+            logResultCommitDisposition(job, task, envelope.fromNodeId(), result, commitOutcome);
+            if (commitOutcome == JobStateStore.ResultCommitOutcome.STORAGE_FAILURE) {
+                throw new IllegalStateException(persistenceFailureReason("commitTaskResult"));
+            }
             return;
         }
 
-        onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
-        if (db != null) {
-            boolean persisted = recordPersistence(
-                    "markTaskCompleted",
-                    job.getJobId(),
-                    task.getTaskId(),
-                    db.markTaskCompleted(
-                            task.getTaskId(),
-                            System.currentTimeMillis(),
-                            Math.max(0L, completion.durationMs()),
-                            result.getResultPayload()
-                    )
+        if (preparedResult == null) {
+            throw new IllegalStateException(
+                    "Authoritative result committed for an assignment that does not match scheduler memory."
             );
-            if (!persisted) {
-                recordPersistence(
-                        "markTaskFailed",
-                        job.getJobId(),
-                        task.getTaskId(),
-                        db.markTaskFailed(
-                                task.getTaskId(),
-                                JobStateStore.TaskAttemptOutcome.JOB_FAILED,
-                                persistenceFailureReason("markTaskCompleted"),
-                                System.currentTimeMillis()
-                        )
-                );
-                failJob(job, persistenceFailureReason("markTaskCompleted"));
-                return;
-            }
         }
+        EmbarrassinglyParallelJob.TaskCompletion completion = job.applyCommittedResult(
+                result.getTaskId(),
+                envelope.fromNodeId(),
+                result.getAttemptNumber(),
+                result.getAssignmentId(),
+                completedAt,
+                preparedResult
+        );
+        if (!completion.accepted()) {
+            throw new IllegalStateException(
+                    "Authoritative result commit could not be applied to scheduler memory."
+            );
+        }
+
+        onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
         logInfoEvent("task_completed", fields(
                 "job_id", job.getJobId(),
                 "task_id", task.getTaskId(),
                 "peer_id", envelope.fromNodeId(),
+                "attempt_number", result.getAttemptNumber(),
+                "assignment_id", result.getAssignmentId(),
+                "commit_outcome", commitOutcome,
                 "duration_ms", Math.max(0L, completion.durationMs())
         ));
 
@@ -941,6 +967,27 @@ public class TaskScheduler implements Runnable {
         peer.recordTaskFailure();
         peer.decrementTasks();
         registry.updateMetricsSnapshot(peerId);
+    }
+
+    private void logResultCommitDisposition(EmbarrassinglyParallelJob<?, ?> job,
+                                            TaskUnit<?> task,
+                                            String reportingPeerId,
+                                            TaskResultMessage result,
+                                            JobStateStore.ResultCommitOutcome outcome) {
+        Map<String, Object> eventFields = fields(
+                "job_id", job.getJobId(),
+                "task_id", task.getTaskId(),
+                "peer_id", reportingPeerId,
+                "attempt_number", result.getAttemptNumber(),
+                "assignment_id", result.getAssignmentId(),
+                "commit_outcome", outcome
+        );
+        if (outcome == JobStateStore.ResultCommitOutcome.STORAGE_FAILURE
+                || outcome == JobStateStore.ResultCommitOutcome.UNKNOWN_TASK) {
+            logErrorEvent("task_result_not_committed", eventFields);
+        } else {
+            logInfoEvent("task_result_not_committed", eventFields);
+        }
     }
 
     private boolean persistTaskFailure(TaskUnit<?> task,
@@ -1441,7 +1488,11 @@ public class TaskScheduler implements Runnable {
                 "retry_count", snapshot.retryCount(),
                 "task_success_rate", String.format(Locale.US, "%.4f", snapshot.taskSuccessRate()),
                 "success_count", snapshot.successCount(),
-                "failure_count", snapshot.failureCount()
+                "failure_count", snapshot.failureCount(),
+                "duplicate_result_count", snapshot.duplicateResultCount(),
+                "stale_result_count", snapshot.staleResultCount(),
+                "unknown_result_count", snapshot.unknownResultCount(),
+                "result_storage_failure_count", snapshot.resultStorageFailureCount()
         ));
     }
 

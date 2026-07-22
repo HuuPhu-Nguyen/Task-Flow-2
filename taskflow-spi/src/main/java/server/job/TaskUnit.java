@@ -63,6 +63,42 @@ public abstract class TaskUnit<T> {
         return duration;
     }
 
+    /**
+     * Applies a result only for the exact current assignment generation.
+     * The supplied completion time makes duration calculation deterministic
+     * and lets persistence and memory use the same timestamp.
+     */
+    public synchronized long markCompletedBy(String peerId,
+                                             int attemptNumber,
+                                             String assignmentId,
+                                             long completedAtMillis) {
+        if (!matchesAssignment(peerId, attemptNumber, assignmentId)) {
+            return -1L;
+        }
+        long normalizedCompletedAt = Math.max(0L, completedAtMillis);
+        long duration = this.startTime > 0L
+                ? Math.max(0L, normalizedCompletedAt - this.startTime)
+                : 0L;
+        this.status = TaskStatus.COMPLETED;
+        this.assignedPeerId = null;
+        this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
+        this.assignmentIdentity = null;
+        this.pendingSinceMillis = -1L;
+        return duration;
+    }
+
+    public synchronized boolean matchesAssignment(String peerId,
+                                                  int attemptNumber,
+                                                  String assignmentId) {
+        return this.status == TaskStatus.ASSIGNED
+                && this.assignmentIdentity != null
+                && this.assignmentIdentity.attemptNumber() == attemptNumber
+                && this.assignmentIdentity.assignmentId().equals(assignmentId)
+                && this.assignmentIdentity.workerId().equals(peerId);
+    }
+
     public synchronized boolean markAssigned(String peerId, long startAtMillis) {
         return markAssigned(peerId, startAtMillis, "", 0L);
     }

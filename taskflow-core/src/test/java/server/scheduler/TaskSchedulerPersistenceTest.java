@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import transport.TransportRoute;
+import transport.TransportAcknowledgement;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -510,11 +511,12 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
-    void taskCompletionPersistenceFailureReturnsFailedJobResult() throws Exception {
+    void taskCompletionStorageFailureRequeuesWithoutMutatingMemoryOrMetrics() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskCompleted");
         TaskCapturingOutput output = new TaskCapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
         TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
         Thread schedulerThread = new Thread(scheduler, "scheduler-task-completion-persistence-failure-test");
         schedulerThread.start();
@@ -527,22 +529,140 @@ class TaskSchedulerPersistenceTest {
             TaskAssignMessage assignment = output.task();
             assertTrue(store.awaitTaskAssigned());
 
-            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+            mailbox.put(new MessageEnvelope(
+                    successResult(assignment, "result"),
+                    "peer-1",
+                    acknowledgement
+            ));
 
-            assertTrue(output.awaitResult());
-            assertTrue(store.awaitJobFailed());
-            JobResultMessage result = output.result();
-            assertFalse(result.isSuccessful());
-            assertEquals("Persistence write failed during markTaskCompleted.", result.getErrorMessage());
-            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertTrue(acknowledgement.awaitRequeue());
+            assertFalse(output.awaitResult(300));
+            assertEquals(0, acknowledgement.ackCount());
+            assertEquals(1, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(0, scheduler.getMetricsSnapshot().successCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().resultStorageFailureCount());
+            PeerInfo peer = registry.get("peer-1");
+            assertNotNull(peer);
+            assertEquals(1, peer.getActiveTasks());
+            assertEquals(0L, peer.getCompletedTasks());
+            List<JobStateStore.TaskAttemptRecord> attempts =
+                    store.loadTaskAttempts("job-completion-persistence-failure");
+            assertEquals(1, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.getFirst().outcome());
             assertEquals(List.of(
                     "insertJobWithTasks:job-completion-persistence-failure:TEST_TASK:requester-1:1:"
                             + "task-job-completion-persistence-failure-0",
                     "markTaskAssigned:task-job-completion-persistence-failure-0:peer-1",
-                    "markTaskCompleted:task-job-completion-persistence-failure-0",
-                    "markTaskFailed:task-job-completion-persistence-failure-0",
-                    "markJobFailed:job-completion-persistence-failure"
+                    "markTaskCompleted:task-job-completion-persistence-failure-0"
             ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void staleResultIsAcknowledgedWithoutRequeueOrSuccessAccounting() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        RecordingAcknowledgement staleAcknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-stale-result-disposition-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-stale-disposition", List.of("payload")), "requester-1"));
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            TaskResultMessage stale = new TaskResultMessage(
+                    "peer-1",
+                    "2026-07-22T00:00:00Z",
+                    assignment.getTaskId(),
+                    assignment.getJobId(),
+                    assignment.getAttemptNumber(),
+                    "550e8400-e29b-41d4-a716-446655440099",
+                    "stale-result",
+                    true,
+                    null
+            );
+            mailbox.put(new MessageEnvelope(stale, "peer-1", staleAcknowledgement));
+
+            assertTrue(staleAcknowledgement.awaitAck());
+            assertEquals(1, staleAcknowledgement.ackCount());
+            assertEquals(0, staleAcknowledgement.requeueCount());
+            assertEquals(0, staleAcknowledgement.rejectCount());
+            assertFalse(output.awaitResult(300));
+            assertEquals(0, scheduler.getMetricsSnapshot().successCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().staleResultCount());
+            PeerInfo peer = registry.get("peer-1");
+            assertNotNull(peer);
+            assertEquals(1, peer.getActiveTasks());
+            assertEquals(0L, peer.getCompletedTasks());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING,
+                    store.loadTaskAttempts("job-stale-disposition").getFirst().outcome());
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "current-result"), "peer-1"));
+            assertTrue(output.awaitResult());
+            assertEquals(List.of("current-result"), output.result().getResultsByTaskId());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void duplicateResultIsAcknowledgedWithoutRequeueOrSecondSuccess() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        MultiTaskOutput output = new MultiTaskOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-duplicate-result-disposition-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-duplicate-disposition", List.of("payload-a", "payload-b")),
+                    "requester-1"
+            ));
+            TaskAssignMessage first = output.awaitTask();
+            TaskAssignMessage second = output.awaitTask();
+            assertNotNull(first);
+            assertNotNull(second);
+
+            RecordingAcknowledgement firstAcknowledgement = new RecordingAcknowledgement();
+            mailbox.put(new MessageEnvelope(
+                    successResult(first, "first-result"),
+                    "peer-1",
+                    firstAcknowledgement
+            ));
+            assertTrue(firstAcknowledgement.awaitAck());
+            assertFalse(output.awaitResult(200));
+
+            RecordingAcknowledgement duplicateAcknowledgement = new RecordingAcknowledgement();
+            mailbox.put(new MessageEnvelope(
+                    successResult(first, "duplicate-result"),
+                    "peer-1",
+                    duplicateAcknowledgement
+            ));
+            assertTrue(duplicateAcknowledgement.awaitAck());
+            assertEquals(1, duplicateAcknowledgement.ackCount());
+            assertEquals(0, duplicateAcknowledgement.requeueCount());
+            assertEquals(0, duplicateAcknowledgement.rejectCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().successCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().duplicateResultCount());
+            PeerInfo peer = registry.get("peer-1");
+            assertNotNull(peer);
+            assertEquals(1L, peer.getCompletedTasks());
+            assertEquals(1, peer.getActiveTasks());
+
+            mailbox.put(new MessageEnvelope(successResult(second, "second-result"), "peer-1"));
+            assertTrue(output.awaitResult());
+            assertEquals(2, output.result().getResultsByTaskId().size());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1282,11 +1402,60 @@ class TaskSchedulerPersistenceTest {
         }
 
         boolean awaitResult() throws InterruptedException {
-            return resultReceived.await(2, TimeUnit.SECONDS);
+            return awaitResult(2_000);
+        }
+
+        boolean awaitResult(long timeoutMillis) throws InterruptedException {
+            return resultReceived.await(timeoutMillis, TimeUnit.MILLISECONDS);
         }
 
         JobResultMessage result() {
             return result.get();
+        }
+    }
+
+    private static class RecordingAcknowledgement implements TransportAcknowledgement {
+        private final AtomicInteger ackCount = new AtomicInteger();
+        private final AtomicInteger requeueCount = new AtomicInteger();
+        private final AtomicInteger rejectCount = new AtomicInteger();
+        private final CountDownLatch acked = new CountDownLatch(1);
+        private final CountDownLatch requeued = new CountDownLatch(1);
+
+        @Override
+        public void ack() {
+            ackCount.incrementAndGet();
+            acked.countDown();
+        }
+
+        @Override
+        public void requeue() {
+            requeueCount.incrementAndGet();
+            requeued.countDown();
+        }
+
+        @Override
+        public void reject() {
+            rejectCount.incrementAndGet();
+        }
+
+        boolean awaitAck() throws InterruptedException {
+            return acked.await(2, TimeUnit.SECONDS);
+        }
+
+        boolean awaitRequeue() throws InterruptedException {
+            return requeued.await(2, TimeUnit.SECONDS);
+        }
+
+        int ackCount() {
+            return ackCount.get();
+        }
+
+        int requeueCount() {
+            return requeueCount.get();
+        }
+
+        int rejectCount() {
+            return rejectCount.get();
         }
     }
 
@@ -1606,6 +1775,46 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized ResultCommitOutcome commitTaskResult(String taskId,
+                                                                 int attemptNumber,
+                                                                 String assignmentId,
+                                                                 String assignedPeerId,
+                                                                 long completedAt,
+                                                                 long durationMs,
+                                                                 Object resultPayload) {
+            events.add("markTaskCompleted:" + taskId);
+            if (!succeeds("markTaskCompleted")) {
+                return ResultCommitOutcome.STORAGE_FAILURE;
+            }
+            String jobId = taskJobIds.get(taskId);
+            if (jobId == null) {
+                return ResultCommitOutcome.UNKNOWN_TASK;
+            }
+            Deque<TaskAttemptRecord> attempts = attemptsByJobId.get(jobId);
+            if (attempts == null) {
+                return ResultCommitOutcome.STALE_ASSIGNMENT;
+            }
+            for (TaskAttemptRecord attempt : attempts) {
+                if (sameAssignment(attempt, taskId, attemptNumber, assignmentId, assignedPeerId)
+                        && attempt.outcome() == TaskAttemptOutcome.SUCCEEDED) {
+                    return ResultCommitOutcome.DUPLICATE_ALREADY_COMPLETED;
+                }
+            }
+            if (!finishExactAttempt(
+                    attempts,
+                    taskId,
+                    attemptNumber,
+                    assignmentId,
+                    assignedPeerId,
+                    completedAt,
+                    Math.max(0L, durationMs)
+            )) {
+                return ResultCommitOutcome.STALE_ASSIGNMENT;
+            }
+            return ResultCommitOutcome.COMMITTED;
+        }
+
+        @Override
         public synchronized boolean markTaskRetried(String taskId, int retryCount) {
             events.add("markTaskRetried:" + taskId + ":" + retryCount);
             return succeeds("markTaskRetried");
@@ -1792,6 +2001,55 @@ class TaskSchedulerPersistenceTest {
             }
             attempts.clear();
             attempts.addAll(updated);
+        }
+
+        private static boolean finishExactAttempt(Deque<TaskAttemptRecord> attempts,
+                                                  String taskId,
+                                                  int attemptNumber,
+                                                  String assignmentId,
+                                                  String assignedPeerId,
+                                                  long finishedAt,
+                                                  long durationMs) {
+            List<TaskAttemptRecord> updated = new ArrayList<>();
+            boolean replaced = false;
+            for (TaskAttemptRecord attempt : attempts) {
+                if (!replaced
+                        && sameAssignment(attempt, taskId, attemptNumber, assignmentId, assignedPeerId)
+                        && attempt.outcome() == TaskAttemptOutcome.RUNNING) {
+                    updated.add(new TaskAttemptRecord(
+                            attempt.jobId(),
+                            attempt.taskId(),
+                            attempt.attemptNumber(),
+                            attempt.assignmentId(),
+                            attempt.peerId(),
+                            attempt.startedAt(),
+                            attempt.leaseExpiresAt(),
+                            finishedAt,
+                            durationMs,
+                            TaskAttemptOutcome.SUCCEEDED,
+                            ""
+                    ));
+                    replaced = true;
+                } else {
+                    updated.add(attempt);
+                }
+            }
+            if (replaced) {
+                attempts.clear();
+                attempts.addAll(updated);
+            }
+            return replaced;
+        }
+
+        private static boolean sameAssignment(TaskAttemptRecord attempt,
+                                              String taskId,
+                                              int attemptNumber,
+                                              String assignmentId,
+                                              String assignedPeerId) {
+            return attempt.taskId().equals(taskId)
+                    && attempt.attemptNumber() == attemptNumber
+                    && java.util.Objects.equals(attempt.assignmentId(), assignmentId)
+                    && attempt.peerId().equals(assignedPeerId);
         }
 
         private boolean awaitEvent(String expected) throws InterruptedException {

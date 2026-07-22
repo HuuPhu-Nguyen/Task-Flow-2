@@ -14,6 +14,17 @@ public interface JobStateStore {
         JOB_FAILED
     }
 
+    /**
+     * Authoritative result-commit disposition returned by the state store.
+     */
+    enum ResultCommitOutcome {
+        COMMITTED,
+        DUPLICATE_ALREADY_COMPLETED,
+        STALE_ASSIGNMENT,
+        UNKNOWN_TASK,
+        STORAGE_FAILURE
+    }
+
     record TaskStartupState(String taskId, Object payload) {
     }
 
@@ -210,6 +221,23 @@ public interface JobStateStore {
                                       long durationMs,
                                       Object resultPayload) {
         return markTaskCompleted(taskId, completedAt, durationMs);
+    }
+
+    /**
+     * Conditionally commits a successful result for one exact assignment
+     * generation. Persistent implementations must make the complete tuple
+     * comparison and task transition atomically.
+     */
+    default ResultCommitOutcome commitTaskResult(String taskId,
+                                                 int attemptNumber,
+                                                 String assignmentId,
+                                                 String assignedPeerId,
+                                                 long completedAt,
+                                                 long durationMs,
+                                                 Object resultPayload) {
+        return markTaskCompleted(taskId, completedAt, durationMs, resultPayload)
+                ? ResultCommitOutcome.COMMITTED
+                : ResultCommitOutcome.STORAGE_FAILURE;
     }
 
     boolean markTaskRetried(String taskId, int retryCount);

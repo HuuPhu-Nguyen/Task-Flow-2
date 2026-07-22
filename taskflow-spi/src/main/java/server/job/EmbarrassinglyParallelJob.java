@@ -27,6 +27,43 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
 
     public record TaskCompletion(boolean accepted, long durationMs) {}
 
+    public record PreparedTaskResult(Object resultData) {}
+
+    public PreparedTaskResult prepareTaskResult(Object rawResultData) {
+        return new PreparedTaskResult(parseResult(rawResultData));
+    }
+
+    /**
+     * Updates the in-memory projection after the authoritative store has
+     * committed the exact assignment generation.
+     */
+    @SuppressWarnings("unchecked")
+    public synchronized TaskCompletion applyCommittedResult(String taskId,
+                                                            String reportingPeerId,
+                                                            int attemptNumber,
+                                                            String assignmentId,
+                                                            long completedAt,
+                                                            PreparedTaskResult preparedResult) {
+        TaskUnit<T> task = tasks.get(taskId);
+        if (task == null || preparedResult == null) {
+            return new TaskCompletion(false, -1L);
+        }
+
+        long durationMs = task.markCompletedBy(
+                reportingPeerId,
+                attemptNumber,
+                assignmentId,
+                completedAt
+        );
+        if (durationMs < 0L) {
+            return new TaskCompletion(false, -1L);
+        }
+
+        onTaskSuccess(task, (R) preparedResult.resultData());
+        completedCount.incrementAndGet();
+        return new TaskCompletion(true, durationMs);
+    }
+
     /**
      * Idempotent result path:
      * only accepts a result from the currently assigned peer for this task.
@@ -38,15 +75,20 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
             return new TaskCompletion(false, -1);
         }
 
-        long durationMs = task.markCompletedBy(reportingPeerId);
-        if (durationMs < 0) {
+        Optional<AssignmentIdentity> identity = task.getAssignmentIdentity();
+        if (identity.isEmpty() || !identity.get().workerId().equals(reportingPeerId)) {
             return new TaskCompletion(false, -1);
         }
 
-        R resultData = parseResult(rawResultData);
-        onTaskSuccess(task, resultData);
-        completedCount.incrementAndGet();
-        return new TaskCompletion(true, durationMs);
+        AssignmentIdentity current = identity.get();
+        return applyCommittedResult(
+                taskId,
+                reportingPeerId,
+                current.attemptNumber(),
+                current.assignmentId(),
+                System.currentTimeMillis(),
+                prepareTaskResult(rawResultData)
+        );
     }
 
     public boolean isJobComplete() {

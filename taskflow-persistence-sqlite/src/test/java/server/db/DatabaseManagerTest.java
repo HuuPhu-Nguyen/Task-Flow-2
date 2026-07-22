@@ -38,6 +38,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseManagerTest {
     private static final String ASSIGNMENT_ID = "550e8400-e29b-41d4-a716-446655440000";
+    private static final String SECOND_ASSIGNMENT_ID = "550e8400-e29b-41d4-a716-446655440001";
+    private static final String OTHER_ASSIGNMENT_ID = "550e8400-e29b-41d4-a716-446655440002";
 
     @TempDir
     Path tempDir;
@@ -99,6 +101,230 @@ class DatabaseManagerTest {
             assertEquals("", attempt.failureReason());
         } finally {
             db.close();
+        }
+    }
+
+    @Test
+    void matchingAssignmentCommitsExactlyOnceAndDuplicateIsTyped() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-result-commit-once.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-result-once", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-result-once", "job-result-once");
+            assertTrue(db.markTaskAssigned(
+                    "task-result-once",
+                    "peer-1",
+                    100L,
+                    "coordinator-lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.UNKNOWN_TASK,
+                    db.commitTaskResult(
+                            "missing-task",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "missing"
+                    )
+            );
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-result-once",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "first-result"
+                    )
+            );
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.DUPLICATE_ALREADY_COMPLETED,
+                    db.commitTaskResult(
+                            "task-result-once",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            300L,
+                            200L,
+                            "duplicate-result"
+                    )
+            );
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-result-once").getFirst();
+            assertEquals("COMPLETED", task.status());
+            assertEquals(200L, task.completedAt());
+            assertEquals(100L, task.durationMs());
+            assertEquals(1, task.attemptNumber());
+            assertEquals(ASSIGNMENT_ID, task.assignmentId());
+            assertEquals(
+                    "first-result",
+                    db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload()
+            );
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-result-once");
+            assertEquals(1, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempts.getFirst().outcome());
+            assertEquals(200L, attempts.getFirst().finishedAt());
+        }
+    }
+
+    @Test
+    void conditionalResultCommitRejectsOldAttemptWrongAssignmentAndWrongWorker() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-result-commit-stale.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-result-stale", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-result-stale", "job-result-stale");
+            assertTrue(db.markTaskAssigned(
+                    "task-result-stale",
+                    "peer-old",
+                    50L,
+                    "old-lease",
+                    80L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            assertTrue(db.markTaskRetried(
+                    "task-result-stale",
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "old_attempt_finished",
+                    90L
+            ));
+            assertTrue(db.markTaskAssigned(
+                    "task-result-stale",
+                    "peer-1",
+                    100L,
+                    "coordinator-lease",
+                    900L,
+                    2,
+                    SECOND_ASSIGNMENT_ID
+            ));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            "task-result-stale", 1, SECOND_ASSIGNMENT_ID, "peer-1", 200L, 100L, "old-attempt")
+            );
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            "task-result-stale", 2, OTHER_ASSIGNMENT_ID, "peer-1", 200L, 100L, "wrong-id")
+            );
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            "task-result-stale", 2, SECOND_ASSIGNMENT_ID, "peer-2", 200L, 100L, "wrong-worker")
+            );
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-result-stale").getFirst();
+            assertEquals("ASSIGNED", task.status());
+            assertEquals("peer-1", task.assignedPeerId());
+            assertEquals(2, task.attemptNumber());
+            assertEquals(SECOND_ASSIGNMENT_ID, task.assignmentId());
+            assertEquals(900L, task.leaseExpiresAt());
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-result-stale");
+            assertEquals(2, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, attempts.getFirst().outcome());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.get(1).outcome());
+        }
+    }
+
+    @Test
+    void sameWorkerAbaResultIsStaleAtStoreBoundary() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-result-commit-aba.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-result-aba", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-result-aba", "job-result-aba");
+            assertTrue(db.markTaskAssigned(
+                    "task-result-aba", "peer-a", 100L, "lease-1", 500L, 1, ASSIGNMENT_ID));
+            assertTrue(db.markTaskRetried(
+                    "task-result-aba",
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "lease_expired",
+                    150L
+            ));
+            assertTrue(db.markTaskAssigned(
+                    "task-result-aba", "peer-a", 200L, "lease-2", 900L, 2, SECOND_ASSIGNMENT_ID));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            "task-result-aba", 1, ASSIGNMENT_ID, "peer-a", 250L, 150L, "old-result")
+            );
+            DatabaseManager.TaskRecord afterOldResult = db.getTasksForJob("job-result-aba").getFirst();
+            assertEquals("ASSIGNED", afterOldResult.status());
+            assertEquals(2, afterOldResult.attemptNumber());
+            assertEquals(SECOND_ASSIGNMENT_ID, afterOldResult.assignmentId());
+            assertEquals("peer-a", afterOldResult.assignedPeerId());
+            assertEquals(900L, afterOldResult.leaseExpiresAt());
+            assertNull(db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload());
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-result-aba", 2, SECOND_ASSIGNMENT_ID, "peer-a", 300L, 100L, "current-result")
+            );
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-result-aba");
+            assertEquals(2, attempts.size());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, attempts.getFirst().outcome());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempts.get(1).outcome());
+            assertEquals(
+                    "current-result",
+                    db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload()
+            );
+        }
+    }
+
+    @Test
+    void resultCommitStorageFailureRollsBackTaskAndAttempt() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-result-commit-storage-failure.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-result-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-result-storage", "job-result-storage");
+            assertTrue(db.markTaskAssigned(
+                    "task-result-storage", "peer-1", 100L, "lease", 900L, 1, ASSIGNMENT_ID));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_task_result_commit
+                        BEFORE UPDATE OF status ON tasks
+                        WHEN NEW.status='COMPLETED'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected result commit failure');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STORAGE_FAILURE,
+                    db.commitTaskResult(
+                            "task-result-storage", 1, ASSIGNMENT_ID, "peer-1", 200L, 100L, "result")
+            );
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-result-storage").getFirst();
+            assertEquals("ASSIGNED", task.status());
+            assertEquals(ASSIGNMENT_ID, task.assignmentId());
+            assertEquals(900L, task.leaseExpiresAt());
+            JobStateStore.TaskAttemptRecord attempt = db.loadTaskAttempts("job-result-storage").getFirst();
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempt.outcome());
+            assertEquals(0L, attempt.finishedAt());
+            assertNull(db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload());
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_task_result_commit");
+            }
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-result-storage", 1, ASSIGNMENT_ID, "peer-1", 200L, 100L, "result")
+            );
         }
     }
 

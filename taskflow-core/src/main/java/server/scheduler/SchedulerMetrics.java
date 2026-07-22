@@ -1,5 +1,7 @@
 package server.scheduler;
 
+import server.db.JobStateStore;
+
 import java.util.concurrent.atomic.AtomicLong;
 
 public class SchedulerMetrics {
@@ -10,6 +12,10 @@ public class SchedulerMetrics {
     private final AtomicLong successCount = new AtomicLong(0);
     private final AtomicLong failureCount = new AtomicLong(0);
     private final AtomicLong terminalFailureCount = new AtomicLong(0);
+    private final AtomicLong duplicateResultCount = new AtomicLong(0);
+    private final AtomicLong staleResultCount = new AtomicLong(0);
+    private final AtomicLong unknownResultCount = new AtomicLong(0);
+    private final AtomicLong resultStorageFailureCount = new AtomicLong(0);
     private final AtomicLong dispatchLatencyTotalMs = new AtomicLong(0);
     private final AtomicLong dispatchLatencySamples = new AtomicLong(0);
 
@@ -44,6 +50,21 @@ public class SchedulerMetrics {
         }
     }
 
+    public void recordResultCommitOutcome(JobStateStore.ResultCommitOutcome outcome) {
+        if (outcome == null) {
+            return;
+        }
+        switch (outcome) {
+            case DUPLICATE_ALREADY_COMPLETED -> duplicateResultCount.incrementAndGet();
+            case STALE_ASSIGNMENT -> staleResultCount.incrementAndGet();
+            case UNKNOWN_TASK -> unknownResultCount.incrementAndGet();
+            case STORAGE_FAILURE -> resultStorageFailureCount.incrementAndGet();
+            case COMMITTED -> {
+                // Attempt success is recorded only after the in-memory projection is updated.
+            }
+        }
+    }
+
     public Snapshot snapshot() {
         long successes = successCount.get();
         long failures = failureCount.get();
@@ -63,6 +84,10 @@ public class SchedulerMetrics {
                 successes,
                 failures,
                 terminalFailureCount.get(),
+                duplicateResultCount.get(),
+                staleResultCount.get(),
+                unknownResultCount.get(),
+                resultStorageFailureCount.get(),
                 avgDispatchLatencyMs,
                 successRate
         );
@@ -76,6 +101,10 @@ public class SchedulerMetrics {
             long successCount,
             long failureCount,
             long terminalFailureCount,
+            long duplicateResultCount,
+            long staleResultCount,
+            long unknownResultCount,
+            long resultStorageFailureCount,
             double avgDispatchLatencyMs,
             double taskSuccessRate
     ) {}

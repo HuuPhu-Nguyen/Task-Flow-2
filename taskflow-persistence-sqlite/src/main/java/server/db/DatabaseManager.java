@@ -813,6 +813,38 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                                  long completedAt,
                                                  long durationMs,
                                                  Object resultPayload) {
+        try {
+            PersistedTaskIdentity identity = loadPersistedTaskIdentity(taskId).orElse(null);
+            if (identity == null
+                    || !"ASSIGNED".equals(identity.status())
+                    || identity.attemptNumber() < 1
+                    || identity.assignmentId() == null
+                    || identity.assignedPeerId() == null) {
+                return false;
+            }
+            return commitTaskResult(
+                    taskId,
+                    identity.attemptNumber(),
+                    identity.assignmentId(),
+                    identity.assignedPeerId(),
+                    completedAt,
+                    durationMs,
+                    resultPayload
+            ) == ResultCommitOutcome.COMMITTED;
+        } catch (SQLException e) {
+            logSqlFailure("markTaskCompleted", e);
+            return false;
+        }
+    }
+
+    @Override
+    public synchronized ResultCommitOutcome commitTaskResult(String taskId,
+                                                             int attemptNumber,
+                                                             String assignmentId,
+                                                             String assignedPeerId,
+                                                             long completedAt,
+                                                             long durationMs,
+                                                             Object resultPayload) {
         String sql = """
                 UPDATE tasks
                 SET status='COMPLETED',
@@ -821,7 +853,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     result_payload_json=?,
                     lease_owner_id='',
                     lease_expires_at=0
-                WHERE task_id=? AND status='ASSIGNED'
+                WHERE task_id=?
+                  AND status='ASSIGNED'
+                  AND attempt_number=?
+                  AND assignment_id=?
+                  AND assigned_peer_id=?
                 """;
         boolean originalAutoCommit;
         try {
@@ -829,35 +865,61 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             conn.setAutoCommit(false);
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 long normalizedDuration = Math.max(0L, durationMs);
-                if (!finishRunningAttempt(
-                        taskId,
-                        completedAt,
-                        normalizedDuration,
-                        TaskAttemptOutcome.SUCCEEDED,
-                        ""
-                )) {
-                    conn.rollback();
-                    return false;
-                }
                 ps.setLong(1, completedAt);
                 ps.setLong(2, normalizedDuration);
                 ps.setString(3, toJson(resultPayload));
                 ps.setString(4, taskId);
-                if (ps.executeUpdate() <= 0) {
+                ps.setInt(5, attemptNumber);
+                ps.setString(6, assignmentId);
+                ps.setString(7, assignedPeerId);
+                if (ps.executeUpdate() == 0) {
+                    ResultCommitOutcome outcome = classifyResultCommit(
+                            taskId,
+                            attemptNumber,
+                            assignmentId,
+                            assignedPeerId
+                    );
                     conn.rollback();
-                    return false;
+                    return outcome;
+                }
+                if (!finishExactRunningAttempt(
+                        taskId,
+                        attemptNumber,
+                        assignmentId,
+                        assignedPeerId,
+                        completedAt,
+                        normalizedDuration
+                )) {
+                    conn.rollback();
+                    LOGGER.warn(
+                            "event=result_commit_storage_failure task_id={} attempt_number={} "
+                                    + "assignment_id={} assigned_peer_id={} reason=attempt_audit_mismatch",
+                            taskId,
+                            attemptNumber,
+                            assignmentId,
+                            assignedPeerId
+                    );
+                    return ResultCommitOutcome.STORAGE_FAILURE;
                 }
                 conn.commit();
-                return true;
-            } catch (SQLException e) {
+                return ResultCommitOutcome.COMMITTED;
+            } catch (SQLException | RuntimeException e) {
                 conn.rollback();
                 throw e;
             } finally {
                 conn.setAutoCommit(originalAutoCommit);
             }
-        } catch (SQLException e) {
-            logSqlFailure("markTaskCompleted", e);
-            return false;
+        } catch (SQLException | RuntimeException e) {
+            if (e instanceof SQLException sqlException) {
+                logSqlFailure("commitTaskResult", sqlException);
+            } else {
+                LOGGER.warn(
+                        "event=database_operation_failed operation=commitTaskResult error_type={} error={}",
+                        e.getClass().getSimpleName(),
+                        e.getMessage()
+                );
+            }
+            return ResultCommitOutcome.STORAGE_FAILURE;
         }
     }
 
@@ -1798,6 +1860,76 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         }
     }
 
+    private ResultCommitOutcome classifyResultCommit(String taskId,
+                                                     int attemptNumber,
+                                                     String assignmentId,
+                                                     String assignedPeerId) throws SQLException {
+        Optional<PersistedTaskIdentity> stored = loadPersistedTaskIdentity(taskId);
+        if (stored.isEmpty()) {
+            return ResultCommitOutcome.UNKNOWN_TASK;
+        }
+
+        PersistedTaskIdentity identity = stored.get();
+        boolean exactAssignment = identity.attemptNumber() == attemptNumber
+                && Objects.equals(identity.assignmentId(), assignmentId)
+                && Objects.equals(identity.assignedPeerId(), assignedPeerId);
+        if ("COMPLETED".equals(identity.status()) && exactAssignment) {
+            return ResultCommitOutcome.DUPLICATE_ALREADY_COMPLETED;
+        }
+        return ResultCommitOutcome.STALE_ASSIGNMENT;
+    }
+
+    private Optional<PersistedTaskIdentity> loadPersistedTaskIdentity(String taskId) throws SQLException {
+        String sql = """
+                SELECT status, attempt_number, assignment_id, assigned_peer_id
+                FROM tasks
+                WHERE task_id=?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(new PersistedTaskIdentity(
+                        rs.getString("status"),
+                        rs.getInt("attempt_number"),
+                        rs.getString("assignment_id"),
+                        rs.getString("assigned_peer_id")
+                ));
+            }
+        }
+    }
+
+    private boolean finishExactRunningAttempt(String taskId,
+                                              int attemptNumber,
+                                              String assignmentId,
+                                              String assignedPeerId,
+                                              long finishedAt,
+                                              long durationMs) throws SQLException {
+        String sql = """
+                UPDATE task_attempts
+                SET outcome='SUCCEEDED',
+                    finished_at=?,
+                    duration_ms=?,
+                    failure_reason=''
+                WHERE task_id=?
+                  AND attempt_number=?
+                  AND assignment_id=?
+                  AND peer_id=?
+                  AND outcome='RUNNING'
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setLong(1, finishedAt);
+            ps.setLong(2, Math.max(0L, durationMs));
+            ps.setString(3, taskId);
+            ps.setInt(4, attemptNumber);
+            ps.setString(5, assignmentId);
+            ps.setString(6, assignedPeerId);
+            return ps.executeUpdate() == 1;
+        }
+    }
+
     private boolean finishRunningAttempt(String taskId,
                                          long finishedAt,
                                          long durationMs,
@@ -2134,6 +2266,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     private static String toJson(Object payload) {
         return payload == null ? null : GSON.toJson(payload);
+    }
+
+    private record PersistedTaskIdentity(String status,
+                                         int attemptNumber,
+                                         String assignmentId,
+                                         String assignedPeerId) {
     }
 
     private static Object fromJson(String json) {

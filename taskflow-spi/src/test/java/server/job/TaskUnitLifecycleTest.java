@@ -31,6 +31,35 @@ class TaskUnitLifecycleTest {
     }
 
     @Test
+    void exactCompletionRequiresAttemptAssignmentAndPeerWithoutPartialMutation() {
+        DummyTask task = new DummyTask("t-fenced", "job-1", "payload");
+        AssignmentIdentity identity = new AssignmentIdentity(
+                "t-fenced",
+                3,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "peer-a",
+                500L
+        );
+        task.restoreAssignedForResume(identity, 100L, "coordinator-1", 1);
+
+        assertEquals(-1L, task.markCompletedBy(
+                "peer-a", 2, identity.assignmentId(), 250L));
+        assertEquals(-1L, task.markCompletedBy(
+                "peer-a", 3, "550e8400-e29b-41d4-a716-446655440001", 250L));
+        assertEquals(-1L, task.markCompletedBy(
+                "peer-b", 3, identity.assignmentId(), 250L));
+        assertEquals(TaskUnit.TaskStatus.ASSIGNED, task.getStatus());
+        assertEquals(identity, task.getAssignmentIdentity().orElseThrow());
+        assertEquals("peer-a", task.getAssignedPeerId());
+        assertEquals(500L, task.getLeaseExpiresAtMillis());
+
+        assertEquals(150L, task.markCompletedBy(
+                "peer-a", 3, identity.assignmentId(), 250L));
+        assertEquals(TaskUnit.TaskStatus.COMPLETED, task.getStatus());
+        assertTrue(task.getAssignmentIdentity().isEmpty());
+    }
+
+    @Test
     void transitionsToTerminalFailureAfterRetryLimit() {
         DummyTask task = new DummyTask("t-2", "job-1", "payload");
 

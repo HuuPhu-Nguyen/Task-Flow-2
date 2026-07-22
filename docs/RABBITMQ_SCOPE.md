@@ -65,7 +65,10 @@ The current RabbitMQ path includes:
   returned by that transaction, so a publish retry cannot create a replacement
   identity.
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject
-  behavior.
+  behavior. Scheduler-level tests prove typed duplicate/stale task-result
+  outcomes acknowledge without requeue, while result-commit storage failure
+  requeues without an in-memory completion; the live same-participant ABA
+  scenario remains TF-0106 work.
 - RabbitMQ prefetch configuration.
 - Dead-letter exchange, dead-letter queue, and quarantine queue topology
   declaration.
