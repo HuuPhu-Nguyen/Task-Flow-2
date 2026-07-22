@@ -14,6 +14,11 @@ repository today, **partial** means existing tests prove only part of the
 invariant, and **planned** names the stable automated test ID required by the
 listed fixing-queue task. Planned evidence is not proof of current behavior.
 
+The [task and job state machine](STATE_MACHINE.md) maps every current lifecycle
+mutation to its guard, durable/outbox effects, projection order, replay rule,
+observability, and forbidden edges. It remains subordinate to the evidence
+status in this guarantee contract.
+
 ## Supported deployment model
 
 The supported architecture is deliberately narrow:

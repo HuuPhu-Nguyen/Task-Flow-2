@@ -7,6 +7,9 @@ status remain in [Guarantees and non-goals](GUARANTEES.md). The required-test
 catalog below assigns every planned test to a concrete fixing-queue task no
 later than Phase 7.
 
+The [task and job state machine](STATE_MACHINE.md) supplies the transition IDs
+and exact durable/in-memory/outbox effects referenced by these crash windows.
+
 The matrix uses these evidence labels:
 
 - **Existing** — the linked automated test runs on the current baseline and

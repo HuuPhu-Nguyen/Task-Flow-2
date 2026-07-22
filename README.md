@@ -331,6 +331,10 @@ partial, and planned test evidence kept explicit.
 Detailed baseline implementation behavior is recorded separately in
 [Current execution behavior](docs/EXECUTION_GUARANTEES.md).
 
+Every task/job lifecycle mutation, conditional guard, durable/outbox effect,
+replay rule, and forbidden edge is mapped in the
+[task and job state machine](docs/STATE_MACHINE.md).
+
 The reproducible Phase 0 source, test, throughput, and 10,000-task heap snapshot
 is recorded in the [baseline report](docs/reports/baseline.md).
 

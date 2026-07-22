@@ -164,14 +164,14 @@ nodes may enable the requester role, executor role, or both.
 
 ## Task State Machine
 
-Each task moves through:
-
-- `PENDING`
-- `ASSIGNED`
-- `COMPLETED` or `FAILED` (terminal)
-
-Invalid/stale transitions are ignored (for example duplicate success from an executor participant that is no longer assigned).
-The SQLite state store also guards these persisted transitions so terminal task/job rows are not overwritten by later updates.
+The complete [task and job state machine](STATE_MACHINE.md) assigns a stable ID
+to every current lifecycle mutation and records its trigger, preconditions,
+durable writes, outbox effects, in-memory projection, replay behavior,
+observability, and forbidden edges. Normal task execution uses
+`PENDING -> ASSIGNED`, `ASSIGNED -> COMPLETED`, `ASSIGNED -> PENDING`, or
+`ASSIGNED -> FAILED`. Job-wide terminalization also has an explicit
+`PENDING -> FAILED` administrative path; recovery hydration and pending
+normalization are distinguished from new execution transitions.
 
 ## Retry and Timeout Policy
 
