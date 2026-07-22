@@ -43,8 +43,11 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput, BrokerOutboxPub
                 message.getTaskId(),
                 message.getJobId(),
                 message.getTaskType(),
+                message.getAttemptNumber(),
+                message.getAssignmentId(),
+                message.getLeaseExpiresAtEpochMillis(),
                 message.getPayload(),
-                message.getParam()
+                message.getParameter()
         );
         return new BrokerOutboxStore.OutboxMessage(
                 TransportRoute.TASK_ASSIGN,

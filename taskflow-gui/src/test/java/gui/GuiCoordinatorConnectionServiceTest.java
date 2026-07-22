@@ -197,6 +197,8 @@ class GuiCoordinatorConnectionServiceTest {
                     Instant.EPOCH.toString(),
                     task.getTaskId(),
                     task.getJobId(),
+                    task.getAttemptNumber(),
+                    task.getAssignmentId(),
                     "done",
                     true,
                     null

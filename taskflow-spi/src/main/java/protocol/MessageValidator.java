@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 public final class MessageValidator {
     private static final Gson GSON = new Gson();
@@ -24,6 +25,9 @@ public final class MessageValidator {
     private static final int MAX_TASK_TYPE_LENGTH = 120;
     private static final int MAX_TIME_LENGTH = 128;
     private static final int MAX_TEXT_FIELD_BYTES = 8 * 1024;
+    public static final String REASON_UNSUPPORTED_PROTOCOL_VERSION = "unsupported_protocol_version";
+    public static final String REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED = "assignment_protocol_v2_required";
+    public static final String REASON_INVALID_ASSIGNMENT_IDENTITY = "invalid_assignment_identity";
 
     private MessageValidator() {
     }
@@ -33,6 +37,7 @@ public final class MessageValidator {
             throw new MessageValidationException("Message is required.");
         }
         requireKnownType(message.getType());
+        validateProtocolCompatibility(message);
         validatePeerId(message.getNodeId(), "Message nodeId");
         requireTextBytes(message.getTime(), "Message time", MAX_TIME_LENGTH);
 
@@ -114,9 +119,16 @@ public final class MessageValidator {
         validateTaskId(assignment.getTaskId(), "Task id");
         validateJobId(assignment.getJobId(), "Job id");
         validateTaskType(assignment.getTaskType(), "Task type");
+        validateAssignmentIdentity(assignment.getAttemptNumber(), assignment.getAssignmentId());
+        if (assignment.getLeaseExpiresAtEpochMillis() <= 0L) {
+            throw new MessageValidationException(
+                    REASON_INVALID_ASSIGNMENT_IDENTITY,
+                    "Task assignment leaseExpiresAtEpochMillis must be positive."
+            );
+        }
         Map<String, Object> payloadEnvelope = new LinkedHashMap<>();
         payloadEnvelope.put("payload", assignment.getPayload());
-        payloadEnvelope.put("param", assignment.getParam() == null ? "" : assignment.getParam());
+        payloadEnvelope.put("parameter", assignment.getParameter() == null ? "" : assignment.getParameter());
         validateJsonBytes(payloadEnvelope, PayloadLimits.maxJobPayloadBytes(),
                 "Task assignment payload", PayloadLimits.MAX_JOB_PAYLOAD_BYTES_ENV);
     }
@@ -124,6 +136,7 @@ public final class MessageValidator {
     private static void validateTaskResult(TaskResultMessage result) {
         validateTaskId(result.getTaskId(), "Task id");
         validateJobId(result.getJobId(), "Job id");
+        validateAssignmentIdentity(result.getAttemptNumber(), result.getAssignmentId());
         Map<String, Object> payloadEnvelope = new LinkedHashMap<>();
         payloadEnvelope.put("resultPayload", result.getResultPayload());
         payloadEnvelope.put("errorMessage", result.getErrorMessage() == null ? "" : result.getErrorMessage());
@@ -157,6 +170,50 @@ public final class MessageValidator {
         String text = requireText(type, "Message type");
         if (!KNOWN_TYPES.contains(text)) {
             throw new MessageValidationException("Unknown message type: " + text);
+        }
+    }
+
+    private static void validateProtocolCompatibility(Message message) {
+        try {
+            ProtocolVersions.requireSupported(message.getProtocolVersion(), "Message");
+        } catch (IllegalArgumentException e) {
+            throw new MessageValidationException(REASON_UNSUPPORTED_PROTOCOL_VERSION, e.getMessage());
+        }
+        if ((message instanceof TaskAssignMessage || message instanceof TaskResultMessage)
+                && message.getProtocolVersion() != ProtocolVersions.ASSIGNMENT_IDENTITY) {
+            throw new MessageValidationException(
+                    REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED,
+                    message.getType() + " requires protocolVersion "
+                            + ProtocolVersions.ASSIGNMENT_IDENTITY
+                            + " with assignment identity; received protocolVersion "
+                            + message.getProtocolVersion() + "."
+            );
+        }
+    }
+
+    private static void validateAssignmentIdentity(int attemptNumber, String assignmentId) {
+        if (attemptNumber <= 0) {
+            throw new MessageValidationException(
+                    REASON_INVALID_ASSIGNMENT_IDENTITY,
+                    "Assignment attemptNumber must be positive."
+            );
+        }
+        String candidate;
+        try {
+            candidate = requireText(assignmentId, "Assignment assignmentId");
+        } catch (MessageValidationException e) {
+            throw new MessageValidationException(REASON_INVALID_ASSIGNMENT_IDENTITY, e.getMessage());
+        }
+        try {
+            String canonical = UUID.fromString(candidate).toString();
+            if (!canonical.equalsIgnoreCase(candidate)) {
+                throw new IllegalArgumentException("non-canonical UUID syntax");
+            }
+        } catch (IllegalArgumentException e) {
+            throw new MessageValidationException(
+                    REASON_INVALID_ASSIGNMENT_IDENTITY,
+                    "Assignment assignmentId must be a UUID."
+            );
         }
     }
 

@@ -6,6 +6,9 @@ import protocol.Message;
 import protocol.MessageType;
 import protocol.PingMessage;
 import protocol.ProtocolVersions;
+import protocol.MessageValidationException;
+import protocol.MessageValidator;
+import protocol.TaskResultMessage;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -50,12 +53,41 @@ class MessageFactoryTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class,
                 () -> factory.fromJson("""
-                        {"protocolVersion":2,"type":"PING","nodeId":"peer-1","time":"2026-06-12T00:00:00Z"}
+                        {"protocolVersion":3,"type":"PING","nodeId":"peer-1","time":"2026-06-12T00:00:00Z"}
                         """)
         );
 
-        assertEquals("Message uses unsupported TaskFlow protocolVersion 2; supported versions are 0 through 1.",
+        assertEquals("Message uses unsupported TaskFlow protocolVersion 3; supported versions are 0 through 2.",
                 error.getMessage());
+    }
+
+    @Test
+    void parsesVersionTwoTaskResultAndRejectsLegacyTaskResult() {
+        MessageFactory factory = new MessageFactory();
+        factory.register(MessageType.TASK_RESULT, json -> gson.fromJson(json, TaskResultMessage.class));
+        String currentJson = """
+                {
+                  "protocolVersion":2,
+                  "type":"TASK_RESULT",
+                  "nodeId":"peer-1",
+                  "time":"2026-07-22T06:00:00Z",
+                  "taskId":"task-1",
+                  "jobId":"job-1",
+                  "attemptNumber":1,
+                  "assignmentId":"550e8400-e29b-41d4-a716-446655440000",
+                  "successful":true,
+                  "resultPayload":"result"
+                }
+                """;
+
+        TaskResultMessage parsed = assertInstanceOf(TaskResultMessage.class, factory.fromJson(currentJson));
+        assertEquals(1, parsed.getAttemptNumber());
+
+        MessageValidationException error = assertThrows(
+                MessageValidationException.class,
+                () -> factory.fromJson(currentJson.replace("\"protocolVersion\":2", "\"protocolVersion\":1"))
+        );
+        assertEquals(MessageValidator.REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED, error.reasonCode());
     }
 
     @Test

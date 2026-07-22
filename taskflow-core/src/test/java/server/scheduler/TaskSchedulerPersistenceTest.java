@@ -6,6 +6,7 @@ import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
+import protocol.ProtocolVersions;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import server.db.BrokerOutboxStore;
@@ -63,6 +64,10 @@ class TaskSchedulerPersistenceTest {
             assertTrue(output.awaitTask());
             TaskAssignMessage assignment = output.task();
             assertTrue(store.awaitTaskAssigned());
+            assertEquals(ProtocolVersions.ASSIGNMENT_IDENTITY, assignment.getProtocolVersion());
+            assertEquals(1, assignment.getAttemptNumber());
+            assertNotNull(assignment.getAssignmentId());
+            assertEquals(store.lastLeaseExpiresAt(), assignment.getLeaseExpiresAtEpochMillis());
 
             mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
 
@@ -444,6 +449,7 @@ class TaskSchedulerPersistenceTest {
             assertEquals(1, pending.size());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
             assertEquals("peer-1", pending.getFirst().message().peerNodeId());
+            assertTrue(awaitFailedOutboxIds(store, List.of(1L)));
             assertEquals(List.of(1L), store.failedOutboxIds());
             assertEquals(List.of(), store.publishedOutboxIds());
             assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
@@ -1194,6 +1200,8 @@ class TaskSchedulerPersistenceTest {
                 "2026-06-12T00:00:00Z",
                 assignment.getTaskId(),
                 assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
                 payload,
                 true,
                 null
@@ -1206,6 +1214,8 @@ class TaskSchedulerPersistenceTest {
                 "2026-06-12T00:00:00Z",
                 assignment.getTaskId(),
                 assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
                 null,
                 false,
                 error
@@ -1221,6 +1231,18 @@ class TaskSchedulerPersistenceTest {
             Thread.sleep(10);
         }
         return scheduler.getMetricsSnapshot().activeJobs() == expected;
+    }
+
+    private static boolean awaitFailedOutboxIds(OutboxRecordingJobStateStore store,
+                                                List<Long> expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            if (store.failedOutboxIds().equals(expected)) {
+                return true;
+            }
+            Thread.sleep(10);
+        }
+        return store.failedOutboxIds().equals(expected);
     }
 
     private static class TaskCapturingOutput implements SchedulerOutput {
@@ -1356,8 +1378,11 @@ class TaskSchedulerPersistenceTest {
                     message.getTaskId(),
                     message.getJobId(),
                     message.getTaskType(),
+                    message.getAttemptNumber(),
+                    message.getAssignmentId(),
+                    message.getLeaseExpiresAtEpochMillis(),
                     message.getPayload(),
-                    message.getParam()
+                    message.getParameter()
             );
             return new BrokerOutboxStore.OutboxMessage(
                     TransportRoute.TASK_ASSIGN,

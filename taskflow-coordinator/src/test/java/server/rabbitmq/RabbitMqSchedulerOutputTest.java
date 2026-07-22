@@ -34,6 +34,9 @@ class RabbitMqSchedulerOutputTest {
                         "task-1",
                         "job-1",
                         "IMAGE_CONVERSION",
+                        1,
+                        "550e8400-e29b-41d4-a716-446655440000",
+                        1_780_000_000_000L,
                         "payload",
                         "png"
                 )
@@ -45,6 +48,9 @@ class RabbitMqSchedulerOutputTest {
         TaskAssignMessage routed = assertInstanceOf(TaskAssignMessage.class, transport.peerMessage.message());
         assertEquals("peer-1", routed.getNodeId());
         assertEquals("task-1", routed.getTaskId());
+        assertEquals(1, routed.getAttemptNumber());
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", routed.getAssignmentId());
+        assertEquals(1_780_000_000_000L, routed.getLeaseExpiresAtEpochMillis());
     }
 
     @Test
@@ -125,6 +131,9 @@ class RabbitMqSchedulerOutputTest {
                         "task-1",
                         "job-1",
                         "IMAGE_CONVERSION",
+                        1,
+                        "550e8400-e29b-41d4-a716-446655440000",
+                        1_780_000_000_000L,
                         "payload",
                         "png"
                 )
@@ -143,6 +152,9 @@ class RabbitMqSchedulerOutputTest {
                         "task-1",
                         "job-1",
                         "IMAGE_CONVERSION",
+                        1,
+                        "550e8400-e29b-41d4-a716-446655440000",
+                        1_780_000_000_000L,
                         "payload",
                         "png"
                 )
@@ -163,6 +175,8 @@ class RabbitMqSchedulerOutputTest {
         TaskAssignMessage routed = assertInstanceOf(TaskAssignMessage.class, transport.peerMessage.message());
         assertEquals("task-1", routed.getTaskId());
         assertEquals("peer-1", routed.getNodeId());
+        assertEquals(1, routed.getAttemptNumber());
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", routed.getAssignmentId());
     }
 
     @Test

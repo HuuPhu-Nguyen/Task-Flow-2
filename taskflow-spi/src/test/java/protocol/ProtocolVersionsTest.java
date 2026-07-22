@@ -31,6 +31,7 @@ class ProtocolVersionsTest {
     @Test
     void acceptsCurrentAndExplicitLegacyVersions() {
         ProtocolVersions.requireSupported(ProtocolVersions.CURRENT, "Message");
+        ProtocolVersions.requireSupported(ProtocolVersions.VERSION_1, "Message");
         ProtocolVersions.requireSupported(ProtocolVersions.LEGACY, "Message");
     }
 
@@ -41,7 +42,7 @@ class ProtocolVersionsTest {
                 () -> ProtocolVersions.requireSupported(ProtocolVersions.CURRENT + 1, "Message")
         );
 
-        assertEquals("Message uses unsupported TaskFlow protocolVersion 2; supported versions are 0 through 1.",
+        assertEquals("Message uses unsupported TaskFlow protocolVersion 3; supported versions are 0 through 2.",
                 error.getMessage());
     }
 

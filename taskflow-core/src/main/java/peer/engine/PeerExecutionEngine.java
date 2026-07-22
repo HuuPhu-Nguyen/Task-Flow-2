@@ -4,9 +4,11 @@ import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import protocol.MessageValidator;
 import protocol.PeerIdentity;
-import protocol.TaskResultMessage;
 import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
+
 import java.io.PrintWriter;
 import java.util.Locale;
 import java.util.Map;
@@ -67,6 +69,7 @@ public class PeerExecutionEngine implements AutoCloseable {
     }
 
     public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
+        MessageValidator.validate(task);
         return CompletableFuture.supplyAsync(() -> {
             try {
                 String taskType = task.getTaskType();
@@ -81,6 +84,8 @@ public class PeerExecutionEngine implements AutoCloseable {
                         java.time.Instant.now().toString(),
                         task.getTaskId(),
                         task.getJobId(),
+                        task.getAttemptNumber(),
+                        task.getAssignmentId(),
                         result,
                         true,
                         null
@@ -91,6 +96,8 @@ public class PeerExecutionEngine implements AutoCloseable {
                         java.time.Instant.now().toString(),
                         task.getTaskId(),
                         task.getJobId(),
+                        task.getAttemptNumber(),
+                        task.getAssignmentId(),
                         null,
                         false,
                         e.getMessage()

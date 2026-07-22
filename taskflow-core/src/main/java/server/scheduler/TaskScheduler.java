@@ -82,6 +82,8 @@ public class TaskScheduler implements Runnable {
             logErrorEvent("scheduler_message_validation_failed", fields(
                     "message_type", messageType(envelope),
                     "from_node_id", envelope.fromNodeId(),
+                    "reason_code", e.reasonCode(),
+                    "action", "reject",
                     "error", e.getMessage()
             ));
             rejectEnvelope(envelope);
@@ -697,7 +699,22 @@ public class TaskScheduler implements Runnable {
             return;
         }
         long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
-        TaskAssignMessage message = job.createTaskAssignMessage(task);
+        TaskAssignMessage message;
+        try {
+            AssignmentIdentity assignmentIdentity = task.getAssignmentIdentity()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Assigned task is missing assignment identity: " + task.getTaskId()));
+            message = job.createTaskAssignMessage(task).withAssignmentIdentity(
+                    assignmentIdentity.attemptNumber(),
+                    assignmentIdentity.assignmentId(),
+                    assignmentIdentity.leaseExpiresAtEpochMillis()
+            );
+            MessageValidator.validate(message);
+        } catch (RuntimeException e) {
+            task.resetToPending();
+            failJob(job, "Task assignment could not be prepared: " + e.getMessage());
+            return;
+        }
         BrokerOutboxStore outboxStore = brokerOutboxStore();
         BrokerOutboxPublisher outboxPublisher = brokerOutboxPublisher();
         if (outboxStore != null && outboxPublisher != null) {

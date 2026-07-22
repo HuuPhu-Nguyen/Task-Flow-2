@@ -155,6 +155,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                                 Instant.now().toString(),
                                 task.getTaskId(),
                                 task.getJobId(),
+                                task.getAttemptNumber(),
+                                task.getAssignmentId(),
                                 "processed-" + task.getPayload(),
                                 true,
                                 null
@@ -225,6 +227,9 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                         "task-" + jobId + "-0",
                         jobId,
                         TestTaskPlugin.TASK_TYPE,
+                        1,
+                        "550e8400-e29b-41d4-a716-446655440000",
+                        1_780_000_000_000L,
                         "alpha",
                         ""
                 );
@@ -362,6 +367,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 TaskAssignMessage replayedAssignment =
                         awaitQueue(assignments, assignmentFailure, "replayed duplicate task assignment");
                 assertEquals(firstAssignment.getTaskId(), replayedAssignment.getTaskId());
+                assertEquals(firstAssignment.getAttemptNumber(), replayedAssignment.getAttemptNumber());
+                assertEquals(firstAssignment.getAssignmentId(), replayedAssignment.getAssignmentId());
                 assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
 
                 TaskResultMessage taskResult = new TaskResultMessage(
@@ -369,6 +376,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                         Instant.now().toString(),
                         firstAssignment.getTaskId(),
                         firstAssignment.getJobId(),
+                        firstAssignment.getAttemptNumber(),
+                        firstAssignment.getAssignmentId(),
                         "processed-" + firstAssignment.getPayload(),
                         true,
                         null

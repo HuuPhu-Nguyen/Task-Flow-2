@@ -1,17 +1,40 @@
 package protocol;
 
-import java.util.List;
-
 public class TaskResultMessage extends Message {
 
     private String taskId;
     private String jobId;
+    private int attemptNumber;
+    private String assignmentId;
     private Object resultPayload;
     private boolean successful;
     private String errorMessage;
 
+    /**
+     * Legacy protocol-version-1 constructor retained for explicit compatibility
+     * tests. Results created through it are rejected by version-2 coordinators.
+     */
+    @Deprecated
     public TaskResultMessage(String nodeId, String time,
                              String taskId, String jobId,
+                             Object resultPayload,
+                             boolean successful,
+                             String errorMessage) {
+        this.protocolVersion = ProtocolVersions.VERSION_1;
+        this.type = MessageType.TASK_RESULT;
+        this.nodeId = nodeId;
+        this.time = time;
+        this.taskId = taskId;
+        this.jobId = jobId;
+        this.resultPayload = resultPayload;
+        this.successful = successful;
+        this.errorMessage = errorMessage;
+    }
+
+    public TaskResultMessage(String nodeId, String time,
+                             String taskId, String jobId,
+                             int attemptNumber,
+                             String assignmentId,
                              Object resultPayload,
                              boolean successful,
                              String errorMessage) {
@@ -20,6 +43,8 @@ public class TaskResultMessage extends Message {
         this.time = time;
         this.taskId = taskId;
         this.jobId = jobId;
+        this.attemptNumber = attemptNumber;
+        this.assignmentId = assignmentId;
         this.resultPayload = resultPayload;
         this.successful = successful;
         this.errorMessage = errorMessage;
@@ -35,6 +60,14 @@ public class TaskResultMessage extends Message {
 
     public String getJobId() {
         return jobId;
+    }
+
+    public int getAttemptNumber() {
+        return attemptNumber;
+    }
+
+    public String getAssignmentId() {
+        return assignmentId;
     }
 
     public Object getResultPayload() {

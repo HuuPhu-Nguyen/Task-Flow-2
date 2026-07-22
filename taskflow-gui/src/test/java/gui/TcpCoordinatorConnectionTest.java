@@ -176,6 +176,9 @@ class TcpCoordinatorConnectionTest {
                 "task-1",
                 "job-1",
                 "TEXT_ANALYSIS",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
                 "payload",
                 "summary"
         );
@@ -193,6 +196,9 @@ class TcpCoordinatorConnectionTest {
 
                 assertTrue(worker.awaitAssignment());
                 assertEquals("task-1", worker.assignedTask.get().getTaskId());
+                assertEquals(1, worker.assignedTask.get().getAttemptNumber());
+                assertEquals("550e8400-e29b-41d4-a716-446655440000",
+                        worker.assignedTask.get().getAssignmentId());
             } finally {
                 connection.close();
             }
@@ -222,6 +228,8 @@ class TcpCoordinatorConnectionTest {
                     Instant.EPOCH.toString(),
                     task.getTaskId(),
                     task.getJobId(),
+                    task.getAttemptNumber(),
+                    task.getAssignmentId(),
                     "done",
                     true,
                     null

@@ -90,6 +90,9 @@ class ImageConversionProcessorTest {
                 "task-1",
                 "job-1",
                 ConversionTaskTypes.IMAGE_CONVERSION,
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
                 input,
                 format
         );

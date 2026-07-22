@@ -243,13 +243,13 @@ Each input is processed independently, allowing parallel execution across execut
 
 ## Message Protocol
 
-TCP communication is done using JSON messages over sockets. RabbitMQ communication uses the same protocol messages wrapped in broker envelopes. Current protocol messages carry `protocolVersion: 1`; missing versions are accepted as legacy version `0`, while unsupported future versions are rejected before dispatch. Parsed messages are validated for required framework fields, safe peer/job/task identifiers, task-type names, configured task-count limits, configured inline job-payload size, and configured result-payload size before runtime dispatch. See `docs/PROTOCOL_COMPATIBILITY.md` for the compatibility contract for plugins and transports.
+TCP communication is done using JSON messages over sockets. RabbitMQ communication uses the same protocol messages wrapped in broker envelopes. New messages carry `protocolVersion: 2`. Semantically unchanged message types still accept versions `0` and `1`, while `TASK_ASSIGN` and `TASK_RESULT` require version 2 plus a positive assignment attempt and UUID assignment ID; incompatible task messages are rejected without repeated broker requeue. Parsed messages are also validated for required framework fields, safe peer/job/task identifiers, task-type names, configured task-count limits, configured inline job-payload size, and configured result-payload size before runtime dispatch. See `docs/PROTOCOL_COMPATIBILITY.md` for the per-message compatibility matrix and current fencing boundary.
 
 ### Message Types
 
 - `JOB_SUBMIT` - submit a new job
-- `TASK_ASSIGN` - assign a task to an executor-role participant
-- `TASK_RESULT` - return a result from that executor role
+- `TASK_ASSIGN` - assign a task to an executor-role participant with attempt number, assignment UUID, and lease deadline
+- `TASK_RESULT` - return a result from that executor role while echoing the assignment attempt and UUID
 - `JOB_RESULT` - plugin-defined final `resultPayload` plus a compatibility ordered result list
 - `JOB_RESULT_REQUEST` - request resend or persisted reconstruction of an owned job result using the requester token, plus a requester identity signature for identity-bound jobs
 - `PING` - heartbeat from server

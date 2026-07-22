@@ -57,6 +57,9 @@ class ExampleWordCountPeerPluginTest {
                 "task-job-example-0",
                 "job-example",
                 ExampleTaskTypes.WORD_COUNT,
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
                 payload,
                 "summary"
         );

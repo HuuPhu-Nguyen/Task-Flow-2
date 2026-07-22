@@ -1,93 +1,145 @@
 # Protocol Compatibility
 
-TaskFlow protocol compatibility is checked per message. There is no connection
-handshake or downgrade negotiation today.
+TaskFlow checks compatibility per message. There is no connection handshake or
+downgrade negotiation today.
 
 ## Version Field
 
-Every current protocol message serializes `protocolVersion: 1`.
+New coordinator and participant messages serialize `protocolVersion: 2`.
 
-- Version `1` is the current protocol.
-- Missing `protocolVersion` is treated as legacy version `0` so older local
-  peers and saved broker messages can still be read.
-- Receivers accept versions `0` through `1`.
-- Receivers reject versions above the current range before dispatching the
-  message to scheduler, peer, GUI, or plugin code.
+- Version `2` is the current protocol.
+- Missing `protocolVersion` is normalized to legacy version `0`.
+- The framework recognizes versions `0` through `2`, but acceptance is decided
+  by message type because task-assignment semantics changed in version `2`.
+- Versions below `0`, above `2`, and non-integer values are rejected before
+  runtime dispatch.
 
-Unsupported versions fail with a clear `IllegalArgumentException` that names the
-unsupported value and the supported range. Invalid non-integer version fields
-fail before message-type dispatch.
+An accepted legacy version is not rewritten semantically. Normalization only
+makes the parsed version explicit so the shared validator can apply the matrix
+below.
+
+## Message-Type Compatibility Matrix
+
+| Message type | New sender emits | Receiver accepts v2 | Receiver accepts v1 | Receiver accepts missing/v0 | Incompatible disposition |
+|---|---:|---|---|---|---|
+| `PING`, `PONG` | v2 | Yes | Yes | Yes | Reject unsupported future/negative versions. |
+| `JOB_SUBMIT` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before scheduler/plugin dispatch. |
+| `JOB_RESULT_REQUEST` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before authorization. |
+| `JOB_RESULT` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before requester/result-handler dispatch. |
+| `PEER_DISCONNECTED` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
+| `TASK_ASSIGN` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it, and TCP drops it before execution. |
+| `TASK_RESULT` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
+
+The unchanged message types keep legacy compatibility because their semantics
+did not change. `TASK_ASSIGN` and `TASK_RESULT` require a coordinated version-2
+cutover: drain in-flight version-1 work and pending version-1 assignment outbox
+rows before upgrading. A version-1 coordinator rejects version-2 messages as
+future, while a version-2 coordinator rejects identity-less version-0/1 task
+results.
+
+## Version 2 Task Fields
+
+`TASK_ASSIGN` requires:
+
+- positive `attemptNumber`;
+- canonical UUID-shaped `assignmentId`;
+- positive `leaseExpiresAtEpochMillis`;
+- the existing job ID, task ID, task type, payload, and parameter fields.
+
+The canonical serialized parameter name is `parameter`. The decoder also reads
+the former `param` spelling so stored/plugin-owned payload templates can be
+upgraded without changing plugin payload semantics.
+
+`TASK_RESULT` must echo the assignment's positive `attemptNumber` and exact
+`assignmentId`, in addition to the existing result fields. The shared peer
+execution engine copies both values from the received assignment for success
+and failure results.
+
+Missing fields deserialize to invalid zero/null values and are rejected.
+Blank, zero, negative, shortened, or malformed assignment identity values are
+rejected with reason code `invalid_assignment_identity`.
+
+## Structured Rejection and Settlement
+
+`MessageValidationException` exposes a stable `reasonCode` for transport and
+scheduler logs. The task-protocol codes introduced with version `2` are:
+
+- `assignment_protocol_v2_required` for version-0/1 task assignments/results;
+- `invalid_assignment_identity` for missing or malformed v2 identity fields;
+- `unsupported_protocol_version` when a message object bypasses parser-level
+  version checks.
+
+TCP `MessageFactory` validation drops incompatible task messages before they
+enter the scheduler or worker engine. RabbitMQ codec failures are logged with
+`action=reject` and settled using reject-without-requeue; when TaskFlow DLQ
+routing is enabled, RabbitMQ can quarantine the rejected body there. The
+scheduler repeats validation as a defense in depth and rejects a broker
+acknowledgement without requeue if an incompatible result is injected directly.
+
+These permanent compatibility failures are distinct from temporary scheduler
+mailbox saturation, which still requeues a broker delivery for backpressure.
 
 ## TCP Messages
 
 TCP messages carry `protocolVersion` on the root JSON object alongside `type`,
-`nodeId`, and `time`. `messaging.MessageFactory` enforces compatibility before
-looking up the registered message parser. After parsing, the same message
-validator used by other transports rejects missing framework fields, unsafe
-peer/job/task identifiers, unsafe task-type names, excessive task counts, and
-configured payload-size violations before dispatch.
+`nodeId`, and `time`. `messaging.MessageFactory` checks the supported numeric
+range before looking up the registered parser, then calls the shared validator
+to enforce the message-type matrix and field rules.
 
 ## RabbitMQ Envelopes
 
-RabbitMQ broker messages carry `protocolVersion` in two places:
+RabbitMQ carries `protocolVersion` in two places:
 
 - the broker envelope root, next to `route`, `fromNodeId`, and `message`;
 - the inner protocol message object.
 
-`RabbitMqMessageCodec` checks both fields before returning an inbound transport
-message. Legacy broker envelopes and inner messages that omit the field are
-accepted as version `0`. Future envelope or inner-message versions are rejected,
-which also makes those DLQ entries non-redrivable until code that understands
-the new protocol is deployed.
+Envelope versions `0`, `1`, and `2` remain readable because envelope semantics
+did not change. Inner-message compatibility follows the matrix. A legacy
+envelope can therefore contain a valid v2 task result, but a v2 envelope cannot
+make a legacy inner task result commit-eligible.
 
-RabbitMQ envelopes also validate `fromNodeId` and the inner message before
-dispatch. Invalid broker deliveries are rejected by the transport consumer; when
-dead-lettering is enabled, RabbitMQ can route them to the TaskFlow DLQ for
-inspection, quarantine, discard, or redrive if the body is otherwise a valid
-TaskFlow envelope.
+`RabbitMqMessageCodec` checks both numeric ranges and validates the inner
+message before returning an inbound transport message. Invalid deliveries are
+rejected; with dead-lettering enabled, RabbitMQ can route them to the TaskFlow
+DLQ for inspection, discard, or redrive after compatible code is deployed.
 
 ## Field and Size Validation
 
-`protocol.MessageValidator` is the shared framework-level validation boundary.
-It enforces:
+`protocol.MessageValidator` remains the shared framework boundary. In addition
+to version-2 assignment identity, it enforces:
 
 - known message types;
 - required `nodeId` and `time` fields;
-- peer IDs that already match TaskFlow's safe peer-id contract;
-- job IDs, task IDs, and task-type names limited to letters, numbers, `.`,
-  `:`, `_`, and `-`;
-- `TASKFLOW_MAX_TASKS_PER_JOB` on submitted task payload lists and advertised
-  task-type lists;
-- `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` on submitted job payloads and task
-  assignments;
-- `TASKFLOW_MAX_RESULT_BYTES` on task results and final job results.
+- peer IDs that match TaskFlow's safe peer-ID contract;
+- job IDs, task IDs, and task types limited to letters, numbers, `.`, `:`, `_`,
+  and `-`;
+- `TASKFLOW_MAX_TASKS_PER_JOB` on submitted payloads and advertised task types;
+- `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` on job payloads and task assignments;
+- `TASKFLOW_MAX_RESULT_BYTES` on task and final job results.
 
 Invalid `JOB_SUBMIT` and `JOB_RESULT_REQUEST` messages that reach the scheduler
-are converted to failed `JOB_RESULT` responses when the requester can be routed.
-Invalid non-submit scheduler messages are rejected or dropped instead of being
-requeued indefinitely. This validation is a message-safety boundary; it is not
-user/account authentication.
+are converted to failed `JOB_RESULT` responses when the requester can be
+routed. Invalid non-submit messages are rejected or dropped. This is a
+message-safety boundary, not user/account authentication.
 
-## Plugin Expectations
+## Current Fencing Boundary
 
-Plugins should construct and consume the SPI message classes instead of
-building raw protocol JSON. Plugin-owned payload and result objects can evolve
-inside `taskPayloads`, `resultPayload`, and task result payloads, but plugin
-authors should keep their own payload compatibility explicit when changing
-those shapes.
+Version `2` prevents identity-less version-0/1 task results from entering the
+commit path and makes assignment identity available end to end. It does not by
+itself make a supplied v2 identity authoritative. Persisting the current tuple
+and conditionally matching attempt number, assignment ID, and worker during
+database result commitment remain separate migrations. Until those land, do
+not describe same-worker ABA protection as complete.
 
-Plugins should not create RabbitMQ envelopes or bypass transport codecs. If a
-new task type needs framework fields outside plugin-owned payloads, add the
-field to the shared protocol contract and update these compatibility rules.
+## Plugin and Transport Expectations
 
-## Transport Expectations
+Plugins should use SPI message classes rather than raw JSON. Server job plugins
+continue to produce task-assignment payload templates; the coordinator adds its
+framework-owned assignment identity before publication. Participant processors
+should return through the shared execution engine so results echo that identity.
 
-New transports must emit the current protocol version and must reject
-unsupported versions before dispatching a message to runtime code. They should
-also call the shared message validator after parsing and before dispatch.
-Transports with their own envelope metadata should version that envelope
-separately from the inner protocol message, as the RabbitMQ transport does.
-
-For rolling upgrades, deploy receivers that accept a new protocol version before
-senders begin emitting it. Until then, future-version messages are rejected
-rather than silently interpreted as an older contract.
+Plugins must not construct RabbitMQ envelopes or bypass transport codecs. New
+transports must emit the current version, apply the per-message compatibility
+matrix, call the shared validator after parsing, and give permanent validation
+failures a terminal non-requeue disposition. A transport-specific envelope
+should be versioned separately from its inner TaskFlow message.

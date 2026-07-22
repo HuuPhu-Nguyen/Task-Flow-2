@@ -342,6 +342,8 @@ public class BaselineSchedulerExperiment {
                         FIXED_TIMESTAMP,
                         assignment.getTaskId(),
                         assignment.getJobId(),
+                        assignment.getAttemptNumber(),
+                        assignment.getAssignmentId(),
                         Long.toUnsignedString(resultPayload),
                         true,
                         ""

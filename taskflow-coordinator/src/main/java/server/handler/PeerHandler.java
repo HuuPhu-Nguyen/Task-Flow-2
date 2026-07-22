@@ -19,6 +19,7 @@ import messaging.MessageFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
+import protocol.MessageValidationException;
 import protocol.MessageType;
 import protocol.PeerIdentity;
 import protocol.PeerDisconnectedMessage;
@@ -175,6 +176,9 @@ public class PeerHandler implements Runnable {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
+                } catch (MessageValidationException e) {
+                    LOGGER.warn("event=peer_message_validation_failed peer_id={} reason_code={} action=drop error={}",
+                            nodeId, e.reasonCode(), e.getMessage(), e);
                 } catch (Exception e) {
                     LOGGER.warn("event=peer_message_processing_failed peer_id={} error={}",
                             nodeId, e.getMessage(), e);

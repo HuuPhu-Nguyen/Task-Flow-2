@@ -8,7 +8,9 @@ import java.util.Objects;
 public final class ProtocolVersions {
     public static final String FIELD_NAME = "protocolVersion";
     public static final int LEGACY = 0;
-    public static final int CURRENT = 1;
+    public static final int VERSION_1 = 1;
+    public static final int ASSIGNMENT_IDENTITY = 2;
+    public static final int CURRENT = ASSIGNMENT_IDENTITY;
     public static final int MIN_SUPPORTED = LEGACY;
 
     private ProtocolVersions() {

@@ -243,9 +243,12 @@ packages still omit executor-only dependencies.
 ## Protocol Compatibility
 
 Plugins should use TaskFlow SPI message classes instead of building raw protocol
-JSON. Current messages emit `protocolVersion: 1`; missing versions are accepted
-only for legacy compatibility, and unsupported future versions are rejected
-before plugin code sees the message.
+JSON. New messages emit `protocolVersion: 2`. The coordinator adds its
+framework-owned assignment attempt, UUID, and lease deadline to server-plugin
+task templates before publication, and the shared participant execution engine
+echoes the attempt and UUID in `TASK_RESULT`. Version 0/1 task assignments and
+results are rejected; semantically unchanged message types retain the legacy
+compatibility documented in `docs/PROTOCOL_COMPATIBILITY.md`.
 
 Keep plugin-owned payload and result object changes compatible within the
 plugin contract. If a new task type needs a framework-level message field

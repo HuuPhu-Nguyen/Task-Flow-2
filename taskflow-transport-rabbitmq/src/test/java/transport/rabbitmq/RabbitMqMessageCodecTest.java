@@ -6,12 +6,15 @@ import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.MessageValidationException;
+import protocol.MessageValidator;
 import protocol.MessageType;
 import protocol.PayloadLimits;
 import protocol.PongMessage;
 import protocol.ProtocolVersions;
 import protocol.RequesterIdentity;
 import protocol.TaskAssignMessage;
+import protocol.TaskResultMessage;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
@@ -82,6 +85,9 @@ class RabbitMqMessageCodecTest {
                 "task-1",
                 "job-1",
                 "IMAGE_CONVERSION",
+                3,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
                 new TestPayload("input.png", "abc123"),
                 "png"
         );
@@ -97,7 +103,37 @@ class RabbitMqMessageCodecTest {
         assertEquals("task-1", decodedMessage.getTaskId());
         assertEquals("job-1", decodedMessage.getJobId());
         assertEquals("IMAGE_CONVERSION", decodedMessage.getTaskType());
-        assertEquals("png", decodedMessage.getParam());
+        assertEquals(3, decodedMessage.getAttemptNumber());
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", decodedMessage.getAssignmentId());
+        assertEquals(1_780_000_000_000L, decodedMessage.getLeaseExpiresAtEpochMillis());
+        assertEquals("png", decodedMessage.getParameter());
+    }
+
+    @Test
+    void roundTripsVersionTwoTaskResultMessages() {
+        TaskResultMessage message = new TaskResultMessage(
+                "peer-1",
+                "2026-07-22T06:00:00Z",
+                "task-1",
+                "job-1",
+                3,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "result",
+                true,
+                null
+        );
+
+        InboundTransportMessage decoded = decode(new OutboundTransportMessage(
+                TransportRoute.TASK_RESULT,
+                "peer-1",
+                message
+        ));
+
+        TaskResultMessage decodedMessage = assertInstanceOf(TaskResultMessage.class, decoded.message());
+        assertEquals(ProtocolVersions.ASSIGNMENT_IDENTITY, decodedMessage.getProtocolVersion());
+        assertEquals(3, decodedMessage.getAttemptNumber());
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", decodedMessage.getAssignmentId());
+        assertEquals("result", decodedMessage.getResultPayload());
     }
 
     @Test
@@ -156,8 +192,8 @@ class RabbitMqMessageCodecTest {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> codec.decode(body(envelope), TransportRoute.HEARTBEAT, new NoopAcknowledgement()));
 
-        assertEquals("RabbitMQ envelope uses unsupported TaskFlow protocolVersion 2; "
-                + "supported versions are 0 through 1.", error.getMessage());
+        assertEquals("RabbitMQ envelope uses unsupported TaskFlow protocolVersion 3; "
+                + "supported versions are 0 through 2.", error.getMessage());
     }
 
     @Test
@@ -169,8 +205,35 @@ class RabbitMqMessageCodecTest {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> codec.decode(body(envelope), TransportRoute.HEARTBEAT, new NoopAcknowledgement()));
 
-        assertEquals("RabbitMQ message uses unsupported TaskFlow protocolVersion 2; "
-                + "supported versions are 0 through 1.", error.getMessage());
+        assertEquals("RabbitMQ message uses unsupported TaskFlow protocolVersion 3; "
+                + "supported versions are 0 through 2.", error.getMessage());
+    }
+
+    @Test
+    void rejectsLegacyTaskResultWithStructuredNonRequeueReason() {
+        TaskResultMessage result = new TaskResultMessage(
+                "peer-1",
+                "2026-07-22T06:00:00Z",
+                "task-1",
+                "job-1",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "result",
+                true,
+                null
+        );
+        JsonObject envelope = JsonParser.parseString(new String(codec.encode(
+                new OutboundTransportMessage(TransportRoute.TASK_RESULT, "peer-1", result)
+        ), StandardCharsets.UTF_8)).getAsJsonObject();
+        envelope.getAsJsonObject("message")
+                .addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.VERSION_1);
+
+        MessageValidationException error = assertThrows(
+                MessageValidationException.class,
+                () -> codec.decode(body(envelope), TransportRoute.TASK_RESULT, new NoopAcknowledgement())
+        );
+
+        assertEquals(MessageValidator.REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED, error.reasonCode());
     }
 
     @Test

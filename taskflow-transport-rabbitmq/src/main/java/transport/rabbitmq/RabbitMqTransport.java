@@ -8,6 +8,7 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.Return;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import protocol.MessageValidationException;
 import transport.BrokerTransport;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
@@ -274,8 +275,11 @@ public class RabbitMqTransport implements BrokerTransport {
                 try {
                     message = codec.decode(delivery.getBody(), route, acknowledgement);
                 } catch (Exception e) {
-                    LOGGER.warn("event=rabbitmq_delivery_decode_failed route={} queue={} action=reject error={}",
-                            route.name(), queueName, e.getMessage(), e);
+                    String reasonCode = e instanceof MessageValidationException validation
+                            ? validation.reasonCode()
+                            : "message_decode_failed";
+                    LOGGER.warn("event=rabbitmq_delivery_decode_failed route={} queue={} reason_code={} action=reject error={}",
+                            route.name(), queueName, reasonCode, e.getMessage(), e);
                     rejectFailedDelivery(acknowledgement);
                     return;
                 }

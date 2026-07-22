@@ -132,6 +132,8 @@ class PeerHandlerTest {
                 Instant.EPOCH.toString(),
                 "task-1",
                 "job-1",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
                 "result",
                 true,
                 null
@@ -141,6 +143,46 @@ class PeerHandlerTest {
             TaskResultMessage queued = assertInstanceOf(TaskResultMessage.class, envelope.message());
             assertEquals("task-1", queued.getTaskId());
         });
+    }
+
+    @Test
+    void tcpLegacyTaskResultsAreDroppedBeforeSchedulerIngress() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new ArrayBlockingQueue<>(2);
+        Thread handlerThread = null;
+
+        try (ServerSocket server = new ServerSocket(0);
+             Socket client = new Socket("localhost", server.getLocalPort());
+             Socket accepted = server.accept();
+             BufferedReader in = new BufferedReader(new InputStreamReader(client.getInputStream()));
+             PrintWriter out = new PrintWriter(client.getOutputStream(), true)) {
+            client.setSoTimeout(2_000);
+            handlerThread = new Thread(
+                    new PeerHandler(accepted, new InMemoryPeerRegistry(), mailbox, SchedulerConfig.defaults()),
+                    "peer-handler-legacy-task-result-test"
+            );
+            handlerThread.start();
+
+            assertNotNull(in.readLine());
+            @SuppressWarnings("deprecation")
+            TaskResultMessage legacyResult = new TaskResultMessage(
+                    "peer-1",
+                    Instant.EPOCH.toString(),
+                    "task-1",
+                    "job-1",
+                    "legacy-result",
+                    true,
+                    null
+            );
+            out.println(gson.toJson(legacyResult));
+
+            assertNull(mailbox.poll(300, TimeUnit.MILLISECONDS));
+        } finally {
+            if (handlerThread != null) {
+                handlerThread.interrupt();
+                handlerThread.join(2_000);
+                assertFalse(handlerThread.isAlive());
+            }
+        }
     }
 
     private void assertTcpMessageWaitsForMailboxCapacity(Message message,

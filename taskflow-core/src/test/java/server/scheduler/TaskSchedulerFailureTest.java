@@ -1,5 +1,6 @@
 package server.scheduler;
 
+import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
@@ -246,6 +247,8 @@ class TaskSchedulerFailureTest {
                     "2026-07-04T00:00:00Z",
                     "task/unsafe",
                     "job-1",
+                    1,
+                    "550e8400-e29b-41d4-a716-446655440000",
                     "payload",
                     true,
                     null
@@ -256,6 +259,51 @@ class TaskSchedulerFailureTest {
             assertEquals(0, acknowledgement.ackCount());
             assertEquals(0, acknowledgement.requeueCount());
             assertEquals(1, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void versionZeroAndOneBrokerTaskResultsAreRejectedWithoutCommitOrRequeue() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo peer = new PeerInfo("peer", SchedulerConfig.defaults(), List.of("TEST_TASK"));
+        registry.register(peer.getNodeId(), peer);
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-legacy-task-result-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-legacy-result", List.of("payload")), "requester-1"));
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+
+            for (int legacyVersion : List.of(0, 1)) {
+                RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+                TaskResultMessage legacyResult = legacyResult(assignment, legacyVersion);
+                mailbox.put(new MessageEnvelope(legacyResult, "peer", acknowledgement));
+
+                assertTrue(acknowledgement.awaitReject());
+                assertEquals(0, acknowledgement.ackCount());
+                assertEquals(0, acknowledgement.requeueCount());
+                assertEquals(1, acknowledgement.rejectCount());
+            }
+            assertFalse(output.awaitResult(150));
+            assertEquals(1, peer.getActiveTasks());
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "current-result"), "peer"));
+            assertTrue(output.awaitResult());
+            assertTrue(output.result().isSuccessful());
+            assertEquals(List.of("current-result"), output.result().getResultsByTaskId());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -818,6 +866,8 @@ class TaskSchedulerFailureTest {
                 "2026-06-10T00:00:00Z",
                 assignment.getTaskId(),
                 assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
                 payload,
                 true,
                 null
@@ -830,10 +880,28 @@ class TaskSchedulerFailureTest {
                 "2026-06-10T00:00:00Z",
                 assignment.getTaskId(),
                 assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
                 null,
                 false,
                 error
         );
+    }
+
+    private static TaskResultMessage legacyResult(TaskAssignMessage assignment, int protocolVersion) {
+        return new Gson().fromJson("""
+                {
+                  "protocolVersion":%d,
+                  "type":"TASK_RESULT",
+                  "nodeId":"peer",
+                  "time":"2026-07-22T06:00:00Z",
+                  "taskId":"%s",
+                  "jobId":"%s",
+                  "successful":true,
+                  "resultPayload":"legacy-result"
+                }
+                """.formatted(protocolVersion, assignment.getTaskId(), assignment.getJobId()),
+                TaskResultMessage.class);
     }
 
     private static class CapturingOutput implements SchedulerOutput {

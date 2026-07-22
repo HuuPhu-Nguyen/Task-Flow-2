@@ -90,6 +90,8 @@ class RabbitMqCoordinatorConnectionTest {
         assertEquals("peer-1", result.fromNodeId());
         TaskResultMessage taskResult = assertInstanceOf(TaskResultMessage.class, result.message());
         assertEquals("task-1", taskResult.getTaskId());
+        assertEquals(assignment.getAttemptNumber(), taskResult.getAttemptNumber());
+        assertEquals(assignment.getAssignmentId(), taskResult.getAssignmentId());
         assertTrue(acknowledgement.deferred);
         assertTrue(acknowledgement.acked);
         assertFalse(acknowledgement.requeued);
@@ -284,6 +286,9 @@ class RabbitMqCoordinatorConnectionTest {
                 "task-1",
                 "job-1",
                 "TEXT_ANALYSIS",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
                 "payload",
                 "summary");
     }
@@ -399,6 +404,8 @@ class RabbitMqCoordinatorConnectionTest {
                     Instant.EPOCH.toString(),
                     task.getTaskId(),
                     task.getJobId(),
+                    task.getAttemptNumber(),
+                    task.getAssignmentId(),
                     "done",
                     true,
                     null));

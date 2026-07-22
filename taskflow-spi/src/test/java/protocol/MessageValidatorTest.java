@@ -90,6 +90,8 @@ class MessageValidatorTest {
                     "2026-07-04T00:00:00Z",
                     "task-1",
                     "job-1",
+                    1,
+                    "550e8400-e29b-41d4-a716-446655440000",
                     "this-result-is-longer-than-the-test-limit",
                     true,
                     ""
