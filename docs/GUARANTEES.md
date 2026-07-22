@@ -197,9 +197,12 @@ pass.
 - A participant crash may lose in-process execution and result-publication
   state. The coordinator may reassign after failure detection or lease expiry,
   allowing duplicate execution.
-- Recovery makes progress only under the I10 assumptions. Full broker-outage
-  recovery, the complete crash-window matrix, and correctness-chaos evidence are
-  planned work and are not implied by today's unit-test baseline.
+- Recovery makes progress only under the I10 assumptions. The
+  [formal failure model](FAILURE_MODEL.md) defines every required crash,
+  duplicate-delivery, outage, overload, and recovery window while marking
+  incomplete evidence explicitly. Full broker-outage recovery, automated
+  crash-window proof, and correctness-chaos evidence remain planned work and
+  are not implied by today's unit-test baseline.
 
 ## Explicit non-goals
 

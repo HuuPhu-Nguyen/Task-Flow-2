@@ -324,6 +324,10 @@ planned test evidence for invariants I1–I10 are centralized in
 [Guarantees and non-goals](docs/GUARANTEES.md). An invariant marked partial or
 planned there is not a current runtime guarantee.
 
+The normative crash, duplicate-delivery, outage, overload, and recovery windows
+are enumerated in the [failure model](docs/FAILURE_MODEL.md), with current,
+partial, and planned test evidence kept explicit.
+
 Detailed baseline implementation behavior is recorded separately in
 [Current execution behavior](docs/EXECUTION_GUARANTEES.md).
 
