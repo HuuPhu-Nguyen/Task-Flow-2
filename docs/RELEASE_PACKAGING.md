@@ -7,24 +7,26 @@ support status in `docs/RABBITMQ_SCOPE.md`.
 ## Decision
 
 TaskFlow publishes role-specific Maven package outputs instead of one default
-peer artifact for every role.
+participant artifact for every role. Existing `taskflow-peer` artifact names
+remain compatibility names for the command-line participant runtime.
 
-- The coordinator is a shaded server jar:
+- The sole-authority coordinator is a shaded server jar:
   `taskflow-coordinator-<version>-coordinator-runtime.jar`.
-- The command-line peer has three shaded jars:
+- The command-line participant has three shaded jars:
   `taskflow-peer-<version>-combined-runtime.jar`,
   `taskflow-peer-<version>-submitter-runtime.jar`, and
   `taskflow-peer-<version>-executor-runtime.jar`.
-- The JavaFX peer is a classpath package, not a shaded fat jar, because JavaFX
-  dependencies are platform-specific and should stay visible.
+- The JavaFX participant is a classpath package, not a shaded fat jar, because
+  JavaFX dependencies are platform-specific and should stay visible.
 - Plugin bundles stay as role-split Maven artifacts under `plugins/<domain>`.
 - Docker Compose remains the broker-backed demo distribution, not the only
   release packaging mechanism.
 
-The default `combined-runtime` peer is a convenience and demo package. Use the
-role-specific submitter or executor package for smaller deployment classpaths.
-The submitter package intentionally omits peer processor artifacts and native
-media dependencies such as JavaCV/FFmpeg.
+The default `combined-runtime` participant is a dual-role convenience and demo
+package. Use the requester-only `submitter-runtime` profile or the executor-only
+profile for smaller deployment classpaths. The requester package intentionally
+omits peer processor artifacts and native media dependencies such as
+JavaCV/FFmpeg.
 
 ## Package Commands
 
@@ -40,7 +42,7 @@ Output:
 taskflow-coordinator/target/taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar
 ```
 
-Build command-line peer packages:
+Build command-line participant packages:
 
 ```powershell
 .\mvnw.cmd --batch-mode --no-transfer-progress -pl taskflow-peer -Pcombined-runtime -am -DskipTests package
@@ -56,7 +58,7 @@ taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-submitter-runtime.jar
 taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-executor-runtime.jar
 ```
 
-Build a JavaFX peer jar for the selected role profile:
+Build a JavaFX participant jar for the selected role profile:
 
 ```powershell
 .\mvnw.cmd --batch-mode --no-transfer-progress -pl taskflow-gui -Pcombined-runtime -am -DskipTests package
@@ -96,22 +98,22 @@ Coordinator package:
 - Excludes client plugin artifacts, peer processor artifacts, JavaFX, and
   JavaCV/FFmpeg processor dependencies.
 
-Command-line peer packages:
+Command-line participant packages (`taskflow-peer` artifact):
 
-- `combined-runtime` includes both client plugins and peer processors. It is
-  the default command-line peer package profile for local demos and Docker
-  Compose.
-- `submitter-runtime` includes client plugins only. Use it for one-shot
-  RabbitMQ submissions or DLQ commands that should not carry processor/native
-  dependencies.
-- `executor-runtime` includes peer processors only. Use it for worker nodes
-  that should execute assignments without carrying local payload creation and
-  result handling plugins.
+- `combined-runtime` includes both requester/client plugins and executor/peer
+  processors. It is the default dual-role command-line participant package
+  profile for local demos and Docker Compose.
+- `submitter-runtime` is the retained profile name for the requester role and
+  includes client plugins only. Use it for one-shot RabbitMQ submissions or
+  DLQ commands that should not carry processor/native dependencies.
+- `executor-runtime` includes peer processors only. Use it for executor-only
+  participant nodes that should execute assignments without carrying local
+  payload creation and result-handling plugins.
 
-JavaFX peer packages:
+JavaFX participant packages:
 
 - Follow the same `combined-runtime`, `submitter-runtime`, and
-  `executor-runtime` profile split as the command-line peer.
+  `executor-runtime` profile split as the command-line participant.
 - Stay classpath-based so JavaFX and platform-specific runtime dependencies are
   inspectable and replaceable by the packager.
 - Use `gui.PeerAppLauncher` as the package entry point.
@@ -120,8 +122,9 @@ Plugin bundles:
 
 - Keep shared model classes in `plugins/<domain>/model`.
 - Add coordinator behavior through `plugins/<domain>/server`.
-- Add local submit/result behavior through `plugins/<domain>/client`.
-- Add executor behavior and heavy processor dependencies through
+- Add requester-role local submit/result behavior through
+  `plugins/<domain>/client`.
+- Add executor-role behavior and heavy processor dependencies through
   `plugins/<domain>/peer`.
 - Wire only the needed role artifact into each runtime package.
 
@@ -166,9 +169,9 @@ Required checks for the current package strategy:
   `javacv-platform`, or `pdfbox`.
 - `taskflow-peer -Pexecutor-runtime` and
   `taskflow-gui -Pexecutor-runtime` must not depend on client plugin artifacts.
-- The example plugin must remain outside coordinator, peer, and GUI runtime
-  packages unless it is deliberately promoted from authoring template to
-  supported runtime plugin.
+- The example plugin must remain outside coordinator, command-line participant,
+  and GUI participant runtime packages unless it is deliberately promoted from
+  authoring template to supported runtime plugin.
 
 ## Deferred Packaging
 

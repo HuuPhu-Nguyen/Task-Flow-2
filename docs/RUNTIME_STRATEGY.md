@@ -5,8 +5,9 @@ guarantees beyond `docs/EXECUTION_GUARANTEES.md`.
 
 ## Decision
 
-RabbitMQ is the default runtime for the coordinator, command-line peers, and
-JavaFX GUI peers when `TASKFLOW_TRANSPORT` is unset or blank.
+RabbitMQ is the default runtime for the coordinator, command-line participants
+(the existing `taskflow-peer` artifact), and JavaFX GUI participants when
+`TASKFLOW_TRANSPORT` is unset or blank.
 
 TCP is deprecated as the legacy local compatibility/demo path. It remains
 available only when selected explicitly with `TASKFLOW_TRANSPORT=tcp`, and TCP
@@ -20,9 +21,10 @@ broker outage/restart recovery remains outside the current support claim.
 
 The broker-backed runtime is the better long-term fit for the framework:
 
-- peers have explicit broker identities and peer-targeted assignment/result
+- participants have explicit broker identities and peer-targeted compatibility
   routes;
-- coordinator and peer processes can communicate without one socket per peer;
+- coordinator and participant processes can communicate without one socket per
+  participant;
 - broker queues expose natural integration points for prefetch, acknowledgement,
   dead-lettering, and later operator workflows;
 - the Docker Compose demo already exercises a distributed broker-backed path.
@@ -36,8 +38,8 @@ operational gaps are closed.
 - The JavaFX GUI submits jobs, executes assigned work, and receives live results
   through RabbitMQ by default or TCP when `TASKFLOW_TRANSPORT=tcp`.
 - TCP is selected explicitly with `TASKFLOW_TRANSPORT=tcp` for the coordinator,
-  command-line peer, and JavaFX GUI.
-- TCP and RabbitMQ peers share the explicit peer identity contract in
+  command-line participant, and JavaFX participant.
+- TCP and RabbitMQ participants share the explicit peer identity contract in
   `docs/PEER_IDENTITY.md`: `TASKFLOW_PEER_ID` provides stable configured IDs,
   generated fallback IDs are runtime-scoped, and TCP no longer uses remote
   socket addresses as peer IDs.
@@ -49,10 +51,11 @@ operational gaps are closed.
   IDs with the sanitized peer ID, a timestamp, and a full UUID. The scheduler
   rejects duplicate job IDs that are already active or present in persisted job
   history when persistence is enabled.
-- RabbitMQ command-line peers can register with peer IDs, send heartbeats,
-  execute assigned work, submit jobs, receive `JOB_RESULT`, and handle
-  successful final results through `ClientJobPlugin.handleResult(...)`.
-- RabbitMQ JavaFX peers use GUI service adapters for signed job submission,
+- RabbitMQ command-line participants can register with peer IDs, send heartbeats,
+  execute assigned work in the executor role, submit jobs in the requester role,
+  receive `JOB_RESULT`, and handle successful final results through
+  `ClientJobPlugin.handleResult(...)`.
+- RabbitMQ JavaFX participants use GUI service adapters for signed job submission,
   peer-specific task assignment, task-result publication, live `JOB_RESULT`
   routing, and plugin-backed result handling. RabbitMQ GUI result-request replay
   after restart is not implemented.
@@ -64,13 +67,13 @@ operational gaps are closed.
   final `JOB_RESULT` messages in a broker outbox transactionally with scheduler
   state changes, replay pending rows on startup, and retry unsent rows while the
   coordinator runs.
-- RabbitMQ dead-letter entries can be inspected through the command-line peer
-  artifact, redriven to their original routing key when they contain valid
-  TaskFlow broker envelopes, quarantined, or discarded.
+- RabbitMQ dead-letter entries can be inspected through the compatibility
+  `taskflow-peer` artifact, redriven to their original routing key when they
+  contain valid TaskFlow broker envelopes, quarantined, or discarded.
 - RabbitMQ has focused live broker coverage, including coordinator outbox
   crash-window scenarios, a dedicated GitHub Actions broker integration job,
   and a Docker Compose demo. Live broker tests remain opt-in for local runs.
-- Focused RabbitMQ failure-path tests cover command-line peer submit publish
+- Focused RabbitMQ failure-path tests cover command-line requester publish
   exceptions, JavaFX GUI heartbeat publish failure, task-result publish
   failure, task-execution failure requeue, publisher confirms,
   requeue/reject/DLQ behavior, and result routing.
@@ -88,7 +91,7 @@ TCP deprecation has started, and TCP removal remains separate.
   `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
   `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
 - Keep broader broker-failure integration tests passing for coordinator,
-  command-line peer, GUI service adapters, publisher confirms,
+  command-line participant, GUI service adapters, publisher confirms,
   requeue/reject/DLQ behavior, and result routing.
 - The RabbitMQ-backed CI integration profile remains reliable for the focused
   live broker gates.

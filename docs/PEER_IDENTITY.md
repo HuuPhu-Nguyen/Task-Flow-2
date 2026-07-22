@@ -1,13 +1,19 @@
-# Peer Identity Scope
+# Participant Identity (`peer` Compatibility Names)
 
-This document records the current peer identity contract for TaskFlow. It does
-not add authentication guarantees; requester tokens and requester signatures are
+This document records the current participant identity contract for TaskFlow.
+The existing peer-ID, `nodeId`, registry, route, and configuration names are
+retained compatibility names. On assignment and result paths they identify the
+participant acting in the executor role; they do not confer coordinator
+authority. The tracked protocol and schema currently use `peerId`, `nodeId`,
+and `assigned_peer_id` rather than a literal `workerId`; this terminology task
+does not rename persisted or wire identity fields. This document does not add
+authentication guarantees; requester tokens and requester signatures are
 covered separately in `docs/EXECUTION_GUARANTEES.md`.
 
 ## Current Contract
 
-TaskFlow peers use explicit peer IDs across TCP, RabbitMQ, command-line peers,
-and JavaFX GUI peers.
+TaskFlow participants use explicit peer IDs across TCP, RabbitMQ, command-line
+participants, and JavaFX GUI participants.
 
 - `TASKFLOW_PEER_ID` is the shared configuration variable for stable peer IDs.
 - Peer IDs are normalized through the shared `protocol.PeerIdentity` helper.
@@ -21,15 +27,15 @@ and JavaFX GUI peers.
   Set `TASKFLOW_PEER_ID` for a stable identity across restarts, logs, broker
   routes, and peer-scoped job IDs.
 
-Generated runtime IDs keep local demos and concurrent ad-hoc peers from
+Generated runtime IDs keep local demos and concurrent ad-hoc participants from
 colliding by default. A persistent locally generated ID store is deferred until
-local identity, duplicate detection, restarts, and concurrent peers have a
+local identity, duplicate detection, restarts, and concurrent participants have a
 clearer user-facing policy.
 
 ## TCP Behavior
 
-The TCP coordinator no longer identifies peers by server-side socket address.
-It sends an initial `PING`, and updated peers answer with a `PONG` whose
+The TCP coordinator no longer identifies participants by server-side socket address.
+It sends an initial `PING`, and updated participants answer with a `PONG` whose
 `nodeId` is their explicit peer ID. The first `PONG`, `JOB_SUBMIT`, or
 `TASK_RESULT` from a connection establishes the connection peer ID.
 
@@ -38,25 +44,26 @@ nonblank `nodeId`. A message that tries to switch identity closes the
 connection.
 
 Active duplicate TCP peer IDs are rejected by the coordinator registry. The
-duplicate connection is closed without replacing the existing peer record and
-without emitting a scheduler peer-disconnect event for the existing peer.
+duplicate connection is closed without replacing the existing participant
+record and without emitting a scheduler peer-disconnect event for the existing
+participant.
 
 ## RabbitMQ Behavior
 
-RabbitMQ peers publish heartbeats and peer-routed messages with the same
+RabbitMQ participants publish heartbeats and peer-routed messages with the same
 explicit peer ID. The coordinator rejects heartbeats whose broker envelope
 sender and protocol `nodeId` disagree.
 
 Current RabbitMQ routing uses peer-specific queues keyed by peer ID. Two active
-RabbitMQ peers configured with the same peer ID are an invalid deployment
+RabbitMQ participants configured with the same peer ID are an invalid deployment
 configuration because the broker cannot disambiguate which process should own
 that peer route. Configure unique `TASKFLOW_PEER_ID` values for concurrent
-RabbitMQ peers.
+RabbitMQ participants.
 
 ## Persisted Metadata
 
 When SQLite persistence is available, the coordinator records durable
-last-known peer metadata keyed by peer ID:
+last-known participant metadata keyed by peer ID:
 
 - runtime type and transport;
 - supported task types from heartbeat metadata;
@@ -79,7 +86,7 @@ JOB_<sanitized-peer-id>_<epoch-millis>_<full-uuid>
 
 The generated shape is safe for logs, SQLite keys, task IDs, and output folder
 names. The peer ID segment makes submitted jobs traceable to the submitting
-peer, while the full UUID suffix avoids relying on a short random fragment.
+participant, while the full UUID suffix avoids relying on a short random fragment.
 
 The scheduler rejects a `JOB_SUBMIT` when its job ID is already active. When
 persistence is enabled, it also rejects a submitted job ID that already exists
@@ -88,7 +95,7 @@ in persisted job history.
 ## Deferred Work
 
 - RabbitMQ does not yet have a control route to reject or disconnect a duplicate
-  broker peer process after it has started consuming a shared peer queue.
+  participant process after it has started consuming a shared peer queue.
 - Peer IDs are not user/account authentication.
 
 ## Evidence

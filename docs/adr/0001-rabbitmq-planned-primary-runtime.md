@@ -12,16 +12,18 @@ RabbitMQ transport with explicit peer IDs, peer-targeted routes, publisher
 confirms, manual acknowledgement, prefetch, DLQ workflow, coordinator outbox
 replay, JavaFX service adapters, and broker-backed CI coverage.
 
-RabbitMQ is a better long-term fit for a coordinated peer-to-peer framework
-because it provides queueing, acknowledgement, dead-lettering, operator
-inspection points, and fewer direct coordinator-to-peer socket assumptions.
+RabbitMQ is a better long-term fit for a coordinator-mediated distributed
+task-execution framework with dual-role participant nodes because it provides
+queueing, acknowledgement, dead-lettering, operator inspection points, and
+fewer direct coordinator-to-participant socket assumptions.
 Even so, RabbitMQ still lacks full broker outage/restart coverage and some
 operational hardening required for production-runtime claims.
 
 ## Decision
 
-RabbitMQ is the default runtime for the coordinator, command-line peers, and
-JavaFX GUI peers when `TASKFLOW_TRANSPORT` is unset or blank.
+RabbitMQ is the default runtime for the coordinator, command-line participants
+(the existing `taskflow-peer` artifact), and JavaFX GUI participants when
+`TASKFLOW_TRANSPORT` is unset or blank.
 
 TCP is deprecated as the legacy local compatibility/demo path and remains
 available only when selected explicitly with `TASKFLOW_TRANSPORT=tcp`. TCP
@@ -56,5 +58,5 @@ removal must be a later cleanup with no unrelated feature work.
 - [Runtime Strategy](../RUNTIME_STRATEGY.md)
 - [RabbitMQ Runtime Scope Decision](../RABBITMQ_SCOPE.md)
 - [Execution Guarantees](../EXECUTION_GUARANTEES.md)
-- [Peer Identity](../PEER_IDENTITY.md)
+- [Participant Identity (`peer` Compatibility Names)](../PEER_IDENTITY.md)
 - [Backpressure Scope](../BACKPRESSURE_SCOPE.md)

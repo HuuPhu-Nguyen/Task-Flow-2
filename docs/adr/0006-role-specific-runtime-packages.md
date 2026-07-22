@@ -6,11 +6,11 @@ Date: 2026-07-04
 
 ## Context
 
-TaskFlow runtime roles do not need the same dependencies. A submitter needs
-client plugins for local payload creation and result handling, while an
-executor needs peer processor plugins and may need heavy native dependencies.
-The coordinator needs server plugins but not GUI, client, or peer processor
-artifacts.
+TaskFlow runtime roles do not need the same dependencies. A requester-enabled
+participant needs client plugins for local payload creation and result handling,
+while an executor-enabled participant needs peer processor plugins and may need
+heavy native dependencies. The coordinator needs server plugins but not GUI,
+client, or peer processor artifacts.
 
 A single all-in-one runtime package makes local demos convenient but hides role
 boundaries and carries unnecessary dependencies into narrow deployments.
@@ -20,8 +20,10 @@ boundaries and carries unnecessary dependencies into narrow deployments.
 TaskFlow publishes role-specific runtime packages:
 
 - coordinator shaded runtime jar;
-- command-line peer combined, submitter, and executor shaded jars;
-- JavaFX classpath package with combined, submitter, and executor dependency
+- command-line participant combined, requester (`submitter-runtime`), and
+  executor shaded jars under the retained `taskflow-peer` artifact name;
+- JavaFX participant classpath package with combined, requester
+  (`submitter-runtime`), and executor dependency
   profiles;
 - plugin bundles as role-split Maven artifacts.
 
@@ -31,7 +33,8 @@ release packaging mechanism.
 ## Consequences
 
 - `combined-runtime` stays convenient for local demos.
-- `submitter-runtime` omits peer processor artifacts and heavy executor-only
+- `submitter-runtime` is the compatibility profile name for the requester role;
+  it omits peer processor artifacts and heavy executor-only
   dependencies.
 - `executor-runtime` omits client plugin artifacts.
 - JavaFX remains classpath-based because JavaFX dependencies are

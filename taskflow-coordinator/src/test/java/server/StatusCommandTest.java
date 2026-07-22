@@ -127,7 +127,17 @@ class StatusCommandTest {
         String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), Map.of(), "status", "--help");
 
         assertTrue(output.contains("status [summary|jobs|peers|outbox|queues|dlq] [count]"));
+        assertTrue(output.contains("participant rows (peer registry compatibility view)"));
         assertTrue(output.contains("Views:"));
+    }
+
+    @Test
+    void peersViewLabelsEntriesAsParticipantsWhileKeepingCompatibilityCommand() throws Exception {
+        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), Map.of(),
+                "status", "peers", "1");
+
+        assertTrue(output.contains("TaskFlow participants (peers compatibility view) limit=1"));
+        assertTrue(output.contains("peer[1] id="));
     }
 
     private static String runStatus(FakeStatusDataSource dataSource,

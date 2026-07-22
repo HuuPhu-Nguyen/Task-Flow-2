@@ -1,26 +1,31 @@
-# Peer Submitter And Result Lifecycle
+# Participant Requester And Result Lifecycle
 
-This document records how submitter and result-handling behavior fits the
-coordinated peer-to-peer architecture. It does not add transport guarantees
-beyond `docs/EXECUTION_GUARANTEES.md`.
+This document records how requester, executor, and result-handling behavior fits
+TaskFlow's coordinator-mediated distributed task-execution architecture. It does
+not add transport guarantees beyond `docs/EXECUTION_GUARANTEES.md`.
+
+`taskflow-peer`, `PeerNode`, `RabbitMqPeerNode`, peer IDs, and peer-routed queue
+names are retained compatibility names. They identify participant runtimes and
+routes; they do not imply that participants share the coordinator's scheduling
+or authoritative result-commit authority.
 
 ## Decision
 
-A TaskFlow peer can combine three capabilities:
+A TaskFlow participant can enable either or both runtime roles:
 
-- submit jobs through a `ClientJobPlugin`;
-- advertise task capabilities and execute assigned work through
-  `PeerProcessorPlugin` implementations;
-- receive terminal `JOB_RESULT` messages for jobs it submitted and handle
-  successful final results through the matching `ClientJobPlugin`.
+- **Requester role:** submit jobs through a `ClientJobPlugin`, receive terminal
+  `JOB_RESULT` messages for those jobs, and handle successful final results
+  through the matching `ClientJobPlugin`.
+- **Executor role:** advertise task capabilities and execute coordinator-assigned
+  work through `PeerProcessorPlugin` implementations.
 
-The JavaFX GUI is the peer-facing UI for the default RabbitMQ path and the
-explicit legacy TCP path, not a separate client/server application. The
-command-line peer is the headless peer runtime.
+The JavaFX GUI is the participant-facing UI for the default RabbitMQ path and
+the explicit legacy TCP path, not a separate client/server application. The
+`taskflow-peer` artifact is the headless command-line participant runtime.
 Both are expected to use the same plugin ownership rules when they submit jobs
 or handle successful final results.
 
-RabbitMQ is the default runtime for these peer roles. The GUI now has RabbitMQ
+RabbitMQ is the default runtime for these participant roles. The GUI has RabbitMQ
 service adapters for live broker-backed submit, execute, result routing, and
 result handling, while deprecated TCP remains available only when selected with
 `TASKFLOW_TRANSPORT=tcp`. `docs/RUNTIME_STRATEGY.md` records the runtime
@@ -28,19 +33,20 @@ direction and the gates before TCP can be removed.
 
 ## Lifecycle
 
-1. A submit-capable peer loads `ClientJobPlugin` providers on its runtime
+1. A requester-enabled participant loads `ClientJobPlugin` providers on its runtime
    classpath.
 2. The selected client plugin validates local options, reads local inputs, and
    builds JSON-serializable job payloads.
-3. The peer sends `JOB_SUBMIT` with a peer-scoped job id, requester token, and
+3. The participant sends `JOB_SUBMIT` with a peer-scoped compatibility job id, requester token, and
    requester identity signature when supported by that path.
-4. Peers use the explicit peer ID contract in `docs/PEER_IDENTITY.md`; set
+4. Participants use the explicit peer ID compatibility contract in `docs/PEER_IDENTITY.md`; set
    `TASKFLOW_PEER_ID` for stable identity across restarts.
-5. Execute-capable peers advertise supported task types through heartbeat
+5. Executor-enabled participants advertise supported task types through heartbeat
    metadata and process `TASK_ASSIGN` messages with peer processor plugins.
 6. The coordinator validates submissions and aggregates task results through
    server-side task plugins.
-7. The coordinator returns a terminal `JOB_RESULT` to the submitting peer.
+7. The coordinator returns a terminal `JOB_RESULT` to the requester role of the
+   submitting participant.
 8. The submitter-side result handler checks whether the job id is one it is
    tracking, then routes successful final results by task type to
    `ClientJobPlugin.handleResult(...)`.
@@ -68,10 +74,10 @@ The JavaFX GUI path is implemented through GUI-facing services:
 - `GuiResultSaveService` handles successful final results with the matching
   `ClientJobPlugin`.
 
-The RabbitMQ command-line peer path is implemented in `RabbitMqPeerNode`:
+The RabbitMQ command-line participant path is implemented in `RabbitMqPeerNode`:
 
 - `submit` mode loads client plugins, builds payloads, publishes `JOB_SUBMIT`,
-  and waits on the submitting peer's `JOB_RESULT` route.
+  and waits on the submitting participant's `JOB_RESULT` route.
 - While using the default `combined-runtime` profile, the same process also
   remains available for assigned task execution.
 - Successful results are handled under `target/rabbitmq-results/<jobId>` by
@@ -79,9 +85,9 @@ The RabbitMQ command-line peer path is implemented in `RabbitMqPeerNode`:
 - A `JOB_RESULT` for another job id is acknowledged and ignored while the
   submitter waits for its own job.
 
-The legacy TCP command-line `PeerNode` supports task execution and has a
+The legacy TCP command-line `PeerNode` supports the executor role and has a
 low-level signed `submitJob(...)` helper, but it does not provide a supported
-submit-and-save result workflow. Use the JavaFX GUI for an interactive peer UI,
+submit-and-save result workflow. Use the JavaFX GUI for an interactive participant UI,
 or use the RabbitMQ command-line submit path for a headless submit-and-save
 flow.
 
@@ -92,9 +98,9 @@ by a broad refactor in isolation:
 
 - GUI and RabbitMQ command-line result handlers both resolve a
   `ClientJobPlugin` by final result task type and call `handleResult(...)`.
-  A future shared peer-facing result service should accept transport/UI policy
+  A future shared participant-facing result service should accept transport/UI policy
   for output location, failed-handler behavior, and acknowledgement timing.
-- GUI and command-line peers now share `protocol.JobIds` for peer-scoped,
+- GUI and command-line participants share `protocol.JobIds` for peer-scoped,
   collision-resistant job IDs. A future shared submitter service should avoid
   duplicating the surrounding requester-token, requester-signature, and send
   failure cleanup policy.

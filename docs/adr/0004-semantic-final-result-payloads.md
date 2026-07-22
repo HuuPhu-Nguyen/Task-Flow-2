@@ -51,6 +51,6 @@ to save, render, print, or otherwise handle successful final results.
 
 ## Related Documents
 
-- [Peer Submitter And Result Lifecycle](../PEER_LIFECYCLE.md)
+- [Participant Requester And Result Lifecycle](../PEER_LIFECYCLE.md)
 - [Plugin Authoring](../PLUGIN_AUTHORING.md)
 - [Execution Guarantees](../EXECUTION_GUARANTEES.md)

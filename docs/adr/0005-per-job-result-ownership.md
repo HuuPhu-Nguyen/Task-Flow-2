@@ -50,5 +50,5 @@ a credential vault are deferred unless the project scope expands.
 ## Related Documents
 
 - [Execution Guarantees](../EXECUTION_GUARANTEES.md)
-- [Peer Identity](../PEER_IDENTITY.md)
+- [Participant Identity (`peer` Compatibility Names)](../PEER_IDENTITY.md)
 - [Protocol Compatibility](../PROTOCOL_COMPATIBILITY.md)

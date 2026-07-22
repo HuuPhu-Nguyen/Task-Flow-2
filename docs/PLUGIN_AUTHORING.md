@@ -1,14 +1,18 @@
 # TaskFlow Plugin Authoring
 
 This guide describes how to add a new TaskFlow job type without changing
-scheduler, coordinator, GUI, peer, or transport internals.
+scheduler, coordinator, participant runtime, GUI, or transport internals.
 
 TaskFlow discovers job behavior through Java `ServiceLoader` providers on the
 runtime classpath:
 
 - `server.job.TaskPlugin` for coordinator-side validation and job construction.
-- `client.ClientJobPlugin` for client-side payload creation and final-result handling.
-- `peer.engine.PeerProcessorPlugin` for peer-side task execution.
+- `client.ClientJobPlugin` for requester-role payload creation and final-result handling.
+- `peer.engine.PeerProcessorPlugin` for executor-role task execution.
+
+The `client` and `peer` package/module names are retained compatibility names.
+Both plugin types run in participant nodes; neither owns coordinator scheduling
+or authoritative result commitment.
 
 The `plugins/example` bundle is the executable authoring template and harness.
 The existing `plugins/conversion` and `plugins/text` bundles are production
@@ -35,10 +39,11 @@ Use the modules this way:
   than one role. Keep it free of runtime-heavy dependencies.
 - `server`: Coordinator-side `TaskPlugin`, `EmbarrassinglyParallelJob`,
   `TaskUnit`, and submission validation.
-- `client`: `ClientJobPlugin` implementations that turn local files into
+- `client`: Requester-role `ClientJobPlugin` implementations that turn local files into
   payload objects and handle final results.
-- `peer`: `PeerProcessorPlugin` implementations and `TaskProcessor` classes that
-  execute assigned tasks. Heavy processor-only dependencies belong here.
+- `peer`: Executor-role `PeerProcessorPlugin` implementations and `TaskProcessor`
+  classes that execute coordinator-assigned tasks. Heavy processor-only
+  dependencies belong here; `peer` is the retained module name.
 
 Add the domain parent POM to the root reactor, then add its role modules to the
 domain parent. Add artifacts to root dependency management if they need to be
@@ -57,7 +62,7 @@ plugins:
   `aggregateResultPayload()` with a semantic final summary.
 - `client` reads local `.txt` files through `ClientJobPlugin.buildPayloads(...)`
   and writes a final report through `ClientJobPlugin.handleResult(...)`.
-- `peer` registers a `PeerProcessorPlugin` and executes assigned word-count
+- `peer` registers an executor-role `PeerProcessorPlugin` and executes assigned word-count
   tasks.
 - `harness` runs a cross-role contract test that discovers the three service
   providers, builds payloads, validates and splits a job, processes assignments,
@@ -128,14 +133,14 @@ into independent tasks. A job should:
 - Build deterministic task IDs while initializing tasks.
 - Convert raw payloads and results through typed model objects.
 - Accept results only through `recordResult`; the base class already rejects
-  stale results from peers that no longer own the task.
+  stale results from executor participants that no longer own the task.
 - Aggregate final results in deterministic order when ordering matters.
 - Override `aggregateResultPayload()` when the final job result should be a
   report, summary, ranking, reduction, preview model, or another semantic
   object instead of the compatibility `List<Object>` returned by
   `aggregateAndSendResult()`.
-- Include the same task type and parameter in `TaskAssignMessage` that the peer
-  processor expects.
+- Include the same task type and parameter in `TaskAssignMessage` that the
+  executor/peer processor expects.
 
 ## Client Plugin
 
@@ -186,9 +191,9 @@ writing files from result-provided names. Do not trust result filenames to stay
 inside the selected output directory, and do not silently overwrite duplicate
 result names unless the plugin's behavior explicitly requires it.
 
-## Peer Plugin
+## Executor Plugin (`peer` Compatibility Module)
 
-The peer module owns task execution.
+The `peer` module owns executor-role task execution.
 
 Implement `peer.engine.PeerProcessorPlugin`:
 
@@ -203,11 +208,12 @@ plugins/<domain>/peer/src/main/resources/META-INF/services/peer.engine.PeerProce
 
 The processor receives a `TaskAssignMessage` and returns a JSON-serializable
 result object. Convert `task.getPayload()` into the typed model object used by
-the server job. Throw an exception when the task cannot be processed; the peer
-execution engine converts failures into failed `TASK_RESULT` messages.
+the server job. Throw an exception when the task cannot be processed; the
+participant's executor engine converts failures into failed `TASK_RESULT`
+messages.
 
-Keep native, media, ML, or other heavy execution dependencies in the peer module
-when submitters do not need them.
+Keep native, media, ML, or other heavy execution dependencies in the `peer`
+module when requester-only participants do not need them.
 
 ## Runtime Classpaths
 
@@ -217,13 +223,15 @@ right runtime classpath.
 - `taskflow-coordinator` should depend on the plugin's `server` artifact at
   runtime. It should not need client or peer artifacts.
 - `taskflow-peer` `combined-runtime` should include both `client` and `peer`
-  artifacts when a command-line peer can submit jobs and execute tasks.
-- `taskflow-peer` `submitter-runtime` should include only `client` artifacts.
-- `taskflow-peer` `executor-runtime` should include only `peer` artifacts.
+  artifacts when a command-line participant enables requester and executor roles.
+- `taskflow-peer` `submitter-runtime` is the requester-only compatibility profile
+  and should include only `client` artifacts.
+- `taskflow-peer` `executor-runtime` enables only the executor role and should
+  include only `peer` artifacts.
 - `taskflow-gui` follows the same `combined-runtime`, `submitter-runtime`, and
   `executor-runtime` split as `taskflow-peer`.
 
-The coordinator and peer shaded JARs already use Maven Shade's
+The coordinator and command-line participant shaded JARs already use Maven Shade's
 `ServicesResourceTransformer`, so service files from plugin artifacts are
 merged into packaged runtime JARs.
 

@@ -38,9 +38,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class PeerNodeTest {
 
     @Test
-    void usageDescribesProfileSpecificPeerPackages() {
+    void usageDescribesParticipantRolesAndProfileSpecificPackages() {
         String usage = PeerNode.usage();
 
+        assertTrue(usage.contains("participant runtime"));
+        assertTrue(usage.contains("requester role"));
+        assertTrue(usage.contains("executor role"));
         assertTrue(usage.contains("taskflow-peer-<version>-combined-runtime.jar"));
         assertTrue(usage.contains("taskflow-peer-<version>-submitter-runtime.jar"));
         assertTrue(usage.contains("taskflow-peer-<version>-executor-runtime.jar"));

@@ -2,11 +2,15 @@
 
 This document defines the current runtime guarantees of TaskFlow.
 
+TaskFlow is a coordinator-mediated distributed task-execution framework. The
+coordinator owns authoritative scheduling and state transitions; participant
+nodes may enable the requester role, executor role, or both.
+
 ## Delivery and Execution Semantics
 
 - **Task execution model:** at-least-once.
 - **Implication:** a task may run more than once in failure or timeout scenarios.
-- **Idempotency guard:** a task result is accepted only when it comes from the currently assigned peer and the task is in `ASSIGNED` state.
+- **Idempotency guard:** a task result is accepted only when it comes from the currently assigned executor participant and the task is in `ASSIGNED` state. Existing peer-ID fields carry that participant identity.
 
 ## Job Submission Validation
 
@@ -20,26 +24,26 @@ This document defines the current runtime guarantees of TaskFlow.
   job history.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid Base64 file data, and invalid conversion payload-reference shapes.
-- Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns peer work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
+- Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns executor work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
 
-## Peer Submitter and Result Handling
+## Participant Requester and Result Handling
 
-- Peers may combine submitter, executor, and result-handler capabilities depending on their runtime profile and transport.
-- TCP, RabbitMQ, command-line peers, and JavaFX GUI peers use explicit sanitized peer IDs. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
-- TCP coordinator registration uses the peer-declared ID from heartbeat or first peer message, not the server-side socket address. Active duplicate TCP peer IDs are rejected without replacing the existing peer.
-- Current RabbitMQ peer routes are keyed by peer ID; duplicate active RabbitMQ peers with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
+- Participants may combine requester and executor roles depending on their runtime profile and transport; receiving and handling results belongs to the requester role.
+- TCP, RabbitMQ, command-line participants, and JavaFX participants use explicit sanitized peer IDs as compatibility identifiers. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
+- TCP coordinator registration uses the participant's declared peer ID from its heartbeat or first message, not the server-side socket address. Active duplicate TCP peer IDs are rejected without replacing the existing participant.
+- Current RabbitMQ participant routes are keyed by peer ID; duplicate active participants with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
 - When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Live sockets, connection handles, broker consumers, and channels are not persisted.
 - Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling. Conversion submitters inline Base64 by default and can use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
-- The JavaFX GUI is the supported peer UI for TCP submit, execute, receive-result, and save-result behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
+- The JavaFX GUI is the supported participant UI for TCP requester/executor behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
-- The legacy TCP command-line peer can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
+- The legacy TCP command-line participant can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
 - `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
 - `docs/PEER_IDENTITY.md` records the peer identity contract, sanitization, duplicate-ID behavior, and generated fallback limits.
 
 ## Runtime Direction
 
-- RabbitMQ is the default runtime for the coordinator, command-line peers, and JavaFX GUI peers when `TASKFLOW_TRANSPORT` is unset or blank.
+- RabbitMQ is the default runtime for the coordinator, command-line participants, and JavaFX GUI participants when `TASKFLOW_TRANSPORT` is unset or blank.
 - TCP is deprecated as the legacy local compatibility/demo path and remains available only through explicit `TASKFLOW_TRANSPORT=tcp` until a later removal slice.
 - RabbitMQ live broker tests remain opt-in for local runs, and RabbitMQ is still transitional until its remaining documented support-promotion gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
 - `docs/RUNTIME_STRATEGY.md` records the support-promotion, TCP-deprecation, and TCP-removal gates.
@@ -52,8 +56,8 @@ This document defines the current runtime guarantees of TaskFlow.
 - Peer-targeted publishes also use RabbitMQ mandatory-return detection; an unroutable peer-targeted publish is reported as failed.
 - With SQLite persistence available, coordinator `TASK_ASSIGN` and final `JOB_RESULT` publications are stored in a durable broker outbox transactionally with the corresponding task assignment or terminal job-state update.
 - Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
-- Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance remains idempotent by current assigned peer and task state, and terminal job completion is persisted once.
-- Peer-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ peers and the GUI defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
+- Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance remains idempotent by current assigned executor participant and task state, and terminal job completion is persisted once.
+- Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
 - RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it the primary supported runtime.
 
 ## RabbitMQ Connection Recovery
@@ -61,7 +65,7 @@ This document defines the current runtime guarantees of TaskFlow.
 - RabbitMQ client automatic connection recovery is enabled for transport connections.
 - Opt-in live transport coverage verifies that an existing transport can consume and publish again after the broker closes its connection through the RabbitMQ management API.
 - SQLite-backed coordinator outbox replay covers coordinator-originated `TASK_ASSIGN` and final `JOB_RESULT` messages that were queued before a coordinator crash. Live broker coverage verifies seeded pending outbox rows, replay after a simulated publish-before-sent-marking crash window, and duplicate task-result rejection after replayed task assignments.
-- This does not guarantee full broker outage recovery, peer-side durable `TASK_RESULT` replay, or redelivery of messages outside the coordinator outbox.
+- This does not guarantee full broker outage recovery, participant-side durable `TASK_RESULT` replay, or redelivery of messages outside the coordinator outbox.
 
 ## RabbitMQ Dead Lettering
 
@@ -77,21 +81,21 @@ This document defines the current runtime guarantees of TaskFlow.
 ## JavaFX GUI Transport Scope
 
 - The JavaFX GUI uses RabbitMQ by default and selects deprecated TCP only when `TASKFLOW_TRANSPORT=tcp` is set before launch.
-- GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and worker-runtime boundaries for both TCP and RabbitMQ.
-- RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI peer publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
+- GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and the executor-specific `GuiWorkerRuntime` compatibility boundary for both TCP and RabbitMQ.
+- RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI participant publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
 - RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.
 - JavaFX RabbitMQ coverage includes service-level tests plus an automated desktop smoke helper for the text-analysis submit/execute/result/save path. Broader CI-grade JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
 
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
-- TCP peer handlers wait for bounded scheduler-mailbox capacity before admitting `JOB_SUBMIT` and `TASK_RESULT` messages, applying socket-level backpressure instead of dropping those messages.
+- TCP `PeerHandler` compatibility components wait for bounded scheduler-mailbox capacity before admitting `JOB_SUBMIT` and `TASK_RESULT` messages, applying socket-level backpressure instead of dropping those messages.
 - RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
 - Broker deliveries use manual acknowledgement.
-- Deferred acknowledgements keep deliveries unacknowledged until the scheduler or peer explicitly settles them.
+- Deferred acknowledgements keep deliveries unacknowledged until the scheduler or participant explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
-- Adaptive backpressure across broker queue depth, peer capacity, and external autoscaling remains future work. `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and the evidence required before adding adaptive throttling.
+- Adaptive backpressure across broker queue depth, executor capacity, and external autoscaling remains future work. `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and the evidence required before adding adaptive throttling.
 
 ## Task State Machine
 
@@ -101,7 +105,7 @@ Each task moves through:
 - `ASSIGNED`
 - `COMPLETED` or `FAILED` (terminal)
 
-Invalid/stale transitions are ignored (for example duplicate success from a peer that is no longer assigned).
+Invalid/stale transitions are ignored (for example duplicate success from an executor participant that is no longer assigned).
 The SQLite state store also guards these persisted transitions so terminal task/job rows are not overwritten by later updates.
 
 ## Retry and Timeout Policy
@@ -109,18 +113,18 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - **Timeout per assigned task:** 60 seconds.
 - **Lease per assigned task:** 120 seconds.
 - **Maximum retries per task:** 20 attempts.
-- During active scheduler operation, on timeout, lease expiry, or explicit peer execution failure:
+- During active scheduler operation, on timeout, lease expiry, or explicit executor failure:
   - the attempt is counted as failed,
   - the task is retried if attempts remain,
   - otherwise the task moves to terminal `FAILED`.
 - When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment/timing/lease fields are cleared, and `retry_count` is incremented.
 - During startup recovery, an expired or missing lease is released to `PENDING` without incrementing `retry_count`; the next runtime attempt receives a new attempt-history row.
 
-## Capability-Aware Assignment
+## Capability-Aware Executor Assignment
 
-- Peers advertise supported task types in heartbeat metadata.
-- The scheduler assigns a task only to peers that advertise support for that task type.
-- If no capable peer is available, the task remains pending instead of being assigned to an incompatible peer.
+- Executor-enabled participants advertise supported task types in heartbeat metadata.
+- The scheduler assigns a task only to executor participants that advertise support for that task type.
+- If no capable executor participant is available, the task remains pending instead of being assigned to an incompatible participant.
 
 ## Job Completion/Failure
 
@@ -169,19 +173,19 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks with unexpired leases, and releases assigned tasks with expired or missing leases to `PENDING` with a `lease_expired` attempt reason.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
-- After startup, task assignment must be persisted before dispatching work to a peer.
+- After startup, task assignment must be persisted before dispatching work to an executor participant.
 - If retry, task-failure, or task-completion persistence fails after in-memory state changes, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state.
 - For non-outbox outputs, final job-status persistence happens after final result delivery. For RabbitMQ with SQLite persistence, terminal job status and the final `JOB_RESULT` outbox row are committed together before immediate publish/replay. If a non-outbox terminal write fails after delivery, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
 - `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
 - PostgreSQL/Flyway is not implemented. `docs/RECOVERY_SCOPE.md` records the SQLite lease behavior and keeps PostgreSQL/Flyway deferred until there is a concrete external database requirement.
 
-## Heartbeat and Peer Liveness
+## Heartbeat and Participant Liveness
 
 - Coordinator sends periodic `PING` and expects `PONG`.
-- TCP peers answer `PING` with their explicit peer ID and supported task types.
-- Missing heartbeats beyond timeout mark the peer stale, remove it from the
-  live registry, and persist a disconnected last-known peer status when the
+- TCP participants answer `PING` with their explicit peer ID and supported task types.
+- Missing heartbeats beyond timeout mark the participant stale, remove it from the
+  live registry, and persist a disconnected last-known participant status when the
   peer registry store is available.
 
 ## Core Scheduler Metrics

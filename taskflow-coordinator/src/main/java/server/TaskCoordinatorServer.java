@@ -171,6 +171,7 @@ public class TaskCoordinatorServer {
 
     static String usage() {
         return String.join(System.lineSeparator(),
+                "TaskFlow coordinator: sole authority for scheduling, leases, retries, durable state transitions, authoritative result commitment, and job completion.",
                 "java -jar taskflow-coordinator-<version>-coordinator-runtime.jar (default RabbitMQ transport)",
                 "TASKFLOW_TRANSPORT=tcp java -jar taskflow-coordinator-<version>-coordinator-runtime.jar (legacy; prefer TASKFLOW_TRANSPORT=rabbitmq)",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-coordinator-<version>-coordinator-runtime.jar",

@@ -68,7 +68,7 @@ final class StatusCommand {
                 "Views:",
                 "  summary  SQLite jobs/tasks/attempts/peers/outbox plus RabbitMQ summary unless TASKFLOW_TRANSPORT=tcp",
                 "  jobs     Recent persisted jobs with task, retry, and lease counts",
-                "  peers    Last-known persisted peer registry rows",
+                "  peers    Last-known persisted participant rows (peer registry compatibility view)",
                 "  outbox   Pending coordinator RabbitMQ outbox rows",
                 "  queues   Passive RabbitMQ queue depth and consumer counts",
                 "  dlq      RabbitMQ dead-letter queue inspection summary");
@@ -164,7 +164,7 @@ final class StatusCommand {
     private static void printPeers(PrintStream out,
                                    StatusDataSourceFactory dataSourceFactory,
                                    int limit) {
-        out.printf("TaskFlow peers limit=%d%n", limit);
+        out.printf("TaskFlow participants (peers compatibility view) limit=%d%n", limit);
         try (StatusDataSource source = dataSourceFactory.open()) {
             List<PeerRegistryRecord> peers = source.peers().stream()
                     .limit(limit)

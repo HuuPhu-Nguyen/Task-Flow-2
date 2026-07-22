@@ -14,6 +14,8 @@ class TaskCoordinatorServerTest {
     void usageDescribesCoordinatorRuntimePackage() {
         String usage = TaskCoordinatorServer.usage();
 
+        assertTrue(usage.contains("sole authority for scheduling"));
+        assertTrue(usage.contains("authoritative result commitment"));
         assertTrue(usage.contains("taskflow-coordinator-<version>-coordinator-runtime.jar"));
         assertTrue(usage.contains("TASKFLOW_TRANSPORT=tcp"));
         assertTrue(usage.contains("TASKFLOW_TRANSPORT=rabbitmq"));

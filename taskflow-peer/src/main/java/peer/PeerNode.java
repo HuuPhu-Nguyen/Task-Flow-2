@@ -209,10 +209,11 @@ public class PeerNode {
 
     static String usage() {
         return String.join(System.lineSeparator(),
-                "java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]] (default RabbitMQ transport)",
-                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-submitter-runtime.jar submit <task-type> <parameter> <file> [file...]",
-                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-executor-runtime.jar",
-                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]]",
+                "TaskFlow participant runtime (taskflow-peer compatibility artifact): enable the requester role, executor role, or both.",
+                "java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]] (requester + executor; default RabbitMQ transport)",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-submitter-runtime.jar submit <task-type> <parameter> <file> [file...] (requester role)",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-executor-runtime.jar (executor role)",
+                "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]] (requester + executor)",
                 "TASKFLOW_TRANSPORT=rabbitmq java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|redrive|quarantine|discard> [count]",
                 tcpUsageLine());
     }
