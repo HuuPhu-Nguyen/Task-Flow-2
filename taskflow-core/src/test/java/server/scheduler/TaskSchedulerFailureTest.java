@@ -662,6 +662,57 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void samePeerStaleFailureCannotCloseNewerAssignmentGeneration() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(1_000_000L);
+        DeterministicIds assignmentIds = new DeterministicIds(ASSIGNMENT_ONE, ASSIGNMENT_TWO);
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_TASK_TIMEOUT_MS", "100000",
+                "TASKFLOW_TASK_LEASE_MS", "10000",
+                "TASKFLOW_MAX_TASK_RETRIES", "3"
+        ));
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        registry.register("peer-1", new PeerInfo("peer-1", config, List.of("TEST_TASK")));
+        MultiAssignmentOutput output = new MultiAssignmentOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                config,
+                clock,
+                assignmentIds,
+                "COORDINATOR_test"
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-stale-failure-aba-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-stale-failure-aba", List.of("payload")), "requester-1"));
+            MultiAssignmentOutput.Assignment first = output.awaitAssignment();
+            assertNotNull(first);
+
+            mailbox.put(new MessageEnvelope(failedResult(first.task(), "retryable failure"), "peer-1"));
+            MultiAssignmentOutput.Assignment second = output.awaitAssignment();
+            assertNotNull(second);
+            assertEquals(2, second.task().getAttemptNumber());
+
+            mailbox.put(new MessageEnvelope(failedResult(first.task(), "obsolete failure"), "peer-1"));
+            mailbox.put(new MessageEnvelope(successResult(second.task(), "authoritative result"), "peer-1"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(output.result().isSuccessful());
+            assertEquals(List.of("authoritative result"), output.result().getResultsByTaskId());
+            assertEquals(1, scheduler.getMetricsSnapshot().failureCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().taskResultsStaleTotal());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         MutableClock clock = new MutableClock(1_000_000L);

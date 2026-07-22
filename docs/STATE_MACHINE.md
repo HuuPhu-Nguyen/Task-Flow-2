@@ -103,12 +103,24 @@ The logical `TASK_ASSIGN` intent becomes a transactional outbox row in
 RabbitMQ mode and uses the direct compatibility output otherwise; T2 itself
 has no final-result intent because J1 remains a separate aggregate decision.
 
-This reducer describes effects but does not execute them. SQLite conditional
-transactions remain authoritative, and the current scheduler still contains
-the effect-execution branches listed in the mutation ledger below. TF-0204
-owns routing those branches through focused assignment, result, lease,
-completion, and recovery services; this task does not claim that
-`TaskStateMachine` is already the sole runtime mutation path.
+This reducer describes effects but does not execute them. Every mandatory live
+scheduler event now passes through `TaskTransitionDecisions`, which adapts the
+current `TaskUnit` projection to this immutable model. Focused services execute
+accepted effects, while SQLite conditional transactions remain authoritative
+when durable state and memory disagree.
+
+### Runtime responsibility map
+
+| Boundary | Runtime owner |
+|---|---|
+| Mailbox polling and cycle order | `SchedulerLoop`; it delegates message, timeout, lease, dispatch, completion-retry, and metric stages through an in-memory-testable `Work` seam. |
+| J0/T0 submission and broker disposition | `SchedulerMessageService` validates/routes envelopes and adds an active projection only after startup persistence succeeds. |
+| T1 assignment | `AssignmentService` owns placement, assignment preparation, transactional assignment/outbox creation, direct compatibility dispatch, and projection installation. |
+| T2 successful result | `ResultCommitService` owns the typed SQLite commit outcome and applies the result projection only after `COMMITTED`. |
+| T3/T4a failed attempts | `AttemptService` executes one reducer-approved retry or terminal projection and its matching persistence call. `ResultCommitService` supplies executor-failure events; `LeaseService` supplies timeout, lease-expiry, and participant-unavailability events. |
+| J1/J2 and T4b/T5 cascade | `JobCompletionService` owns deterministic aggregation, terminal persistence/outbox intent, delivery retry, and active-projection cleanup. |
+| R1/T3 startup reconciliation and H1 hydration | `CoordinatorStartupRecovery` owns store reconstruction/reconciliation; `RecoveryService` installs the reconciled jobs and invokes terminal aggregation when needed. |
+| Composition and compatibility API | `TaskScheduler` constructs the services and delegates `Runnable`, metrics, and restore calls; it contains no transition rule or infrastructure effect. |
 
 ## Task Transitions
 
@@ -446,31 +458,31 @@ different transition IDs.
 | [`EmbarrassinglyParallelJob.applyCommittedResult(...)`](../taskflow-spi/src/main/java/server/job/EmbarrassinglyParallelJob.java) | T2 projection |
 | `EmbarrassinglyParallelJob.recordResult(...)` compatibility helper | T2 projection helper only; not an authoritative scheduler edge |
 | `EmbarrassinglyParallelJob.restoreTaskForResume(...)` | H1 |
-| [`TaskScheduler.activeJobs.put(...)`](../taskflow-core/src/main/java/server/scheduler/TaskScheduler.java) after successful startup | J0 projection |
-| `TaskScheduler.restoreJobs(...)` active-job insertion | H1 job projection |
-| `TaskScheduler.assign(...)` successful direct-output branch | T1 |
-| `TaskScheduler.assign(...)` guarded preparation/persistence/send rollback branch | T3 projection |
-| `TaskScheduler.assignWithBrokerOutbox(...)` | T1 |
-| `TaskScheduler.handleTaskResult(...)` successful commit branch | T2 |
-| `TaskScheduler.handleTaskResult(...)` unsuccessful retry branch | T3 |
-| `TaskScheduler.handleTaskResult(...)` unsuccessful terminal branch | T4a |
-| `TaskScheduler.checkTimeouts()` retry branch | T3 |
-| `TaskScheduler.checkTimeouts()` terminal branch | T4a |
-| `TaskScheduler.handlePeerUnavailable(...)` retry branch | T3 |
-| `TaskScheduler.handlePeerUnavailable(...)` terminal branch | T4a |
-| `TaskScheduler.expireTaskLeaseIfNeeded(...)` retry branch | T3 |
-| `TaskScheduler.expireTaskLeaseIfNeeded(...)` terminal branch | T4a |
-| `TaskScheduler.persistTaskFailure(...)` retry branch | T3 |
-| `TaskScheduler.persistTaskFailure(...)` terminal branch | T4a |
-| `TaskScheduler.taskFailureUpdatesForJobFailure(...)` for pending tasks | T5 |
-| `TaskScheduler.taskFailureUpdatesForJobFailure(...)` for assigned tasks | T4b |
-| `TaskScheduler.finalizeJobCompletion*` success/removal branches | J1 projection |
-| `TaskScheduler.finalizeJobCompletion*` failure/removal branches | J2 projection |
-| `TaskScheduler.restoreJobs(...)` all-completed branch | J1 orchestration |
-| `TaskScheduler.restoreJobs(...)` terminal-failure branch | J2 orchestration |
-| `TaskScheduler.abandonIfResultDeliveryExhausted(...)` assigned-task branch | T4b |
-| `TaskScheduler.abandonIfResultDeliveryExhausted(...)` pending-task branch | T5 |
-| `TaskScheduler.abandonIfResultDeliveryExhausted(...)` job/removal branch | J2 |
+| [`SchedulerMessageService.handleJobSubmit(...)`](../taskflow-core/src/main/java/server/scheduler/SchedulerMessageService.java) active insertion after startup persistence | J0/T0 projection |
+| [`RecoveryService.restoreJobs(...)`](../taskflow-core/src/main/java/server/scheduler/RecoveryService.java) active-job insertion | H1 job projection |
+| [`AssignmentService.assign(...)`](../taskflow-core/src/main/java/server/scheduler/AssignmentService.java) successful direct-output branch | T1 |
+| `AssignmentService.assign(...)` guarded preparation/persistence/send rollback branch | T3 projection |
+| `AssignmentService.assignWithBrokerOutbox(...)` | T1 |
+| [`ResultCommitService.handleSuccessfulResult(...)`](../taskflow-core/src/main/java/server/scheduler/ResultCommitService.java) committed branch | T2 |
+| `ResultCommitService.handleFailedResult(...)` retry branch | T3 |
+| `ResultCommitService.handleFailedResult(...)` terminal branch | T4a |
+| [`LeaseService.checkTimeouts()`](../taskflow-core/src/main/java/server/scheduler/LeaseService.java) retry branch | T3 |
+| `LeaseService.checkTimeouts()` terminal branch | T4a |
+| `LeaseService.handlePeerUnavailable(...)` retry branch | T3 |
+| `LeaseService.handlePeerUnavailable(...)` terminal branch | T4a |
+| `LeaseService.expireTaskLeaseIfNeeded(...)` retry branch | T3 |
+| `LeaseService.expireTaskLeaseIfNeeded(...)` terminal branch | T4a |
+| [`AttemptService.closeFailedAttempt(...)`](../taskflow-core/src/main/java/server/scheduler/AttemptService.java) retry projection / persistence | T3 |
+| `AttemptService.closeFailedAttempt(...)` terminal projection / persistence | T4a |
+| [`JobCompletionService.taskFailureUpdatesForJobFailure(...)`](../taskflow-core/src/main/java/server/scheduler/JobCompletionService.java) for pending tasks | T5 |
+| `JobCompletionService.taskFailureUpdatesForJobFailure(...)` for assigned tasks | T4b |
+| `JobCompletionService.finalizeJobCompletion*` success/removal branches | J1 projection |
+| `JobCompletionService.finalizeJobCompletion*` failure/removal branches | J2 projection |
+| `RecoveryService.restoreJobs(...)` all-completed branch | J1 orchestration |
+| `RecoveryService.restoreJobs(...)` terminal-failure branch | J2 orchestration |
+| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` assigned-task branch | T4b |
+| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` pending-task branch | T5 |
+| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` job/removal branch | J2 |
 | [`DatabaseManager.insertJobWithTasks(...)`](../taskflow-persistence-sqlite/src/main/java/server/db/DatabaseManager.java) job row | J0 |
 | `DatabaseManager.insertJob(...)` low-level job-row bootstrap | J0 storage state; not runtime acceptance by itself |
 | `DatabaseManager.insertJobWithTasks(...)` / `insertTask(...)` task rows | T0 |
@@ -537,10 +549,13 @@ never one ambiguous edge.
   Participant liveness sampling, compatibility peer/job-ID creation, and
   payload-storage keys are separate runtime concerns and are not transition
   decision inputs in this state machine.
-- `TaskStateMachine` now centralizes the pure classification and effect
-  description for the mandatory scheduler events. Infrastructure effect
-  execution remains distributed across scheduler, domain object, and SQLite
-  adapter code; TF-0204 owns that decomposition and runtime delegation.
+- `TaskStateMachine` centralizes pure classification and effect descriptions for
+  the mandatory scheduler events. `TaskTransitionDecisions` adapts live
+  projections into that model, and the focused services above own distinct
+  effect boundaries. `TaskScheduler` is a composition facade and
+  `SchedulerLoop` is orchestration-only. SQLite and `TaskUnit` still execute
+  the durable and compatibility-projection primitives respectively; TF-0205
+  owns the remaining durable-first ordering audit rather than this refactor.
 - The SQLite T5 primitive guards the task pre-state but cannot by itself prove
   that its containing job is simultaneously failing; current scheduler call
   sites own that context. Likewise, the J1 SQL predicate checks `RUNNING` while
@@ -577,6 +592,13 @@ never one ambiguous edge.
   [`TaskStateMachineTest#replayOfEveryAcceptedEventIsClassifiedDuplicate`](../taskflow-core/src/test/java/server/scheduler/transition/TaskStateMachineTest.java)
   prove explicit invalid edges and duplicate replay without another durable or
   outbound intent.
+- [`SchedulerLoopTest#oneCycleDelegatesEnvelopeAndMaintenanceInStableOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
+  proves the loop using an in-memory mailbox and fake work boundary, while
+  [`SchedulerArchitectureTest#schedulerFacadeAndLoopCannotOwnTransitionEffects`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
+  enforces the dependency and responsibility split.
+- [`TaskSchedulerFailureTest#samePeerStaleFailureCannotCloseNewerAssignmentGeneration`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java)
+  proves that the runtime reducer guard applies the complete assignment tuple
+  to unsuccessful results as well as successful result commitment.
 
 - [`TaskUnitLifecycleTest#exactCompletionRequiresAttemptAssignmentAndPeerWithoutPartialMutation`](../taskflow-spi/src/test/java/server/job/TaskUnitLifecycleTest.java)
   covers T1/T2 guards and no partial stale mutation.

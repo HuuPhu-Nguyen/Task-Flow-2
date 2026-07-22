@@ -180,9 +180,13 @@ resulting projection, and observability intents without importing a database,
 transport, UI, plugin implementation, clock, random source, or executor. Its
 parameterized tests cover every mandatory scheduler event, explicit invalid
 edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
-replay. This is currently a tested decision model rather than the sole runtime
-mutation path; TF-0204 owns scheduler decomposition and effect delegation, so
-the existing SQLite predicates remain the authoritative enforcement boundary.
+  replay. Live submission, assignment, successful/failed result, lease-expiry,
+  timeout, participant-unavailability, and recovery-hydration paths now consult
+  that reducer through `TaskTransitionDecisions`. `AssignmentService`,
+  `ResultCommitService`, `LeaseService`, `AttemptService`,
+  `JobCompletionService`, and `RecoveryService` own distinct effects;
+  `SchedulerLoop` only orders cycle stages. SQLite predicates remain the
+  authoritative enforcement boundary whenever durable state is involved.
 
 ## Deterministic Transition Inputs
 

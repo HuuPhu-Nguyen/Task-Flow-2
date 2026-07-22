@@ -47,12 +47,13 @@ flowchart LR
     ParticipantB[CLI participant<br/>Executor role] -->|PONG + capabilities / TASK_RESULT| Coordinator
     ParticipantC[Additional participant<br/>Executor role] -->|PONG + capabilities / TASK_RESULT| Coordinator
     Coordinator --> Mailbox[Scheduler Mailbox]
-    Mailbox --> Scheduler[TaskScheduler]
-    Scheduler --> Registry[Participant Registry<br/>PeerRegistry compatibility name]
-    Scheduler --> Store[(SQLite Job History)]
-    Scheduler -->|TASK_ASSIGN| ParticipantA
-    Scheduler -->|TASK_ASSIGN| ParticipantB
-    Scheduler -->|TASK_ASSIGN| ParticipantC
+    Mailbox --> Loop[SchedulerLoop]
+    Loop --> Services[Focused scheduler services<br/>assignment / result / lease / completion / recovery]
+    Services --> Registry[Participant Registry<br/>PeerRegistry compatibility name]
+    Services --> Store[(SQLite Job History)]
+    Services -->|TASK_ASSIGN| ParticipantA
+    Services -->|TASK_ASSIGN| ParticipantB
+    Services -->|TASK_ASSIGN| ParticipantC
     ParticipantA --> EngineA[PeerExecutionEngine<br/>executor implementation]
     ParticipantB --> EngineB[PeerExecutionEngine]
     ParticipantC --> EngineC[PeerExecutionEngine]
@@ -117,16 +118,18 @@ The participant registry retains the existing `PeerRegistry` and peer-ID compati
 
 Coordinator task/job transition inputs are injectable. `TaskFlowClock` supplies lifecycle/recovery time and scheduler-emitted protocol timestamps, while `AssignmentIdGenerator` supplies each new assignment UUID candidate. Production coordinator entry points share system-clock and random-UUID adapters across startup recovery, the scheduler, and plugin-created task units; focused tests use mutable/fixed clocks and exact UUID sequences, including timeout and lease-expiry scenarios without sleeping for expiry. The SQLite assignment transaction still owns the conditional next attempt number and atomic task/audit/outbox commit. Participant liveness sampling and compatibility peer/job-ID creation remain separate infrastructure concerns. See `docs/EXECUTION_GUARANTEES.md` for the exact boundary and evidence.
 
-The core module now has an infrastructure-free `TaskStateMachine` that turns
+The core module has an infrastructure-free `TaskStateMachine` that turns
 an immutable task/job projection plus a typed scheduler event into an explicit
 accepted, duplicate, stale, invalid, or ignored decision. Each decision also
 describes the T/J/R durable transition, logical outbound intent, next
 projection, and observability intents. The table is deterministic and covers
 submission, assignment, fenced results, execution failure, lease expiry,
-timeout, participant unavailability, and recovery. Runtime effect execution is
-still owned by `TaskScheduler` and the existing SQLite adapters pending the
-TF-0204 scheduler decomposition; SQLite conditional writes remain the
-correctness authority.
+timeout, participant unavailability, and recovery. `TaskTransitionDecisions`
+adapts live task projections to that model; focused assignment, result-commit,
+lease, failed-attempt, job-completion, message, and recovery services execute
+the accepted effects. `TaskScheduler` is now the composition facade and
+`SchedulerLoop` owns mailbox/timer/dispatch cycle order only. SQLite
+conditional writes remain the correctness authority.
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. The scheduler also rejects duplicate job IDs that are already active or already present in persisted job history. After startup, assignment persistence must succeed before a task is dispatched, and failed retry or task-failure writes fail the job with a terminal `JOB_RESULT` rather than allowing in-memory state to diverge silently. Successful task results use a typed SQLite transaction that can return `COMMITTED`, duplicate, stale, unknown-task, or storage-failure outcomes. Its conditional task update requires the exact task ID, `ASSIGNED` state, attempt number, assignment ID, and assigned participant; only `COMMITTED` is projected into job memory and executor-success metrics. Duplicate and stale broker deliveries are acknowledged without mutation, while a storage failure leaves the task assigned in memory and is requeued. For RabbitMQ with SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. Terminal job state plus outbound final `JOB_RESULT` is likewise committed through a broker outbox row before immediate publish or replay; non-outbox outputs keep the older final-result-then-terminal-write order, and a failed terminal write after delivery logs `job_terminal_persistence_degraded`. The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, requester public keys for signed ownership when present, schema-v5 peer registry metadata for last-known peer state, schema-v6 final result payloads for completed jobs, schema-v7 task-attempt audit rows for assignment and terminal outcomes, schema-v8 task leases, schema-v9 broker outbox rows for coordinator RabbitMQ publication replay, and schema-v10 current attempt/assignment IDs plus assignment IDs and lease deadlines in the attempt audit. On startup, resumable `RUNNING` jobs are rebuilt, assigned tasks with complete identities and unexpired leases stay assigned, expired or missing leases are released to pending with a `lease_expired` attempt reason, legacy assigned rows without complete identities are released with an inspectable restart reason, completed tasks with persisted result payloads are restored, pending coordinator outbox rows are replayed by RabbitMQ coordinator runs, and non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` with the job id and matching requester token; identity-bound jobs must also include the matching requester public key and a valid signature. The coordinator resends an in-memory pending terminal result or reconstructs a completed persisted result when ownership checks pass and every task result snapshot is present; when a schema-v6 final payload exists, that semantic payload is returned with the compatibility task-result list. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; TCP peer handlers wait for mailbox capacity and broker deliveries are requeued when the scheduler mailbox is full and acknowledged only after scheduler handling succeeds.
 
@@ -144,7 +147,7 @@ The coordinator is the system's single scheduling and state authority.
 - In legacy TCP mode, listens for participant connections on port `6789`
 - Maintains a registry of connected participants
 - Handles networking via `PeerHandler`
-- Delegates all scheduling logic to a dedicated `TaskScheduler` thread
+- Runs the composed scheduler runtime on a dedicated `TaskScheduler` thread
 
 The system uses a mailbox-based design where incoming messages are queued and processed asynchronously.
 
@@ -152,14 +155,17 @@ The system uses a mailbox-based design where incoming messages are queued and pr
 
 ### Task Scheduler
 
-The `TaskScheduler` is the core of the system.
+`TaskScheduler` preserves the public runtime entry point while composing
+focused services behind an orchestration-only `SchedulerLoop`.
 
 **Responsibilities:**
-- Handles incoming messages (`JOB_SUBMIT`, `TASK_RESULT`)
-- Creates jobs and splits them into tasks
-- Dispatches tasks to available executor-role participants
-- Tracks task progress and retries failed work
-- Aggregates results and returns them to the requester
+- `SchedulerMessageService`: envelope disposition, `JOB_SUBMIT`, result requests, and event routing
+- `AssignmentService`: placement, assignment transaction, and `TASK_ASSIGN` intent
+- `ResultCommitService`: failed-result classification and fenced authoritative result commitment
+- `LeaseService` / `AttemptService`: timeout, lease, participant-loss, retry, and terminal-attempt effects
+- `JobCompletionService`: aggregation, terminal state, final-result delivery/outbox intent, and cleanup
+- `RecoveryService`: installation of reconciled persisted projections
+- `SchedulerLoop`: mailbox, timer, dispatch, completion-retry, and metrics orchestration only
 
 **Load Balancing**
 - Default maximum of **3 concurrent tasks per executor participant**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`
