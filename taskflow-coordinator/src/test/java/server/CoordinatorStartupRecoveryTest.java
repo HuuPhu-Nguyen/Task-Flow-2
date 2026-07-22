@@ -156,6 +156,53 @@ class CoordinatorStartupRecoveryTest {
     }
 
     @Test
+    void continuesAssignmentAttemptNumberAcrossCoordinatorRecovery() {
+        String jobId = "job-attempt-recovery";
+        String taskId = "task-job-attempt-recovery-0";
+        ResumeStore store = new ResumeStore(
+                List.of(new JobStateStore.ResumableJobState(
+                        jobId,
+                        "RABBITMQ_TEST_TASK",
+                        "requester-1",
+                        TOKEN_HASH,
+                        "",
+                        "",
+                        List.of(new JobStateStore.ResumableTaskState(
+                                taskId,
+                                "PENDING",
+                                "payload",
+                                null,
+                                1
+                        ))
+                )),
+                List.of(new JobStateStore.TaskAttemptRecord(
+                        jobId,
+                        taskId,
+                        7,
+                        "peer-old",
+                        100L,
+                        200L,
+                        100L,
+                        JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                        "processor_failure"
+                ))
+        );
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 300L);
+
+        assertTrue(result.successful());
+        TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get(taskId);
+        assertEquals(7, task.getAttemptNumber());
+        assertEquals(1, task.getRetryCount());
+
+        assertTrue(task.markAssigned("peer-new", 400L, "COORDINATOR_new", 900L));
+        assertEquals(8, task.getAttemptNumber());
+        assertEquals(8, task.getAssignmentIdentity().orElseThrow().attemptNumber());
+        assertEquals(1, task.getRetryCount());
+    }
+
+    @Test
     void restoresCompletedTaskResultsForRunningJobs() {
         ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
                 "job-completed-before-final-result",
@@ -315,12 +362,19 @@ class CoordinatorStartupRecoveryTest {
 
     private static class ResumeStore implements JobStateStore {
         private final List<ResumableJobState> runningJobs;
+        private final List<TaskAttemptRecord> taskAttempts;
         private final List<String> resetTasks = new ArrayList<>();
         private final List<String> releasedLeases = new ArrayList<>();
         private final List<String> failedJobs = new ArrayList<>();
 
         private ResumeStore(List<ResumableJobState> runningJobs) {
+            this(runningJobs, List.of());
+        }
+
+        private ResumeStore(List<ResumableJobState> runningJobs,
+                            List<TaskAttemptRecord> taskAttempts) {
             this.runningJobs = runningJobs;
+            this.taskAttempts = taskAttempts;
         }
 
         @Override
@@ -380,6 +434,13 @@ class CoordinatorStartupRecoveryTest {
         @Override
         public List<ResumableJobState> loadRunningJobsForResume() {
             return runningJobs;
+        }
+
+        @Override
+        public List<TaskAttemptRecord> loadTaskAttempts(String jobId) {
+            return taskAttempts.stream()
+                    .filter(attempt -> jobId.equals(attempt.jobId()))
+                    .toList();
         }
 
         @Override

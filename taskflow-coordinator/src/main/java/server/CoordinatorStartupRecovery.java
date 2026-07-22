@@ -111,6 +111,11 @@ final class CoordinatorStartupRecovery {
             return null;
         }
 
+        Map<String, Integer> lastAssignmentAttempts = lastAssignmentAttempts(
+                persistedJob.jobId(),
+                store.loadTaskAttempts(persistedJob.jobId())
+        );
+
         JobSubmitMessage submit = new JobSubmitMessage(
                 persistedJob.requesterId(),
                 Instant.now().toString(),
@@ -153,7 +158,8 @@ final class CoordinatorStartupRecovery {
                     taskState.assignedPeerId(),
                     taskState.startedAt(),
                     taskState.leaseOwnerId(),
-                    taskState.leaseExpiresAt()
+                    taskState.leaseExpiresAt(),
+                    lastAssignmentAttempts.getOrDefault(taskState.taskId(), 0)
             )) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_restore_failed",
                         persistedJob.jobId(), taskState.taskId());
@@ -172,6 +178,25 @@ final class CoordinatorStartupRecovery {
             }
         }
         return job;
+    }
+
+    private static Map<String, Integer> lastAssignmentAttempts(
+            String jobId,
+            List<JobStateStore.TaskAttemptRecord> attempts) {
+        if (attempts == null || attempts.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Integer> latestByTask = new LinkedHashMap<>();
+        for (JobStateStore.TaskAttemptRecord attempt : attempts) {
+            if (attempt == null
+                    || !jobId.equals(attempt.jobId())
+                    || !hasText(attempt.taskId())
+                    || attempt.attemptNumber() < 1) {
+                continue;
+            }
+            latestByTask.merge(attempt.taskId(), attempt.attemptNumber(), Math::max);
+        }
+        return Map.copyOf(latestByTask);
     }
 
     private static boolean hasText(String value) {

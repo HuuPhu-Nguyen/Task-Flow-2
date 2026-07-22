@@ -1,5 +1,7 @@
 package server.job;
 
+import java.util.Optional;
+
 public abstract class TaskUnit<T> {
     protected final String taskId;
     protected final String jobId;
@@ -14,6 +16,8 @@ public abstract class TaskUnit<T> {
     private long leaseExpiresAtMillis;
 
     private int retryCount;
+    private int assignmentAttemptNumber;
+    private AssignmentIdentity assignmentIdentity;
 
     public enum FailureOutcome {
         RETRY_SCHEDULED,
@@ -30,6 +34,8 @@ public abstract class TaskUnit<T> {
         this.jobId = jobId;
         this.payload = payload;
         this.retryCount = 0;
+        this.assignmentAttemptNumber = 0;
+        this.assignmentIdentity = null;
         this.status= TaskStatus.PENDING;
         this.pendingSinceMillis = System.currentTimeMillis();
     }
@@ -52,6 +58,7 @@ public abstract class TaskUnit<T> {
         this.startTime = 0L;
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
+        this.assignmentIdentity = null;
         this.pendingSinceMillis = -1L;
         return duration;
     }
@@ -67,10 +74,25 @@ public abstract class TaskUnit<T> {
         if (this.status != TaskStatus.PENDING) {
             return false;
         }
+        long normalizedLeaseExpiry = Math.max(0L, leaseExpiresAtMillis);
+        int nextAttemptNumber;
+        try {
+            nextAttemptNumber = Math.incrementExact(this.assignmentAttemptNumber);
+        } catch (ArithmeticException e) {
+            throw new IllegalStateException("Assignment attempt number overflow for task " + taskId, e);
+        }
+        AssignmentIdentity nextIdentity = AssignmentIdentity.create(
+                taskId,
+                nextAttemptNumber,
+                peerId,
+                normalizedLeaseExpiry
+        );
         this.assignedPeerId = peerId;
         this.startTime = startAtMillis;
         this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
-        this.leaseExpiresAtMillis = Math.max(0L, leaseExpiresAtMillis);
+        this.leaseExpiresAtMillis = normalizedLeaseExpiry;
+        this.assignmentAttemptNumber = nextAttemptNumber;
+        this.assignmentIdentity = nextIdentity;
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.ASSIGNED;
         return true;
@@ -84,6 +106,7 @@ public abstract class TaskUnit<T> {
         this.startTime = 0L;
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
+        this.assignmentIdentity = null;
         this.pendingSinceMillis = System.currentTimeMillis();
         this.status = TaskStatus.PENDING;
     }
@@ -100,6 +123,7 @@ public abstract class TaskUnit<T> {
         this.startTime = 0L;
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
+        this.assignmentIdentity = null;
 
         if (this.retryCount >= maxRetries) {
             this.status = TaskStatus.FAILED;
@@ -139,12 +163,40 @@ public abstract class TaskUnit<T> {
         return assignedPeerId;
     }
 
+    /**
+     * Returns failed-attempt count used by retry policy. This is not the
+     * monotonic assignment-generation number returned by {@link #getAttemptNumber()}.
+     */
     public synchronized int getRetryCount() {
         return retryCount;
     }
 
+    /**
+     * Returns the most recently created assignment-generation number. A
+     * pending task that has never been assigned returns zero.
+     */
+    public synchronized int getAttemptNumber() {
+        return assignmentAttemptNumber;
+    }
+
+    /**
+     * Returns the current immutable assignment identity while the task is
+     * assigned. Re-reading it for dispatch/outbox replay does not create a new
+     * generation.
+     */
+    public synchronized Optional<AssignmentIdentity> getAssignmentIdentity() {
+        return Optional.ofNullable(assignmentIdentity);
+    }
+
     public synchronized void restorePendingForResume(int retryCount) {
+        restorePendingForResume(retryCount, 0);
+    }
+
+    public synchronized void restorePendingForResume(int retryCount, int lastAssignmentAttemptNumber) {
+        int restoredAttemptNumber = requireRestoredAttemptNumber(lastAssignmentAttemptNumber);
         this.retryCount = Math.max(0, retryCount);
+        this.assignmentAttemptNumber = restoredAttemptNumber;
+        this.assignmentIdentity = null;
         this.assignedPeerId = null;
         this.startTime = 0L;
         this.leaseOwnerId = "";
@@ -158,7 +210,26 @@ public abstract class TaskUnit<T> {
                                                       String leaseOwnerId,
                                                       long leaseExpiresAtMillis,
                                                       int retryCount) {
+        restoreAssignedForResume(
+                assignedPeerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAtMillis,
+                retryCount,
+                0
+        );
+    }
+
+    public synchronized void restoreAssignedForResume(String assignedPeerId,
+                                                      long startedAt,
+                                                      String leaseOwnerId,
+                                                      long leaseExpiresAtMillis,
+                                                      int retryCount,
+                                                      int lastAssignmentAttemptNumber) {
+        int restoredAttemptNumber = requireRestoredAttemptNumber(lastAssignmentAttemptNumber);
         this.retryCount = Math.max(0, retryCount);
+        this.assignmentAttemptNumber = restoredAttemptNumber;
+        this.assignmentIdentity = null;
         this.assignedPeerId = assignedPeerId;
         this.startTime = Math.max(0L, startedAt);
         this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
@@ -167,8 +238,37 @@ public abstract class TaskUnit<T> {
         this.status = TaskStatus.ASSIGNED;
     }
 
-    public synchronized void restoreCompletedForResume(int retryCount) {
+    public synchronized void restoreAssignedForResume(AssignmentIdentity restoredIdentity,
+                                                      long startedAt,
+                                                      String leaseOwnerId,
+                                                      int retryCount) {
+        if (restoredIdentity == null) {
+            throw new IllegalArgumentException("Restored assignment identity is required.");
+        }
+        if (!taskId.equals(restoredIdentity.taskId())) {
+            throw new IllegalArgumentException("Restored assignment identity belongs to a different task.");
+        }
+        int restoredAttemptNumber = requireRestoredAttemptNumber(restoredIdentity.attemptNumber());
         this.retryCount = Math.max(0, retryCount);
+        this.assignmentAttemptNumber = restoredAttemptNumber;
+        this.assignmentIdentity = restoredIdentity;
+        this.assignedPeerId = restoredIdentity.workerId();
+        this.startTime = Math.max(0L, startedAt);
+        this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
+        this.leaseExpiresAtMillis = restoredIdentity.leaseExpiresAtEpochMillis();
+        this.pendingSinceMillis = -1L;
+        this.status = TaskStatus.ASSIGNED;
+    }
+
+    public synchronized void restoreCompletedForResume(int retryCount) {
+        restoreCompletedForResume(retryCount, 0);
+    }
+
+    public synchronized void restoreCompletedForResume(int retryCount, int lastAssignmentAttemptNumber) {
+        int restoredAttemptNumber = requireRestoredAttemptNumber(lastAssignmentAttemptNumber);
+        this.retryCount = Math.max(0, retryCount);
+        this.assignmentAttemptNumber = restoredAttemptNumber;
+        this.assignmentIdentity = null;
         this.assignedPeerId = null;
         this.startTime = 0L;
         this.leaseOwnerId = "";
@@ -178,13 +278,30 @@ public abstract class TaskUnit<T> {
     }
 
     public synchronized void restoreFailedForResume(int retryCount) {
+        restoreFailedForResume(retryCount, 0);
+    }
+
+    public synchronized void restoreFailedForResume(int retryCount, int lastAssignmentAttemptNumber) {
+        int restoredAttemptNumber = requireRestoredAttemptNumber(lastAssignmentAttemptNumber);
         this.retryCount = Math.max(0, retryCount);
+        this.assignmentAttemptNumber = restoredAttemptNumber;
+        this.assignmentIdentity = null;
         this.assignedPeerId = null;
         this.startTime = 0L;
         this.leaseOwnerId = "";
         this.leaseExpiresAtMillis = 0L;
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.FAILED;
+    }
+
+    private int requireRestoredAttemptNumber(int lastAssignmentAttemptNumber) {
+        if (lastAssignmentAttemptNumber < 0) {
+            throw new IllegalArgumentException("Restored assignment attempt number must not be negative.");
+        }
+        if (lastAssignmentAttemptNumber < this.assignmentAttemptNumber) {
+            throw new IllegalArgumentException("Restored assignment attempt number must not decrease.");
+        }
+        return lastAssignmentAttemptNumber;
     }
 
     public String getJobId(){

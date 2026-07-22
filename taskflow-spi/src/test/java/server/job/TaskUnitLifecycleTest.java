@@ -3,6 +3,9 @@ package server.job;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskUnitLifecycleTest {
@@ -44,5 +47,98 @@ class TaskUnitLifecycleTest {
         assertEquals(TaskUnit.FailureOutcome.TERMINAL_FAILURE, terminalOutcome);
         assertEquals(20, task.getRetryCount());
         assertEquals(TaskUnit.TaskStatus.FAILED, task.getStatus());
+    }
+
+    @Test
+    void failureCreatesNextAssignmentGenerationIndependentlyFromRetryCount() {
+        DummyTask task = new DummyTask("t-generation", "job-1", "payload");
+
+        assertTrue(task.markAssigned("peer-a", 100L, "coordinator-1", 500L));
+        AssignmentIdentity first = task.getAssignmentIdentity().orElseThrow();
+        assertEquals(1, first.attemptNumber());
+        assertEquals(0, task.getRetryCount());
+
+        assertEquals(TaskUnit.FailureOutcome.RETRY_SCHEDULED, task.failAttemptBy("peer-a", 3));
+        assertEquals(1, task.getAttemptNumber());
+        assertEquals(1, task.getRetryCount());
+
+        assertTrue(task.markAssigned("peer-a", 200L, "coordinator-1", 600L));
+        AssignmentIdentity second = task.getAssignmentIdentity().orElseThrow();
+        assertEquals(2, second.attemptNumber());
+        assertNotEquals(first.assignmentId(), second.assignmentId());
+        assertEquals(1, task.getRetryCount());
+    }
+
+    @Test
+    void leaseExpiryReleaseCreatesNextGenerationWithoutInventingRetry() {
+        DummyTask task = new DummyTask("t-lease", "job-1", "payload");
+
+        assertTrue(task.markAssigned("peer-a", 100L, "coordinator-1", 200L));
+        assertTrue(task.isLeaseExpired(200L));
+        AssignmentIdentity expired = task.getAssignmentIdentity().orElseThrow();
+
+        task.resetToPending();
+
+        assertEquals(0, task.getRetryCount());
+        assertEquals(1, task.getAttemptNumber());
+        assertTrue(task.markAssigned("peer-b", 300L, "coordinator-2", 500L));
+        AssignmentIdentity replacement = task.getAssignmentIdentity().orElseThrow();
+        assertEquals(2, replacement.attemptNumber());
+        assertNotEquals(expired.assignmentId(), replacement.assignmentId());
+        assertEquals(0, task.getRetryCount());
+    }
+
+    @Test
+    void dispatchReplayReusesExactCurrentAssignmentIdentity() {
+        DummyTask task = new DummyTask("t-replay", "job-1", "payload");
+
+        assertTrue(task.markAssigned("peer-a", 100L, "coordinator-1", 500L));
+        AssignmentIdentity original = task.getAssignmentIdentity().orElseThrow();
+
+        assertFalse(task.markAssigned("peer-a", 200L, "coordinator-1", 600L));
+        assertEquals(original, task.getAssignmentIdentity().orElseThrow());
+        assertEquals(1, task.getAttemptNumber());
+        assertEquals(0, task.getRetryCount());
+    }
+
+    @Test
+    void restoredGenerationContinuesMonotonicallyAfterRecovery() {
+        DummyTask task = new DummyTask("t-recovery", "job-1", "payload");
+
+        task.restorePendingForResume(2, 7);
+
+        assertEquals(7, task.getAttemptNumber());
+        assertEquals(2, task.getRetryCount());
+        assertTrue(task.markAssigned("peer-a", 100L, "coordinator-2", 500L));
+        assertEquals(8, task.getAssignmentIdentity().orElseThrow().attemptNumber());
+        assertEquals(2, task.getRetryCount());
+        assertThrows(IllegalArgumentException.class, () -> task.restorePendingForResume(2, 6));
+        assertEquals(TaskUnit.TaskStatus.ASSIGNED, task.getStatus());
+        assertEquals(8, task.getAttemptNumber());
+        assertEquals(2, task.getRetryCount());
+        assertEquals("peer-a", task.getAssignmentIdentity().orElseThrow().workerId());
+    }
+
+    @Test
+    void assignedRecoveryPreservesExactIdentityThenContinuesWithNextGeneration() {
+        DummyTask task = new DummyTask("t-assigned-recovery", "job-1", "payload");
+        AssignmentIdentity restored = new AssignmentIdentity(
+                "t-assigned-recovery",
+                4,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "peer-a",
+                500L
+        );
+
+        task.restoreAssignedForResume(restored, 100L, "coordinator-old", 1);
+
+        assertEquals(restored, task.getAssignmentIdentity().orElseThrow());
+        assertEquals(4, task.getAttemptNumber());
+        assertEquals(1, task.getRetryCount());
+
+        task.resetToPending();
+        assertTrue(task.markAssigned("peer-b", 600L, "coordinator-new", 900L));
+        assertEquals(5, task.getAssignmentIdentity().orElseThrow().attemptNumber());
+        assertEquals(1, task.getRetryCount());
     }
 }
