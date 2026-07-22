@@ -173,6 +173,17 @@ observability, and forbidden edges. Normal task execution uses
 `PENDING -> FAILED` administrative path; recovery hydration and pending
 normalization are distinguished from new execution transitions.
 
+The core module also contains a pure executable transition table:
+`TaskStateMachine.decide(TaskState, SchedulerEvent)` returns a typed
+classification, required durable transition, logical outbound intent,
+resulting projection, and observability intents without importing a database,
+transport, UI, plugin implementation, clock, random source, or executor. Its
+parameterized tests cover every mandatory scheduler event, explicit invalid
+edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
+replay. This is currently a tested decision model rather than the sole runtime
+mutation path; TF-0204 owns scheduler decomposition and effect delegation, so
+the existing SQLite predicates remain the authoritative enforcement boundary.
+
 ## Deterministic Transition Inputs
 
 - `TaskFlowClock` supplies both `Instant now()` and epoch-millisecond time for

@@ -79,6 +79,37 @@ not new business-state edges.
 7. In-memory restoration from a committed snapshot is hydration, not evidence
    that a new domain transition occurred.
 
+## Executable Decision Table
+
+[`TaskStateMachine`](../taskflow-core/src/main/java/server/scheduler/transition/TaskStateMachine.java)
+is the infrastructure-free executable form of the task transition rules. Its
+input is an immutable
+[`TaskState`](../taskflow-core/src/main/java/server/scheduler/transition/TaskState.java)
+plus one closed
+[`SchedulerEvent`](../taskflow-core/src/main/java/server/scheduler/transition/SchedulerEvent.java),
+and its output is a typed
+[`TransitionDecision`](../taskflow-core/src/main/java/server/scheduler/transition/TransitionDecision.java).
+The decision classifies the event as accepted, duplicate, stale, invalid, or
+ignored and names the required durable transition, logical outbox intent,
+resulting projection, metric intents, and structured-event intents.
+
+The table covers `JobSubmitted`, `AssignmentRequested`,
+`TaskResultReceived`, `TaskExecutionFailed`, `LeaseExpired`, `TaskTimedOut`,
+`WorkerUnavailable`, and `CoordinatorRecovered`. Assignment-bearing events,
+including participant-unavailability handling, carry the exact
+attempt/assignment/executor fencing tuple rather than using executor identity
+as a substitute. Assignment creation also carries lease owner/deadline state.
+The logical `TASK_ASSIGN` intent becomes a transactional outbox row in
+RabbitMQ mode and uses the direct compatibility output otherwise; T2 itself
+has no final-result intent because J1 remains a separate aggregate decision.
+
+This reducer describes effects but does not execute them. SQLite conditional
+transactions remain authoritative, and the current scheduler still contains
+the effect-execution branches listed in the mutation ledger below. TF-0204
+owns routing those branches through focused assignment, result, lease,
+completion, and recovery services; this task does not claim that
+`TaskStateMachine` is already the sole runtime mutation path.
+
 ## Task Transitions
 
 ### T0 — Create task: `∅ -> PENDING`
@@ -506,9 +537,10 @@ never one ambiguous edge.
   Participant liveness sampling, compatibility peer/job-ID creation, and
   payload-storage keys are separate runtime concerns and are not transition
   decision inputs in this state machine.
-- Transition decisions and infrastructure effects remain distributed across
-  scheduler, domain object, and SQLite adapter code; TF-0203/TF-0204 will
-  extract the pure decision/effect boundary.
+- `TaskStateMachine` now centralizes the pure classification and effect
+  description for the mandatory scheduler events. Infrastructure effect
+  execution remains distributed across scheduler, domain object, and SQLite
+  adapter code; TF-0204 owns that decomposition and runtime delegation.
 - The SQLite T5 primitive guards the task pre-state but cannot by itself prove
   that its containing job is simultaneously failing; current scheduler call
   sites own that context. Likewise, the J1 SQL predicate checks `RUNNING` while
@@ -536,6 +568,15 @@ never one ambiguous edge.
   accepted response; TF-0207 owns requester-scoped idempotent submission.
 
 ## Automated Evidence
+
+- [`TaskStateMachineTest#implementsTransitionTable`](../taskflow-core/src/test/java/server/scheduler/transition/TaskStateMachineTest.java)
+  parameterizes accepted, ignored, retry, terminal, lease/timeout-boundary, and
+  recovery decisions for all mandatory event families.
+- [`TaskStateMachineTest#classifiesInvalidTransitionsExplicitly`](../taskflow-core/src/test/java/server/scheduler/transition/TaskStateMachineTest.java)
+  and
+  [`TaskStateMachineTest#replayOfEveryAcceptedEventIsClassifiedDuplicate`](../taskflow-core/src/test/java/server/scheduler/transition/TaskStateMachineTest.java)
+  prove explicit invalid edges and duplicate replay without another durable or
+  outbound intent.
 
 - [`TaskUnitLifecycleTest#exactCompletionRequiresAttemptAssignmentAndPeerWithoutPartialMutation`](../taskflow-spi/src/test/java/server/job/TaskUnitLifecycleTest.java)
   covers T1/T2 guards and no partial stale mutation.
