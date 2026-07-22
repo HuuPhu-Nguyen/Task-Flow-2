@@ -1,22 +1,34 @@
 package server;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import protocol.RequesterTokens;
+import server.db.DatabaseManager;
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
 
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CoordinatorStartupRecoveryTest {
     private static final String TOKEN_HASH = RequesterTokens.hashToken("resume-token");
     private static final String IDENTITY_KEY = "resume-public-key";
+    private static final String ASSIGNMENT_ID = "550e8400-e29b-41d4-a716-446655440000";
+
+    @TempDir
+    Path tempDir;
 
     @Test
     void reconcilesAbandonedJobsUsingProvidedCompletionTimestamp() {
@@ -59,7 +71,7 @@ class CoordinatorStartupRecoveryTest {
                 "",
                 List.of(new JobStateStore.ResumableTaskState(
                         "task-job-resume-0",
-                        "ASSIGNED",
+                        "PENDING",
                         "payload",
                         null,
                         2
@@ -74,7 +86,8 @@ class CoordinatorStartupRecoveryTest {
         assertEquals(TOKEN_HASH, result.requesterTokenHashes().get("job-resume"));
         assertEquals(IDENTITY_KEY, result.requesterIdentityKeys().get("job-resume"));
         assertEquals(0, result.failedJobs());
-        assertEquals(List.of("task-job-resume-0:123"), store.releasedLeases());
+        assertEquals(List.of("task-job-resume-0"), store.resetTasks());
+        assertEquals(List.of(), store.releasedLeases());
 
         EmbarrassinglyParallelJob<?, ?> job = result.resumedJobs().getFirst();
         TaskUnit<?> task = job.getTasks().get("task-job-resume-0");
@@ -100,7 +113,9 @@ class CoordinatorStartupRecoveryTest {
                         "peer-1",
                         100L,
                         "COORDINATOR_old",
-                        500L
+                        500L,
+                        3,
+                        ASSIGNMENT_ID
                 ))
         )));
 
@@ -119,6 +134,10 @@ class CoordinatorStartupRecoveryTest {
         assertEquals("COORDINATOR_old", task.getLeaseOwnerId());
         assertEquals(500L, task.getLeaseExpiresAtMillis());
         assertEquals(1, task.getRetryCount());
+        AssignmentIdentity identity = task.getAssignmentIdentity().orElseThrow();
+        assertEquals(3, identity.attemptNumber());
+        assertEquals(ASSIGNMENT_ID, identity.assignmentId());
+        assertEquals("peer-1", identity.workerId());
     }
 
     @Test
@@ -139,7 +158,9 @@ class CoordinatorStartupRecoveryTest {
                         "peer-1",
                         100L,
                         "COORDINATOR_old",
-                        200L
+                        200L,
+                        4,
+                        ASSIGNMENT_ID
                 ))
         )));
 
@@ -153,6 +174,129 @@ class CoordinatorStartupRecoveryTest {
         TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get("task-job-expired-lease-0");
         assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
         assertEquals(3, task.getRetryCount());
+        assertEquals(4, task.getAttemptNumber());
+        assertTrue(task.getAssignmentIdentity().isEmpty());
+    }
+
+    @Test
+    void releasesLegacyAssignedTaskWithoutIdentityEvenWhenLeaseIsUnexpired() {
+        String taskId = "task-job-legacy-assignment-0";
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-legacy-assignment",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                TOKEN_HASH,
+                "",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        taskId,
+                        "ASSIGNED",
+                        "payload",
+                        null,
+                        0,
+                        "peer-legacy",
+                        100L,
+                        "COORDINATOR_old",
+                        900L
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 250L);
+
+        assertTrue(result.successful());
+        assertEquals(List.of(taskId), store.resetTasks());
+        assertEquals(List.of(), store.releasedLeases());
+        TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get(taskId);
+        assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
+        assertEquals(0, task.getAttemptNumber());
+        assertTrue(task.getAssignmentIdentity().isEmpty());
+    }
+
+    @Test
+    void releasesAssignedTaskWithIncompleteLeaseMetadata() {
+        String taskId = "task-job-incomplete-lease-0";
+        ResumeStore store = new ResumeStore(List.of(new JobStateStore.ResumableJobState(
+                "job-incomplete-lease",
+                "RABBITMQ_TEST_TASK",
+                "requester-1",
+                TOKEN_HASH,
+                "",
+                "",
+                List.of(new JobStateStore.ResumableTaskState(
+                        taskId,
+                        "ASSIGNED",
+                        "payload",
+                        null,
+                        0,
+                        "peer-legacy",
+                        100L,
+                        "",
+                        900L,
+                        2,
+                        ASSIGNMENT_ID
+                ))
+        )));
+
+        CoordinatorStartupRecovery.RecoveryResult result =
+                CoordinatorStartupRecovery.recoverPersistedJobs(store, 250L);
+
+        assertTrue(result.successful());
+        assertEquals(List.of(taskId), store.resetTasks());
+        assertEquals(List.of(), store.releasedLeases());
+        TaskUnit<?> task = result.resumedJobs().getFirst().getTasks().get(taskId);
+        assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
+        assertEquals(2, task.getAttemptNumber());
+    }
+
+    @Test
+    void version9AssignedTaskIsMigratedAndReleasedDuringStartupRecovery() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v9-legacy-assignment.db");
+        String jobId = "job-v9-legacy-assignment";
+        String taskId = "task-job-v9-legacy-assignment-0";
+        try (DatabaseManager current = new DatabaseManager(dbPath.toString())) {
+            assertTrue(current.insertJobWithTasks(
+                    jobId,
+                    "RABBITMQ_TEST_TASK",
+                    "requester-1",
+                    TOKEN_HASH,
+                    "",
+                    List.of(new JobStateStore.TaskStartupState(taskId, "payload"))
+            ));
+            assertTrue(current.markTaskAssigned(
+                    taskId,
+                    "peer-legacy",
+                    100L,
+                    "COORDINATOR_old",
+                    900L
+            ));
+        }
+        downgradeAssignmentIdentitySchemaToVersion9(dbPath);
+
+        try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
+            JobStateStore.ResumableTaskState beforeRecovery =
+                    migrated.loadRunningJobsForResume().getFirst().tasks().getFirst();
+            assertEquals("ASSIGNED", beforeRecovery.status());
+            assertEquals(0, beforeRecovery.attemptNumber());
+            assertNull(beforeRecovery.assignmentId());
+
+            CoordinatorStartupRecovery.RecoveryResult result =
+                    CoordinatorStartupRecovery.recoverPersistedJobs(migrated, 250L);
+
+            assertTrue(result.successful());
+            TaskUnit<?> restored = result.resumedJobs().getFirst().getTasks().get(taskId);
+            assertEquals(TaskUnit.TaskStatus.PENDING, restored.getStatus());
+            assertEquals(1, restored.getAttemptNumber());
+            assertTrue(restored.getAssignmentIdentity().isEmpty());
+
+            DatabaseManager.TaskRecord persisted = migrated.getTasksForJob(jobId).getFirst();
+            assertEquals("PENDING", persisted.status());
+            assertEquals(1, persisted.attemptNumber());
+            assertNull(persisted.assignmentId());
+            JobStateStore.TaskAttemptRecord releasedAttempt = migrated.loadTaskAttempts(jobId).getFirst();
+            assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, releasedAttempt.outcome());
+            assertEquals("coordinator_restart", releasedAttempt.failureReason());
+        }
     }
 
     @Test
@@ -200,6 +344,77 @@ class CoordinatorStartupRecoveryTest {
         assertEquals(8, task.getAttemptNumber());
         assertEquals(8, task.getAssignmentIdentity().orElseThrow().attemptNumber());
         assertEquals(1, task.getRetryCount());
+    }
+
+    @Test
+    void sqliteRestartRecoveryDoesNotResetPersistedAssignmentGeneration() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-generation-restart.db");
+        String jobId = "job-generation-restart";
+        String taskId = "task-job-generation-restart-0";
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertTrue(db.insertJobWithTasks(
+                    jobId,
+                    "RABBITMQ_TEST_TASK",
+                    "requester-1",
+                    TOKEN_HASH,
+                    "",
+                    List.of(new JobStateStore.TaskStartupState(taskId, "payload"))
+            ));
+            assertTrue(db.markTaskAssigned(
+                    taskId,
+                    "peer-old",
+                    100L,
+                    "COORDINATOR_old",
+                    200L,
+                    7,
+                    ASSIGNMENT_ID
+            ));
+            assertTrue(db.markTaskRetried(
+                    taskId,
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "processor_failure",
+                    175L
+            ));
+        }
+
+        AssignmentIdentity replacement;
+        try (DatabaseManager reopened = new DatabaseManager(dbPath.toString())) {
+            JobStateStore.ResumableTaskState persisted =
+                    reopened.loadRunningJobsForResume().getFirst().tasks().getFirst();
+            assertEquals("PENDING", persisted.status());
+            assertEquals(7, persisted.attemptNumber());
+            assertNull(persisted.assignmentId());
+
+            CoordinatorStartupRecovery.RecoveryResult recovered =
+                    CoordinatorStartupRecovery.recoverPersistedJobs(reopened, 300L);
+            assertTrue(recovered.successful());
+            TaskUnit<?> task = recovered.resumedJobs().getFirst().getTasks().get(taskId);
+            assertEquals(7, task.getAttemptNumber());
+
+            assertTrue(task.markAssigned("peer-new", 400L, "COORDINATOR_new", 900L));
+            replacement = task.getAssignmentIdentity().orElseThrow();
+            assertEquals(8, replacement.attemptNumber());
+            assertTrue(reopened.markTaskAssigned(
+                    taskId,
+                    replacement.workerId(),
+                    400L,
+                    "COORDINATOR_new",
+                    replacement.leaseExpiresAtEpochMillis(),
+                    replacement.attemptNumber(),
+                    replacement.assignmentId()
+            ));
+        }
+
+        try (DatabaseManager reopenedAgain = new DatabaseManager(dbPath.toString())) {
+            CoordinatorStartupRecovery.RecoveryResult recoveredAgain =
+                    CoordinatorStartupRecovery.recoverPersistedJobs(reopenedAgain, 500L);
+            assertTrue(recoveredAgain.successful());
+            TaskUnit<?> task = recoveredAgain.resumedJobs().getFirst().getTasks().get(taskId);
+            assertEquals(8, task.getAttemptNumber());
+            assertEquals(replacement, task.getAssignmentIdentity().orElseThrow());
+        }
     }
 
     @Test
@@ -357,6 +572,17 @@ class CoordinatorStartupRecoveryTest {
 
         private int reconciliationCalls() {
             return reconciliationCalls;
+        }
+    }
+
+    private static void downgradeAssignmentIdentitySchemaToVersion9(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE tasks DROP COLUMN assignment_id");
+            stmt.execute("ALTER TABLE tasks DROP COLUMN attempt_number");
+            stmt.execute("ALTER TABLE task_attempts DROP COLUMN assignment_id");
+            stmt.execute("ALTER TABLE task_attempts DROP COLUMN lease_expires_at");
+            stmt.execute("UPDATE schema_version SET version=9, applied_at=100 WHERE id=1");
         }
     }
 

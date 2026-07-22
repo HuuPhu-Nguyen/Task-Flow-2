@@ -24,11 +24,14 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseManagerTest {
+    private static final String ASSIGNMENT_ID = "550e8400-e29b-41d4-a716-446655440000";
 
     @TempDir
     Path tempDir;
@@ -71,6 +74,8 @@ class DatabaseManagerTest {
             assertEquals(0, task.retryCount());
             assertEquals("", task.leaseOwnerId());
             assertEquals(0L, task.leaseExpiresAt());
+            assertEquals(1, task.attemptNumber());
+            assertNotNull(task.assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-1");
             assertEquals(1, attempts.size());
@@ -78,8 +83,10 @@ class DatabaseManagerTest {
             assertEquals("job-1", attempt.jobId());
             assertEquals("task-1", attempt.taskId());
             assertEquals(1, attempt.attemptNumber());
+            assertEquals(task.assignmentId(), attempt.assignmentId());
             assertEquals("peer-1", attempt.peerId());
             assertEquals(123L, attempt.startedAt());
+            assertEquals(0L, attempt.leaseExpiresAt());
             assertEquals(456L, attempt.finishedAt());
             assertEquals(333L, attempt.durationMs());
             assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempt.outcome());
@@ -102,7 +109,7 @@ class DatabaseManagerTest {
                     123L,
                     "coordinator-lease",
                     456L,
-                    taskAssignmentOutboxMessage("peer-1", "task-outbox-0", "job-outbox")
+                    taskAssignmentOutboxMessage("peer-1", "task-outbox-0", "job-outbox", 456L)
             );
 
             assertTrue(outbox.isPresent());
@@ -111,10 +118,14 @@ class DatabaseManagerTest {
             assertEquals("peer-1", tasks.getFirst().assignedPeerId());
             assertEquals("coordinator-lease", tasks.getFirst().leaseOwnerId());
             assertEquals(456L, tasks.getFirst().leaseExpiresAt());
+            assertEquals(1, tasks.getFirst().attemptNumber());
+            assertEquals(ASSIGNMENT_ID, tasks.getFirst().assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-outbox");
             assertEquals(1, attempts.size());
             assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.getFirst().outcome());
+            assertEquals(ASSIGNMENT_ID, attempts.getFirst().assignmentId());
+            assertEquals(456L, attempts.getFirst().leaseExpiresAt());
 
             List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
             assertEquals(1, pending.size());
@@ -146,7 +157,7 @@ class DatabaseManagerTest {
                     200L,
                     "coordinator-lease",
                     300L,
-                    taskAssignmentOutboxMessage("peer-2", "task-outbox-rollback-0", "job-outbox-rollback")
+                    taskAssignmentOutboxMessage("peer-2", "task-outbox-rollback-0", "job-outbox-rollback", 300L)
             );
 
             assertTrue(outbox.isEmpty());
@@ -505,7 +516,7 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void assignedTaskPersistsLeaseOwnerAndExpiryForResume() throws Exception {
+    void assignedTaskPersistsAssignmentIdentityLeaseAndAuditForResume() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-lease-state-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
 
@@ -518,7 +529,9 @@ class DatabaseManagerTest {
                     "peer-1",
                     100L,
                     "COORDINATOR_A",
-                    900L));
+                    900L,
+                    7,
+                    ASSIGNMENT_ID));
 
             DatabaseManager.TaskRecord task = db.getTasksForJob("job-lease").getFirst();
             assertEquals("ASSIGNED", task.status());
@@ -526,6 +539,8 @@ class DatabaseManagerTest {
             assertEquals(100L, task.startedAt());
             assertEquals("COORDINATOR_A", task.leaseOwnerId());
             assertEquals(900L, task.leaseExpiresAt());
+            assertEquals(7, task.attemptNumber());
+            assertEquals(ASSIGNMENT_ID, task.assignmentId());
 
             JobStateStore.ResumableTaskState resumedTask =
                     db.loadRunningJobsForResume().getFirst().tasks().getFirst();
@@ -534,6 +549,16 @@ class DatabaseManagerTest {
             assertEquals(100L, resumedTask.startedAt());
             assertEquals("COORDINATOR_A", resumedTask.leaseOwnerId());
             assertEquals(900L, resumedTask.leaseExpiresAt());
+            assertEquals(7, resumedTask.attemptNumber());
+            assertEquals(ASSIGNMENT_ID, resumedTask.assignmentId());
+
+            JobStateStore.TaskAttemptRecord attempt = db.loadTaskAttempts("job-lease").getFirst();
+            assertEquals(7, attempt.attemptNumber());
+            assertEquals(ASSIGNMENT_ID, attempt.assignmentId());
+            assertEquals("peer-1", attempt.peerId());
+            assertEquals(100L, attempt.startedAt());
+            assertEquals(900L, attempt.leaseExpiresAt());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempt.outcome());
         } finally {
             db.close();
         }
@@ -564,6 +589,8 @@ class DatabaseManagerTest {
             assertEquals(0L, task.startedAt());
             assertEquals("", task.leaseOwnerId());
             assertEquals(0L, task.leaseExpiresAt());
+            assertEquals(1, task.attemptNumber());
+            assertNull(task.assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-expired-lease");
             assertEquals(1, attempts.size());
@@ -606,7 +633,9 @@ class DatabaseManagerTest {
             JobStateStore.TaskAttemptRecord first = attempts.getFirst();
             assertEquals(1, first.attemptNumber());
             assertEquals("peer-1", first.peerId());
+            assertNotNull(first.assignmentId());
             assertEquals(100L, first.startedAt());
+            assertEquals(0L, first.leaseExpiresAt());
             assertEquals(175L, first.finishedAt());
             assertEquals(75L, first.durationMs());
             assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, first.outcome());
@@ -615,6 +644,8 @@ class DatabaseManagerTest {
             JobStateStore.TaskAttemptRecord second = attempts.get(1);
             assertEquals(2, second.attemptNumber());
             assertEquals("peer-2", second.peerId());
+            assertNotNull(second.assignmentId());
+            assertNotEquals(first.assignmentId(), second.assignmentId());
             assertEquals(220L, second.startedAt());
             assertEquals(280L, second.finishedAt());
             assertEquals(60L, second.durationMs());
@@ -640,6 +671,8 @@ class DatabaseManagerTest {
             assertEquals("PENDING", task.status());
             assertNull(task.assignedPeerId());
             assertEquals(0, task.retryCount());
+            assertEquals(1, task.attemptNumber());
+            assertNull(task.assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-restart-release");
             assertEquals(1, attempts.size());
@@ -950,6 +983,81 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void migratesVersion9AssignmentStateAndAttemptAuditToVersion10() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v9-assignment-migration-test.db");
+        createVersion9AssignmentDatabase(dbPath);
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertEquals(10, DatabaseManager.CURRENT_SCHEMA_VERSION);
+            assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
+            assertTrue(columnExists(dbPath, "tasks", "attempt_number"));
+            assertTrue(columnExists(dbPath, "tasks", "assignment_id"));
+            assertTrue(columnExists(dbPath, "task_attempts", "assignment_id"));
+            assertTrue(columnExists(dbPath, "task_attempts", "lease_expires_at"));
+
+            List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-v9-migration");
+            DatabaseManager.TaskRecord pending = taskById(tasks, "task-v9-pending");
+            assertEquals("PENDING", pending.status());
+            assertEquals(0, pending.attemptNumber());
+            assertNull(pending.assignmentId());
+
+            DatabaseManager.TaskRecord assigned = taskById(tasks, "task-v9-assigned");
+            assertEquals("ASSIGNED", assigned.status());
+            assertEquals("peer-legacy", assigned.assignedPeerId());
+            assertEquals("COORDINATOR_old", assigned.leaseOwnerId());
+            assertEquals(900L, assigned.leaseExpiresAt());
+            assertEquals(0, assigned.attemptNumber());
+            assertNull(assigned.assignmentId());
+
+            DatabaseManager.TaskRecord completed = taskById(tasks, "task-v9-completed");
+            assertEquals("COMPLETED", completed.status());
+            assertEquals(250L, completed.completedAt());
+            assertEquals(0, completed.attemptNumber());
+            assertNull(completed.assignmentId());
+
+            List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-v9-migration");
+            assertEquals(2, attempts.size());
+            JobStateStore.TaskAttemptRecord legacyRunning = attempts.stream()
+                    .filter(attempt -> attempt.taskId().equals("task-v9-assigned"))
+                    .findFirst()
+                    .orElseThrow();
+            assertEquals(4, legacyRunning.attemptNumber());
+            assertNull(legacyRunning.assignmentId());
+            assertEquals("peer-legacy", legacyRunning.peerId());
+            assertEquals(100L, legacyRunning.startedAt());
+            assertEquals(0L, legacyRunning.leaseExpiresAt());
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, legacyRunning.outcome());
+
+            JobStateStore.TaskAttemptRecord completedAttempt = attempts.stream()
+                    .filter(attempt -> attempt.taskId().equals("task-v9-completed"))
+                    .findFirst()
+                    .orElseThrow();
+            assertNull(completedAttempt.assignmentId());
+            assertEquals(0L, completedAttempt.leaseExpiresAt());
+            assertEquals(250L, completedAttempt.finishedAt());
+            assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, completedAttempt.outcome());
+        }
+    }
+
+    @Test
+    void rollsBackVersion10MigrationWhenSchemaValidationFails() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v10-migration-rollback-test.db");
+        createVersion9AssignmentDatabase(dbPath);
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("ALTER TABLE task_attempts DROP COLUMN failure_reason");
+        }
+
+        assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
+
+        assertEquals(9, schemaVersion(dbPath));
+        assertFalse(columnExists(dbPath, "tasks", "attempt_number"));
+        assertFalse(columnExists(dbPath, "tasks", "assignment_id"));
+        assertFalse(columnExists(dbPath, "task_attempts", "assignment_id"));
+        assertFalse(columnExists(dbPath, "task_attempts", "lease_expires_at"));
+    }
+
+    @Test
     void rejectsDatabaseSchemaNewerThanRuntimeSupports() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-future-schema-test.db");
         createFutureSchemaVersionDatabase(dbPath);
@@ -1039,7 +1147,8 @@ class DatabaseManagerTest {
 
     private static BrokerOutboxStore.OutboxMessage taskAssignmentOutboxMessage(String peerId,
                                                                                String taskId,
-                                                                               String jobId) {
+                                                                               String jobId,
+                                                                               long leaseExpiresAt) {
         return new BrokerOutboxStore.OutboxMessage(
                 TransportRoute.TASK_ASSIGN,
                 peerId,
@@ -1052,7 +1161,7 @@ class DatabaseManagerTest {
                         "TEST_TASK",
                         1,
                         "550e8400-e29b-41d4-a716-446655440000",
-                        1_780_000_000_000L,
+                        leaseExpiresAt,
                         "payload",
                         ""
                 )
@@ -1103,6 +1212,115 @@ class DatabaseManagerTest {
                 INSERT INTO tasks(task_id, job_id, status)
                 VALUES('legacy-task', 'legacy-job', 'PENDING')
             """);
+        }
+    }
+
+    private static void createVersion9AssignmentDatabase(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("PRAGMA foreign_keys=ON");
+            stmt.execute("""
+                CREATE TABLE schema_version (
+                    id         INTEGER PRIMARY KEY CHECK (id = 1),
+                    version    INTEGER NOT NULL CHECK (version >= 0),
+                    applied_at INTEGER NOT NULL
+                )
+            """);
+            stmt.execute("INSERT INTO schema_version(id, version, applied_at) VALUES(1, 9, 100)");
+            stmt.execute("""
+                CREATE TABLE jobs (
+                    job_id                  TEXT    PRIMARY KEY,
+                    task_type               TEXT    NOT NULL,
+                    requester_node_id       TEXT    NOT NULL,
+                    requester_token_hash    TEXT    NOT NULL DEFAULT '',
+                    requester_identity_key  TEXT    NOT NULL DEFAULT '',
+                    status                  TEXT    NOT NULL DEFAULT 'RUNNING',
+                    submitted_at            INTEGER NOT NULL,
+                    completed_at            INTEGER,
+                    file_count              INTEGER NOT NULL,
+                    parameter               TEXT    NOT NULL DEFAULT '',
+                    result_payload_json      TEXT
+                )
+            """);
+            stmt.execute("""
+                CREATE TABLE tasks (
+                    task_id             TEXT    PRIMARY KEY,
+                    job_id              TEXT    NOT NULL,
+                    assigned_peer_id    TEXT,
+                    status              TEXT    NOT NULL DEFAULT 'PENDING',
+                    started_at          INTEGER,
+                    completed_at        INTEGER,
+                    duration_ms         INTEGER,
+                    retry_count         INTEGER NOT NULL DEFAULT 0,
+                    payload_json        TEXT,
+                    result_payload_json TEXT,
+                    lease_owner_id      TEXT    NOT NULL DEFAULT '',
+                    lease_expires_at    INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE
+                )
+            """);
+            stmt.execute("""
+                CREATE TABLE task_attempts (
+                    attempt_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id         TEXT    NOT NULL,
+                    task_id        TEXT    NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    peer_id        TEXT    NOT NULL,
+                    started_at     INTEGER NOT NULL,
+                    finished_at    INTEGER,
+                    duration_ms    INTEGER,
+                    outcome        TEXT    NOT NULL DEFAULT 'RUNNING',
+                    failure_reason TEXT    NOT NULL DEFAULT '',
+                    UNIQUE(task_id, attempt_number),
+                    FOREIGN KEY(job_id) REFERENCES jobs(job_id) ON DELETE CASCADE,
+                    FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                )
+            """);
+            stmt.execute("""
+                INSERT INTO jobs(
+                    job_id, task_type, requester_node_id, requester_token_hash,
+                    status, submitted_at, file_count, parameter
+                ) VALUES('job-v9-migration', 'TEST_TASK', 'requester-1', 'token-hash',
+                         'RUNNING', 50, 3, '')
+            """);
+            stmt.execute("""
+                INSERT INTO tasks(
+                    task_id, job_id, assigned_peer_id, status, started_at,
+                    completed_at, duration_ms, retry_count, payload_json,
+                    result_payload_json, lease_owner_id, lease_expires_at
+                ) VALUES
+                    ('task-v9-pending', 'job-v9-migration', NULL, 'PENDING', NULL,
+                     NULL, NULL, 0, '"pending"', NULL, '', 0),
+                    ('task-v9-assigned', 'job-v9-migration', 'peer-legacy', 'ASSIGNED', 100,
+                     NULL, NULL, 1, '"assigned"', NULL, 'COORDINATOR_old', 900),
+                    ('task-v9-completed', 'job-v9-migration', 'peer-complete', 'COMPLETED', 200,
+                     250, 50, 0, '"completed"', '"result"', '', 0)
+            """);
+            stmt.execute("""
+                INSERT INTO task_attempts(
+                    job_id, task_id, attempt_number, peer_id, started_at,
+                    finished_at, duration_ms, outcome, failure_reason
+                ) VALUES
+                    ('job-v9-migration', 'task-v9-assigned', 4, 'peer-legacy', 100,
+                     NULL, NULL, 'RUNNING', ''),
+                    ('job-v9-migration', 'task-v9-completed', 2, 'peer-complete', 200,
+                     250, 50, 'SUCCEEDED', '')
+            """);
+        }
+    }
+
+    private static DatabaseManager.TaskRecord taskById(List<DatabaseManager.TaskRecord> tasks, String taskId) {
+        return tasks.stream()
+                .filter(task -> task.taskId().equals(taskId))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static int schemaVersion(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT version FROM schema_version WHERE id=1")) {
+            return rs.next() ? rs.getInt(1) : -1;
         }
     }
 

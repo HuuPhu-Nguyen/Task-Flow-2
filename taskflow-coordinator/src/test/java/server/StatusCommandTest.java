@@ -39,7 +39,7 @@ class StatusCommandTest {
         String output = runStatus(fakeDataSource(), rabbitMq, Map.of("TASKFLOW_TRANSPORT", "rabbitmq"),
                 "status", "summary", "5");
 
-        assertTrue(output.contains("database status=available path=taskflow.db schema=9"));
+        assertTrue(output.contains("database status=available path=taskflow.db schema=10"));
         assertTrue(output.contains("jobs total=2 running=1 completed=1 failed=0"));
         assertTrue(output.contains("tasks total=3 pending=1 assigned=1 completed=1 failed=0 retries=1 activeLeases=1 expiredLeases=0"));
         assertTrue(output.contains("attempts total=3 running=1 succeeded=1 retryScheduled=1 terminalFailure=0 dispatchFailed=0 jobFailed=0"));

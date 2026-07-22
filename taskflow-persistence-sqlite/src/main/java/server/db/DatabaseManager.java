@@ -12,6 +12,7 @@ import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import server.job.AssignmentIdentity;
 import server.registry.PeerMetricsSnapshot;
 import server.registry.PeerRegistryRecord;
 import server.registry.PeerRegistryStore;
@@ -34,7 +35,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 9;
+    public static final int CURRENT_SCHEMA_VERSION = 10;
+    private static final int ASSIGNMENT_IDENTITY_SCHEMA_VERSION = 10;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -92,6 +94,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 createTasksTable();
             }
             createTaskAttemptsTable();
+            if (version < ASSIGNMENT_IDENTITY_SCHEMA_VERSION) {
+                migrateAssignmentIdentitySchema();
+            }
             createPeerRegistryTable();
             createBrokerOutboxTable();
 
@@ -150,6 +155,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     completed_at     INTEGER,
                     duration_ms      INTEGER,
                     retry_count      INTEGER NOT NULL DEFAULT 0,
+                    attempt_number   INTEGER NOT NULL DEFAULT 0,
+                    assignment_id    TEXT,
                     payload_json     TEXT,
                     result_payload_json TEXT,
                     lease_owner_id   TEXT    NOT NULL DEFAULT '',
@@ -189,8 +196,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     job_id         TEXT    NOT NULL,
                     task_id        TEXT    NOT NULL,
                     attempt_number INTEGER NOT NULL,
+                    assignment_id  TEXT,
                     peer_id        TEXT    NOT NULL,
                     started_at     INTEGER NOT NULL,
+                    lease_expires_at INTEGER NOT NULL DEFAULT 0,
                     finished_at    INTEGER,
                     duration_ms    INTEGER,
                     outcome        TEXT    NOT NULL DEFAULT 'RUNNING',
@@ -269,6 +278,29 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         }
     }
 
+    private void migrateAssignmentIdentitySchema() throws SQLException {
+        if (!columnExists("tasks", "attempt_number")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 0");
+            }
+        }
+        if (!columnExists("tasks", "assignment_id")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE tasks ADD COLUMN assignment_id TEXT");
+            }
+        }
+        if (!columnExists("task_attempts", "assignment_id")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE task_attempts ADD COLUMN assignment_id TEXT");
+            }
+        }
+        if (!columnExists("task_attempts", "lease_expires_at")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE task_attempts ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0");
+            }
+        }
+    }
+
     private void migrateTasksTableToForeignKey() throws SQLException {
         int orphanRows = countOrphanTasks();
         if (orphanRows > 0) {
@@ -282,6 +314,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
         boolean hasPayloadJson = columnExists("tasks", "payload_json");
         boolean hasResultPayloadJson = columnExists("tasks", "result_payload_json");
+        boolean hasLeaseOwnerId = columnExists("tasks", "lease_owner_id");
+        boolean hasLeaseExpiresAt = columnExists("tasks", "lease_expires_at");
+        boolean hasAttemptNumber = columnExists("tasks", "attempt_number");
+        boolean hasAssignmentId = columnExists("tasks", "assignment_id");
 
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("ALTER TABLE tasks RENAME TO " + backupTable);
@@ -289,6 +325,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         createTasksTable();
         String payloadJsonExpression = hasPayloadJson ? "payload_json" : "NULL";
         String resultPayloadJsonExpression = hasResultPayloadJson ? "result_payload_json" : "NULL";
+        String leaseOwnerIdExpression = hasLeaseOwnerId ? "lease_owner_id" : "''";
+        String leaseExpiresAtExpression = hasLeaseExpiresAt ? "lease_expires_at" : "0";
+        String attemptNumberExpression = hasAttemptNumber ? "attempt_number" : "0";
+        String assignmentIdExpression = hasAssignmentId ? "assignment_id" : "NULL";
         try (Statement stmt = conn.createStatement()) {
             stmt.execute("""
                 INSERT INTO tasks(
@@ -301,7 +341,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     duration_ms,
                     retry_count,
                     payload_json,
-                    result_payload_json
+                    result_payload_json,
+                    lease_owner_id,
+                    lease_expires_at,
+                    attempt_number,
+                    assignment_id
                 )
                 SELECT
                     task_id,
@@ -313,9 +357,20 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     duration_ms,
                     retry_count,
                     %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
                     %s
                 FROM tasks_without_fk_migration
-            """.formatted(payloadJsonExpression, resultPayloadJsonExpression));
+            """.formatted(
+                    payloadJsonExpression,
+                    resultPayloadJsonExpression,
+                    leaseOwnerIdExpression,
+                    leaseExpiresAtExpression,
+                    attemptNumberExpression,
+                    assignmentIdExpression
+            ));
             stmt.execute("DROP TABLE " + backupTable);
         }
     }
@@ -421,7 +476,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         if (!columnExists("tasks", "payload_json")
                 || !columnExists("tasks", "result_payload_json")
                 || !columnExists("tasks", "lease_owner_id")
-                || !columnExists("tasks", "lease_expires_at")) {
+                || !columnExists("tasks", "lease_expires_at")
+                || !columnExists("tasks", "attempt_number")
+                || !columnExists("tasks", "assignment_id")) {
             throw new SQLException("Database schema is missing persisted task payload columns.");
         }
         if (!tableExists("task_attempts")) {
@@ -430,8 +487,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         if (!columnExists("task_attempts", "job_id")
                 || !columnExists("task_attempts", "task_id")
                 || !columnExists("task_attempts", "attempt_number")
+                || !columnExists("task_attempts", "assignment_id")
                 || !columnExists("task_attempts", "peer_id")
                 || !columnExists("task_attempts", "started_at")
+                || !columnExists("task_attempts", "lease_expires_at")
                 || !columnExists("task_attempts", "finished_at")
                 || !columnExists("task_attempts", "duration_ms")
                 || !columnExists("task_attempts", "outcome")
@@ -626,16 +685,58 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     @Override
     public synchronized boolean markTaskAssigned(String taskId,
-                                                String peerId,
-                                                long startedAt,
-                                                String leaseOwnerId,
-                                                long leaseExpiresAt) {
+                                                 String peerId,
+                                                 long startedAt,
+                                                 String leaseOwnerId,
+                                                 long leaseExpiresAt) {
+        return persistTaskAssignment(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt, null);
+    }
+
+    @Override
+    public synchronized boolean markTaskAssigned(String taskId,
+                                                 String peerId,
+                                                 long startedAt,
+                                                 String leaseOwnerId,
+                                                 long leaseExpiresAt,
+                                                 int attemptNumber,
+                                                 String assignmentId) {
+        AssignmentIdentity identity;
+        try {
+            identity = new AssignmentIdentity(
+                    taskId,
+                    attemptNumber,
+                    assignmentId,
+                    peerId,
+                    leaseExpiresAt
+            );
+        } catch (IllegalArgumentException e) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_assignment_identity error={}",
+                    taskId, e.getMessage());
+            return false;
+        }
+        return persistTaskAssignment(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt, identity);
+    }
+
+    private boolean persistTaskAssignment(String taskId,
+                                          String peerId,
+                                          long startedAt,
+                                          String leaseOwnerId,
+                                          long leaseExpiresAt,
+                                          AssignmentIdentity suppliedIdentity) {
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                if (!markTaskAssignedInCurrentTransaction(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
+                AssignmentIdentity identity = suppliedIdentity == null
+                        ? nextAssignmentIdentity(taskId, peerId, leaseExpiresAt)
+                        : suppliedIdentity;
+                if (identity == null || !markTaskAssignedInCurrentTransaction(
+                        taskId,
+                        startedAt,
+                        leaseOwnerId,
+                        identity
+                )) {
                     conn.rollback();
                     return false;
                 }
@@ -653,27 +754,52 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         }
     }
 
+    private AssignmentIdentity nextAssignmentIdentity(String taskId,
+                                                       String peerId,
+                                                       long leaseExpiresAt) throws SQLException {
+        String sql = "SELECT attempt_number FROM tasks WHERE task_id=? AND status='PENDING'";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+                int nextAttemptNumber;
+                try {
+                    nextAttemptNumber = Math.incrementExact(rs.getInt("attempt_number"));
+                } catch (ArithmeticException e) {
+                    throw new SQLException("Assignment attempt number overflow for task " + taskId, e);
+                }
+                return AssignmentIdentity.create(taskId, nextAttemptNumber, peerId, leaseExpiresAt);
+            }
+        }
+    }
+
     private boolean markTaskAssignedInCurrentTransaction(String taskId,
-                                                         String peerId,
                                                          long startedAt,
                                                          String leaseOwnerId,
-                                                         long leaseExpiresAt) throws SQLException {
+                                                         AssignmentIdentity identity) throws SQLException {
         String updateTaskSql = """
                 UPDATE tasks
                 SET status='ASSIGNED',
                     assigned_peer_id=?,
                     started_at=?,
                     lease_owner_id=?,
-                    lease_expires_at=?
-                WHERE task_id=? AND status='PENDING'
+                    lease_expires_at=?,
+                    attempt_number=?,
+                    assignment_id=?
+                WHERE task_id=? AND status='PENDING' AND attempt_number < ?
                 """;
         try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
-            ps.setString(1, peerId);
+            ps.setString(1, identity.workerId());
             ps.setLong(2, startedAt);
             ps.setString(3, leaseOwnerId == null ? "" : leaseOwnerId);
-            ps.setLong(4, Math.max(0L, leaseExpiresAt));
-            ps.setString(5, taskId);
-            return ps.executeUpdate() > 0 && insertTaskAttempt(taskId, peerId, startedAt);
+            ps.setLong(4, identity.leaseExpiresAtEpochMillis());
+            ps.setInt(5, identity.attemptNumber());
+            ps.setString(6, identity.assignmentId());
+            ps.setString(7, taskId);
+            ps.setInt(8, identity.attemptNumber());
+            return ps.executeUpdate() > 0 && insertTaskAttempt(identity, startedAt);
         }
     }
 
@@ -754,6 +880,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 UPDATE tasks
                 SET status='PENDING',
                     assigned_peer_id=NULL,
+                    assignment_id=NULL,
                     started_at=NULL,
                     completed_at=NULL,
                     duration_ms=NULL,
@@ -942,12 +1069,52 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                                                                      String leaseOwnerId,
                                                                                      long leaseExpiresAt,
                                                                                      OutboxMessage message) {
+        if (!(message != null && message.message() instanceof TaskAssignMessage assignment)) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=missing_task_assignment_message",
+                    taskId);
+            return Optional.empty();
+        }
+        return markTaskAssignedAndEnqueueBrokerOutbox(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
+                message
+        );
+    }
+
+    @Override
+    public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                                     String peerId,
+                                                                                     long startedAt,
+                                                                                     String leaseOwnerId,
+                                                                                     long leaseExpiresAt,
+                                                                                     int attemptNumber,
+                                                                                     String assignmentId,
+                                                                                     OutboxMessage message) {
+        AssignmentIdentity identity;
+        try {
+            identity = new AssignmentIdentity(taskId, attemptNumber, assignmentId, peerId, leaseExpiresAt);
+        } catch (IllegalArgumentException e) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_assignment_identity error={}",
+                    taskId, e.getMessage());
+            return Optional.empty();
+        }
+        if (!outboxMatchesAssignment(message, identity)) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=outbox_assignment_identity_mismatch",
+                    taskId);
+            return Optional.empty();
+        }
+
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                if (!markTaskAssignedInCurrentTransaction(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
+                if (!markTaskAssignedInCurrentTransaction(taskId, startedAt, leaseOwnerId, identity)) {
                     conn.rollback();
                     return Optional.empty();
                 }
@@ -964,6 +1131,19 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             logSqlFailure("markTaskAssignedAndEnqueueBrokerOutbox", e);
             return Optional.empty();
         }
+    }
+
+    private static boolean outboxMatchesAssignment(OutboxMessage message, AssignmentIdentity identity) {
+        if (message == null
+                || message.route() != TransportRoute.TASK_ASSIGN
+                || !identity.workerId().equals(message.peerNodeId())
+                || !(message.message() instanceof TaskAssignMessage assignment)) {
+            return false;
+        }
+        return identity.taskId().equals(assignment.getTaskId())
+                && identity.attemptNumber() == assignment.getAttemptNumber()
+                && identity.assignmentId().equals(assignment.getAssignmentId())
+                && identity.leaseExpiresAtEpochMillis() == assignment.getLeaseExpiresAtEpochMillis();
     }
 
     @Override
@@ -1271,10 +1451,17 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     @Override
     public synchronized boolean resetTaskForResume(String taskId) {
+        return resetTaskForResume(taskId, 0);
+    }
+
+    @Override
+    public synchronized boolean resetTaskForResume(String taskId, int lastAssignmentAttemptNumber) {
         String sql = """
                 UPDATE tasks
                 SET status='PENDING',
                     assigned_peer_id=NULL,
+                    assignment_id=NULL,
+                    attempt_number=MAX(attempt_number, ?),
                     started_at=NULL,
                     completed_at=NULL,
                     duration_ms=NULL,
@@ -1301,7 +1488,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     conn.rollback();
                     return false;
                 }
-                ps.setString(1, taskId);
+                ps.setInt(1, Math.max(0, lastAssignmentAttemptNumber));
+                ps.setString(2, taskId);
                 if (ps.executeUpdate() <= 0) {
                     conn.rollback();
                     return false;
@@ -1322,10 +1510,19 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     @Override
     public synchronized boolean releaseExpiredTaskLeaseForResume(String taskId, long releasedAt) {
+        return releaseExpiredTaskLeaseForResume(taskId, releasedAt, 0);
+    }
+
+    @Override
+    public synchronized boolean releaseExpiredTaskLeaseForResume(String taskId,
+                                                                 long releasedAt,
+                                                                 int lastAssignmentAttemptNumber) {
         String sql = """
                 UPDATE tasks
                 SET status='PENDING',
                     assigned_peer_id=NULL,
+                    assignment_id=NULL,
+                    attempt_number=MAX(attempt_number, ?),
                     started_at=NULL,
                     completed_at=NULL,
                     duration_ms=NULL,
@@ -1351,8 +1548,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     conn.rollback();
                     return false;
                 }
-                ps.setString(1, taskId);
-                ps.setLong(2, releasedAt);
+                ps.setInt(1, Math.max(0, lastAssignmentAttemptNumber));
+                ps.setString(2, taskId);
+                ps.setLong(3, releasedAt);
                 if (ps.executeUpdate() <= 0) {
                     conn.rollback();
                     return false;
@@ -1405,7 +1603,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                        assigned_peer_id,
                        started_at,
                        lease_owner_id,
-                       lease_expires_at
+                       lease_expires_at,
+                       attempt_number,
+                       assignment_id
                 FROM tasks
                 WHERE job_id=?
                 """;
@@ -1422,7 +1622,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                             rs.getString("assigned_peer_id"),
                             rs.getLong("started_at"),
                             rs.getString("lease_owner_id"),
-                            rs.getLong("lease_expires_at")
+                            rs.getLong("lease_expires_at"),
+                            rs.getInt("attempt_number"),
+                            rs.getString("assignment_id")
                     ));
                 }
             }
@@ -1527,8 +1729,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     job_id,
                     task_id,
                     attempt_number,
+                    assignment_id,
                     peer_id,
                     started_at,
+                    lease_expires_at,
                     finished_at,
                     duration_ms,
                     outcome,
@@ -1545,8 +1749,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                             rs.getString("job_id"),
                             rs.getString("task_id"),
                             rs.getInt("attempt_number"),
+                            rs.getString("assignment_id"),
                             rs.getString("peer_id"),
                             rs.getLong("started_at"),
+                            rs.getLong("lease_expires_at"),
                             rs.getLong("finished_at"),
                             rs.getLong("duration_ms"),
                             attemptOutcomeFromDb(rs.getString("outcome")),
@@ -1560,25 +1766,25 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         return attempts;
     }
 
-    private boolean insertTaskAttempt(String taskId, String peerId, long startedAt) throws SQLException {
+    private boolean insertTaskAttempt(AssignmentIdentity identity, long startedAt) throws SQLException {
         String sql = """
                 INSERT INTO task_attempts(
                     job_id,
                     task_id,
                     attempt_number,
+                    assignment_id,
                     peer_id,
                     started_at,
+                    lease_expires_at,
                     outcome,
                     failure_reason
                 )
                 SELECT
                     job_id,
                     task_id,
-                    COALESCE((
-                        SELECT MAX(attempt_number) + 1
-                        FROM task_attempts
-                        WHERE task_attempts.task_id=tasks.task_id
-                    ), 1),
+                    ?,
+                    ?,
+                    ?,
                     ?,
                     ?,
                     'RUNNING',
@@ -1587,9 +1793,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 WHERE task_id=?
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, peerId);
-            ps.setLong(2, startedAt);
-            ps.setString(3, taskId);
+            ps.setInt(1, identity.attemptNumber());
+            ps.setString(2, identity.assignmentId());
+            ps.setString(3, identity.workerId());
+            ps.setLong(4, startedAt);
+            ps.setLong(5, identity.leaseExpiresAtEpochMillis());
+            ps.setString(6, identity.taskId());
             return ps.executeUpdate() > 0;
         }
     }
@@ -1798,7 +2007,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                         rs.getLong("duration_ms"),
                         rs.getInt("retry_count"),
                         rs.getString("lease_owner_id"),
-                        rs.getLong("lease_expires_at")
+                        rs.getLong("lease_expires_at"),
+                        rs.getInt("attempt_number"),
+                        rs.getString("assignment_id")
                 ));
             }
         } catch (SQLException e) {
@@ -1980,8 +2191,36 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         long durationMs,
         int retryCount,
         String leaseOwnerId,
-        long leaseExpiresAt
-    ) {}
+        long leaseExpiresAt,
+        int attemptNumber,
+        String assignmentId
+    ) {
+        public TaskRecord(String taskId,
+                          String jobId,
+                          String assignedPeerId,
+                          String status,
+                          long startedAt,
+                          long completedAt,
+                          long durationMs,
+                          int retryCount,
+                          String leaseOwnerId,
+                          long leaseExpiresAt) {
+            this(
+                    taskId,
+                    jobId,
+                    assignedPeerId,
+                    status,
+                    startedAt,
+                    completedAt,
+                    durationMs,
+                    retryCount,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    0,
+                    null
+            );
+        }
+    }
 
     private record TaskResultSnapshot(String taskId, Object resultPayload) {
     }

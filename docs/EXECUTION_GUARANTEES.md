@@ -121,8 +121,8 @@ The SQLite state store also guards these persisted transitions so terminal task/
   - the attempt is counted as failed,
   - the task is retried if attempts remain,
   - otherwise the task moves to terminal `FAILED`.
-- When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment/timing/lease fields are cleared, and `retry_count` is incremented.
-- During startup recovery, an expired or missing lease is released to `PENDING` without incrementing `retry_count`; the next runtime attempt receives a new attempt-history row.
+- When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment ID/timing/lease fields are cleared, its monotonic `attempt_number` is retained, and `retry_count` is incremented.
+- During startup recovery, an expired lease or incomplete legacy assignment identity is released to `PENDING` without incrementing `retry_count`; the last known generation is retained from task state or the legacy attempt audit, and the next runtime assignment advances it.
 
 ## Capability-Aware Executor Assignment
 
@@ -174,7 +174,8 @@ The SQLite state store also guards these persisted transitions so terminal task/
 - Schema version 7 stores task attempt history rows for assignment, success, retry, terminal failure, dispatch failure, startup reconciliation, and restart release.
 - Schema version 8 stores task lease owner and expiry for assigned work.
 - Schema version 9 stores coordinator broker outbox rows for RabbitMQ `TASK_ASSIGN` and final `JOB_RESULT` publication replay.
-- Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks with unexpired leases, and releases assigned tasks with expired or missing leases to `PENDING` with a `lease_expired` attempt reason.
+- Schema version 10 stores each task's latest assignment generation and current assignment UUID, and adds assignment UUID plus lease deadline to every new task-attempt audit row. Its migration from version 9 is transactional; legacy rows receive generation zero and no assignment UUID.
+- Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks only when their complete persisted identity has an unexpired lease, releases expired assignments with a `lease_expired` attempt reason, and releases incomplete legacy assignments with an inspectable restart reason.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, task assignment must be persisted before dispatching work to an executor participant.

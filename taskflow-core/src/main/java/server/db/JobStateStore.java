@@ -20,12 +20,37 @@ public interface JobStateStore {
     record TaskAttemptRecord(String jobId,
                              String taskId,
                              int attemptNumber,
+                             String assignmentId,
                              String peerId,
                              long startedAt,
+                             long leaseExpiresAt,
                              long finishedAt,
                              long durationMs,
                              TaskAttemptOutcome outcome,
                              String failureReason) {
+        public TaskAttemptRecord(String jobId,
+                                 String taskId,
+                                 int attemptNumber,
+                                 String peerId,
+                                 long startedAt,
+                                 long finishedAt,
+                                 long durationMs,
+                                 TaskAttemptOutcome outcome,
+                                 String failureReason) {
+            this(
+                    jobId,
+                    taskId,
+                    attemptNumber,
+                    null,
+                    peerId,
+                    startedAt,
+                    0L,
+                    finishedAt,
+                    durationMs,
+                    outcome,
+                    failureReason
+            );
+        }
     }
 
     record ResumableTaskState(String taskId,
@@ -36,13 +61,39 @@ public interface JobStateStore {
                               String assignedPeerId,
                               long startedAt,
                               String leaseOwnerId,
-                              long leaseExpiresAt) {
+                              long leaseExpiresAt,
+                              int attemptNumber,
+                              String assignmentId) {
+        public ResumableTaskState(String taskId,
+                                  String status,
+                                  Object payload,
+                                  Object resultPayload,
+                                  int retryCount,
+                                  String assignedPeerId,
+                                  long startedAt,
+                                  String leaseOwnerId,
+                                  long leaseExpiresAt) {
+            this(
+                    taskId,
+                    status,
+                    payload,
+                    resultPayload,
+                    retryCount,
+                    assignedPeerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    0,
+                    null
+            );
+        }
+
         public ResumableTaskState(String taskId,
                                   String status,
                                   Object payload,
                                   Object resultPayload,
                                   int retryCount) {
-            this(taskId, status, payload, resultPayload, retryCount, "", 0L, "", 0L);
+            this(taskId, status, payload, resultPayload, retryCount, "", 0L, "", 0L, 0, null);
         }
     }
 
@@ -142,6 +193,16 @@ public interface JobStateStore {
         return markTaskAssigned(taskId, peerId, startedAt);
     }
 
+    default boolean markTaskAssigned(String taskId,
+                                     String peerId,
+                                     long startedAt,
+                                     String leaseOwnerId,
+                                     long leaseExpiresAt,
+                                     int attemptNumber,
+                                     String assignmentId) {
+        return markTaskAssigned(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt);
+    }
+
     boolean markTaskCompleted(String taskId, long completedAt, long durationMs);
 
     default boolean markTaskCompleted(String taskId,
@@ -196,8 +257,18 @@ public interface JobStateStore {
         return true;
     }
 
+    default boolean resetTaskForResume(String taskId, int lastAssignmentAttemptNumber) {
+        return resetTaskForResume(taskId);
+    }
+
     default boolean releaseExpiredTaskLeaseForResume(String taskId, long releasedAt) {
         return resetTaskForResume(taskId);
+    }
+
+    default boolean releaseExpiredTaskLeaseForResume(String taskId,
+                                                     long releasedAt,
+                                                     int lastAssignmentAttemptNumber) {
+        return releaseExpiredTaskLeaseForResume(taskId, releasedAt);
     }
 
     default boolean markRunningJobFailedOnStartup(String jobId, long completedAt) {

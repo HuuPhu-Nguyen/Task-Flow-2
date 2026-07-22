@@ -84,7 +84,9 @@ class TaskSchedulerPersistenceTest {
             JobStateStore.TaskAttemptRecord attempt = attempts.getFirst();
             assertEquals("task-job-success-0", attempt.taskId());
             assertEquals(1, attempt.attemptNumber());
+            assertEquals(assignment.getAssignmentId(), attempt.assignmentId());
             assertEquals("peer-1", attempt.peerId());
+            assertEquals(assignment.getLeaseExpiresAtEpochMillis(), attempt.leaseExpiresAt());
             assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempt.outcome());
             assertEquals("", attempt.failureReason());
             assertNotNull(store.lastLeaseOwnerId());
@@ -1513,22 +1515,64 @@ class TaskSchedulerPersistenceTest {
 
         @Override
         public synchronized boolean markTaskAssigned(String taskId,
-                                                    String peerId,
-                                                    long startedAt,
-                                                    String leaseOwnerId,
-                                                    long leaseExpiresAt) {
+                                                     String peerId,
+                                                     long startedAt,
+                                                     String leaseOwnerId,
+                                                     long leaseExpiresAt) {
+            return recordTaskAssignment(
+                    taskId,
+                    peerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    0,
+                    null
+            );
+        }
+
+        @Override
+        public synchronized boolean markTaskAssigned(String taskId,
+                                                     String peerId,
+                                                     long startedAt,
+                                                     String leaseOwnerId,
+                                                     long leaseExpiresAt,
+                                                     int attemptNumber,
+                                                     String assignmentId) {
+            return recordTaskAssignment(
+                    taskId,
+                    peerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    attemptNumber,
+                    assignmentId
+            );
+        }
+
+        private boolean recordTaskAssignment(String taskId,
+                                             String peerId,
+                                             long startedAt,
+                                             String leaseOwnerId,
+                                             long leaseExpiresAt,
+                                             int attemptNumber,
+                                             String assignmentId) {
             events.add("markTaskAssigned:" + taskId + ":" + peerId);
             if (succeeds("markTaskAssigned")) {
                 lastLeaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
                 lastLeaseExpiresAt = leaseExpiresAt;
                 String jobId = taskJobIds.getOrDefault(taskId, "");
                 Deque<TaskAttemptRecord> attempts = attemptsByJobId.computeIfAbsent(jobId, ignored -> new ArrayDeque<>());
+                int persistedAttemptNumber = attemptNumber > 0
+                        ? attemptNumber
+                        : attemptsForTask(attempts, taskId) + 1;
                 attempts.addLast(new TaskAttemptRecord(
                         jobId,
                         taskId,
-                        attemptsForTask(attempts, taskId) + 1,
+                        persistedAttemptNumber,
+                        assignmentId,
                         peerId,
                         startedAt,
+                        leaseExpiresAt,
                         0L,
                         0L,
                         TaskAttemptOutcome.RUNNING,
@@ -1725,8 +1769,10 @@ class TaskSchedulerPersistenceTest {
                             attempt.jobId(),
                             attempt.taskId(),
                             attempt.attemptNumber(),
+                            attempt.assignmentId(),
                             attempt.peerId(),
                             attempt.startedAt(),
+                            attempt.leaseExpiresAt(),
                             finishedAt,
                             durationMs,
                             outcome,
@@ -1774,12 +1820,35 @@ class TaskSchedulerPersistenceTest {
 
         @Override
         public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                                         String peerId,
-                                                                                         long startedAt,
+                                                                                          String peerId,
+                                                                                          long startedAt,
                                                                                          String leaseOwnerId,
                                                                                          long leaseExpiresAt,
                                                                                          OutboxMessage message) {
             if (!markTaskAssigned(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
+                return Optional.empty();
+            }
+            return enqueueBrokerOutbox(message);
+        }
+
+        @Override
+        public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                                          String peerId,
+                                                                                          long startedAt,
+                                                                                          String leaseOwnerId,
+                                                                                          long leaseExpiresAt,
+                                                                                          int attemptNumber,
+                                                                                          String assignmentId,
+                                                                                          OutboxMessage message) {
+            if (!markTaskAssigned(
+                    taskId,
+                    peerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    attemptNumber,
+                    assignmentId
+            )) {
                 return Optional.empty();
             }
             return enqueueBrokerOutbox(message);

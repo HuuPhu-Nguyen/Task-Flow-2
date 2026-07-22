@@ -133,8 +133,10 @@ events into a metrics backend or provide stable dashboard contracts.
 
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and
-restart release. SQLite task rows also record lease owner and expiry for
-assigned work. SQLite broker outbox rows record coordinator-originated
+restart release, including each new attempt's assignment UUID, worker, assigned
+time, and lease deadline. SQLite task rows also record the latest attempt number
+and current assignment UUID alongside lease owner and expiry for assigned work.
+SQLite broker outbox rows record coordinator-originated
 RabbitMQ task assignments and final job results until they are marked sent.
 TaskFlow DLQ commands emit decision logs and preserve redrive counts in broker
 headers, but TaskFlow still does not provide promoted lease dashboards, outbox

@@ -5,6 +5,7 @@ import org.slf4j.LoggerFactory;
 import protocol.JobSubmitMessage;
 import protocol.RequesterTokens;
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
 import server.job.TaskUnit;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 final class CoordinatorStartupRecovery {
     private static final Logger LOGGER = LoggerFactory.getLogger(CoordinatorStartupRecovery.class);
@@ -143,11 +145,23 @@ final class CoordinatorStartupRecovery {
                 return null;
             }
 
+            int auditedAttempt = lastAssignmentAttempts.getOrDefault(taskState.taskId(), 0);
+            int lastAssignmentAttempt = Math.max(taskState.attemptNumber(), auditedAttempt);
+            Optional<AssignmentIdentity> currentAssignment = restoredAssignmentIdentity(taskState);
+            if (currentAssignment.isPresent() && auditedAttempt > taskState.attemptNumber()) {
+                currentAssignment = Optional.empty();
+            }
             TaskUnit.TaskStatus restoreStatus = status;
             boolean releaseExpiredLease = false;
-            if (status == TaskUnit.TaskStatus.ASSIGNED && !hasUnexpiredLease(taskState, recoveredAt)) {
-                restoreStatus = TaskUnit.TaskStatus.PENDING;
-                releaseExpiredLease = true;
+            boolean releaseLegacyAssignment = false;
+            if (status == TaskUnit.TaskStatus.ASSIGNED) {
+                if (currentAssignment.isEmpty() || !hasCompleteLeaseMetadata(taskState)) {
+                    restoreStatus = TaskUnit.TaskStatus.PENDING;
+                    releaseLegacyAssignment = true;
+                } else if (!hasUnexpiredLease(taskState, recoveredAt)) {
+                    restoreStatus = TaskUnit.TaskStatus.PENDING;
+                    releaseExpiredLease = true;
+                }
             }
 
             if (!job.restoreTaskForResume(
@@ -159,19 +173,35 @@ final class CoordinatorStartupRecovery {
                     taskState.startedAt(),
                     taskState.leaseOwnerId(),
                     taskState.leaseExpiresAt(),
-                    lastAssignmentAttempts.getOrDefault(taskState.taskId(), 0)
+                    lastAssignmentAttempt,
+                    restoreStatus == TaskUnit.TaskStatus.ASSIGNED
+                            ? currentAssignment.orElseThrow().assignmentId()
+                            : null
             )) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_restore_failed",
                         persistedJob.jobId(), taskState.taskId());
                 return null;
             }
-            if (releaseExpiredLease) {
-                if (!store.releaseExpiredTaskLeaseForResume(taskState.taskId(), recoveredAt)) {
+            if (releaseLegacyAssignment) {
+                LOGGER.warn("event=legacy_task_assignment_released job_id={} task_id={} reason=incomplete_assignment_state",
+                        persistedJob.jobId(), taskState.taskId());
+                if (!store.resetTaskForResume(taskState.taskId(), lastAssignmentAttempt)) {
+                    LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=legacy_assignment_release_failed",
+                            persistedJob.jobId(), taskState.taskId());
+                    return null;
+                }
+            } else if (releaseExpiredLease) {
+                if (!store.releaseExpiredTaskLeaseForResume(
+                        taskState.taskId(),
+                        recoveredAt,
+                        lastAssignmentAttempt
+                )) {
                     LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_lease_release_failed",
                             persistedJob.jobId(), taskState.taskId());
                     return null;
                 }
-            } else if (status == TaskUnit.TaskStatus.PENDING && !store.resetTaskForResume(taskState.taskId())) {
+            } else if (status == TaskUnit.TaskStatus.PENDING
+                    && !store.resetTaskForResume(taskState.taskId(), lastAssignmentAttempt)) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=task_reset_failed",
                         persistedJob.jobId(), taskState.taskId());
                 return null;
@@ -203,10 +233,32 @@ final class CoordinatorStartupRecovery {
         return value != null && !value.isBlank();
     }
 
+    private static Optional<AssignmentIdentity> restoredAssignmentIdentity(
+            JobStateStore.ResumableTaskState taskState) {
+        if (taskState.attemptNumber() < 1
+                || !hasText(taskState.assignmentId())
+                || !hasText(taskState.assignedPeerId())) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new AssignmentIdentity(
+                    taskState.taskId(),
+                    taskState.attemptNumber(),
+                    taskState.assignmentId(),
+                    taskState.assignedPeerId(),
+                    taskState.leaseExpiresAt()
+            ));
+        } catch (IllegalArgumentException ignored) {
+            return Optional.empty();
+        }
+    }
+
     private static boolean hasUnexpiredLease(JobStateStore.ResumableTaskState taskState, long recoveredAt) {
-        return hasText(taskState.assignedPeerId())
-                && hasText(taskState.leaseOwnerId())
-                && taskState.leaseExpiresAt() > recoveredAt;
+        return hasCompleteLeaseMetadata(taskState) && taskState.leaseExpiresAt() > recoveredAt;
+    }
+
+    private static boolean hasCompleteLeaseMetadata(JobStateStore.ResumableTaskState taskState) {
+        return hasText(taskState.leaseOwnerId()) && taskState.leaseExpiresAt() > 0L;
     }
 
     record RecoveryResult(boolean successful,

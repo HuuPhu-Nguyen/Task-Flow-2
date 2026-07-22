@@ -125,11 +125,13 @@ message-safety boundary, not user/account authentication.
 ## Current Fencing Boundary
 
 Version `2` prevents identity-less version-0/1 task results from entering the
-commit path and makes assignment identity available end to end. It does not by
-itself make a supplied v2 identity authoritative. Persisting the current tuple
-and conditionally matching attempt number, assignment ID, and worker during
-database result commitment remain separate migrations. Until those land, do
-not describe same-worker ABA protection as complete.
+commit path and makes assignment identity available end to end. SQLite schema
+version `10` now persists that tuple in task state and attempt audit, restores
+complete unexpired identities, and releases incomplete legacy assignments. It
+does not yet make a supplied v2 result identity authoritative: conditionally
+matching attempt number, assignment ID, and worker during database result
+commitment remains a separate migration. Until that lands, do not describe
+same-worker ABA protection as complete.
 
 ## Plugin and Transport Expectations
 

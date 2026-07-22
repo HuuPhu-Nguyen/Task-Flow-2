@@ -97,6 +97,31 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
                                                      String leaseOwnerId,
                                                      long leaseExpiresAt,
                                                      int lastAssignmentAttemptNumber) {
+        return restoreTaskForResume(
+                taskId,
+                status,
+                rawResultData,
+                retryCount,
+                assignedPeerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                lastAssignmentAttemptNumber,
+                null
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    public synchronized boolean restoreTaskForResume(String taskId,
+                                                     TaskUnit.TaskStatus status,
+                                                     Object rawResultData,
+                                                     int retryCount,
+                                                     String assignedPeerId,
+                                                     long startedAt,
+                                                     String leaseOwnerId,
+                                                     long leaseExpiresAt,
+                                                     int lastAssignmentAttemptNumber,
+                                                     String assignmentId) {
         TaskUnit<T> task = tasks.get(taskId);
         if (task == null || status == null) {
             return false;
@@ -122,14 +147,29 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
             if (assignedPeerId == null || assignedPeerId.isBlank()) {
                 return false;
             }
-            task.restoreAssignedForResume(
-                    assignedPeerId,
-                    startedAt,
-                    leaseOwnerId,
-                    leaseExpiresAt,
-                    retryCount,
-                    lastAssignmentAttemptNumber
-            );
+            if (assignmentId == null || assignmentId.isBlank()) {
+                task.restoreAssignedForResume(
+                        assignedPeerId,
+                        startedAt,
+                        leaseOwnerId,
+                        leaseExpiresAt,
+                        retryCount,
+                        lastAssignmentAttemptNumber
+                );
+            } else {
+                task.restoreAssignedForResume(
+                        new AssignmentIdentity(
+                                taskId,
+                                lastAssignmentAttemptNumber,
+                                assignmentId,
+                                assignedPeerId,
+                                leaseExpiresAt
+                        ),
+                        startedAt,
+                        leaseOwnerId,
+                        retryCount
+                );
+            }
             return true;
         }
 

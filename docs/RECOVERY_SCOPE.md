@@ -10,11 +10,13 @@ SQLite remains the default and only implemented `JobStateStore`.
 
 Current startup recovery can rebuild resumable `RUNNING` jobs from persisted job
 and task snapshots, restore completed task results when result payload snapshots
-exist, preserve assigned tasks whose leases have not expired, release assigned
-tasks whose leases are expired or missing to `PENDING`, and mark legacy or
+exist, preserve assigned tasks whose complete assignment identities have not
+expired, release expired or incomplete legacy assignments to `PENDING`, and mark
 otherwise non-resumable running jobs failed. Durable attempt rows exist in
-SQLite schema version 7, task leases exist in SQLite schema version 8, and
-coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9.
+SQLite schema version 7, task leases exist in SQLite schema version 8,
+coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9, and
+current assignment generation plus audit identity/lease fields exist in schema
+version 10.
 PostgreSQL/Flyway is not implemented.
 
 ## Decision
@@ -37,16 +39,19 @@ leases; lease ownership and expiry live on task rows.
 
 The implemented contract records:
 
-- A persisted attempt identity per task attempt.
+- Assignment UUID and lease deadline for every new task attempt; migrated legacy
+  attempts retain null UUID/zero lease values because that identity did not
+  previously exist.
 - Attempt sequence number.
 - Assigned peer id.
 - Attempt start time.
 - Completion, failure, timeout, or release time.
 - Failure reason when available.
 - Whether the attempt ended terminally or left work eligible for retry.
-- Existing `retry_count` remains task-row state; attempt numbers are assigned
-  from the existing rows for that task instead of being inferred from
-  `retry_count`.
+- Existing `retry_count` remains separate task-row state. The latest assignment
+  generation is persisted on the task row; schema-v9 pending/legacy rows use
+  their attempt audit as a startup fallback, and reconciliation backfills that
+  last known generation before the next assignment advances it.
 
 Covered behavior:
 
@@ -57,8 +62,9 @@ Covered behavior:
 - Processor failure records a failed attempt.
 - Stale or duplicate task results do not mutate a closed or superseded attempt.
 - Startup recovery preserves completed attempt rows and resumes retryable work
-  without inventing false successes; assigned tasks with expired or missing
-  leases close their running attempt with `lease_expired`.
+  without inventing false successes; assigned tasks with expired leases close
+  their running attempt with `lease_expired`, while assigned legacy rows without
+  a complete identity are closed and released during restart reconciliation.
 
 ## Lease-Based Restart Recovery Scope
 
@@ -72,7 +78,8 @@ The implemented contract records:
 - Lease acquisition timing before task dispatch.
 - Lease expiry time for assigned work.
 - Startup behavior for assigned tasks with unexpired leases.
-- Startup release behavior for assigned tasks with expired or missing leases.
+- Startup release behavior for assigned tasks with expired leases or incomplete
+  assignment identities.
 - Duplicate-result handling when a peer completes work after its old lease has
   expired and the task has been reassigned.
 - Coordinator restart behavior for pending, assigned, completed, failed, and
@@ -82,8 +89,10 @@ Covered behavior:
 
 - A task is dispatched only after its lease owner is persisted.
 - Restart with an unexpired lease does not immediately reassign the assigned
-  task.
+  task when its persisted attempt number, assignment UUID, and worker are valid.
 - Restart with an expired lease releases assigned work for retry.
+- Restart with an incomplete legacy assignment identity releases the row even
+  when its old lease deadline has not yet elapsed.
 - Startup release preserves `retry_count`; active scheduler lease expiry uses
   the normal retry counter.
 - A late result from an expired lease is rejected after reassignment.

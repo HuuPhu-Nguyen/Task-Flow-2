@@ -71,6 +71,24 @@ public interface BrokerOutboxStore {
                                                                   long leaseExpiresAt,
                                                                   OutboxMessage message);
 
+    default Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
+                                                                          String peerId,
+                                                                          long startedAt,
+                                                                          String leaseOwnerId,
+                                                                          long leaseExpiresAt,
+                                                                          int attemptNumber,
+                                                                          String assignmentId,
+                                                                          OutboxMessage message) {
+        return markTaskAssignedAndEnqueueBrokerOutbox(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                message
+        );
+    }
+
     Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
                                                                   Object resultPayload,
                                                                   OutboxMessage message);

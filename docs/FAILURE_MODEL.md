@@ -186,7 +186,8 @@ rules below apply wherever that component appears:
 This matrix exposes target behavior before implementation so later mechanisms
 can be judged against a stable failure contract. On the current baseline:
 
-- the same-worker ABA row is not protected by persisted assignment generation;
+- the same-worker ABA row now has persisted assignment generation, but result
+  commitment does not yet conditionally enforce it;
 - lost-response submission replay does not yet use the required canonical
   request hash;
 - executor assignment deduplication is not yet the required bounded

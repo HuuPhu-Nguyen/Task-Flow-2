@@ -58,7 +58,7 @@ Automated evidence: [E-I2 — `RabbitMqCoordinatorLiveIntegrationTest#replayedTa
 
 A result from an obsolete assignment generation cannot commit, even when the
 obsolete and current assignments use the same executor participant (`workerId`
-in the planned protocol-v2 terminology).
+in protocol-v2 terminology).
 
 Planned automated evidence: [E-I3 — `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit`](#e-i3).
 
@@ -173,13 +173,13 @@ assignment ID, or a different executor participant is stale. Duplicate and
 stale results must not change authoritative task data, job completion, lease
 state, or executor-success accounting.
 
-The current baseline does **not** yet meet the full generation-fencing contract:
-it checks `ASSIGNED` state and current participant identity but does not persist
-and echo a monotonic assignment generation plus assignment ID. Therefore a late
-result from an earlier assignment to the same participant is a known ABA gap,
-and the target statement at the top of this document must not be presented as a
-proved current release guarantee until TF-0101 through TF-0106 and their tests
-pass.
+The current baseline does **not** yet meet the full generation-fencing contract.
+It creates, transmits, persists, audits, and restores a monotonic assignment
+generation plus assignment ID, but result commitment still checks only
+`ASSIGNED` state and current participant identity. Therefore a late result from
+an earlier assignment to the same participant remains a known ABA gap, and the
+target statement at the top of this document must not be presented as a proved
+current release guarantee until TF-0105/TF-0106 and their tests pass.
 
 ## Crash-recovery semantics
 
@@ -189,8 +189,10 @@ pass.
   before dispatch. A persistence failure before acceptance must fail the
   submission rather than dispatch untracked work.
 - On current startup recovery, resumable running jobs are rebuilt from durable
-  snapshots. Assigned tasks with unexpired leases remain assigned; expired or
-  missing leases return to pending; non-resumable running jobs become failed.
+  snapshots. Assigned tasks with complete identities and unexpired leases remain
+  assigned; expired leases and incomplete legacy assignments return to pending
+  without resetting the last known generation; non-resumable running jobs
+  become failed.
 - Pending coordinator outbox rows remain replayable after restart. Replay may
   duplicate publication, so correctness depends on duplicate classification and
   assignment fencing rather than assuming exactly-once delivery.
@@ -230,7 +232,7 @@ planned.
 |---|---|---|---|---|
 | <a id="e-i1"></a> I1 | Partial | [`TaskSchedulerPersistenceTest#startupPersistenceFailureReturnsFailureWithoutDispatchingTask`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java); [`DatabaseManagerTest#rollsBackAtomicJobStartupWhenTaskInsertFails`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java) | `PersistenceContractTest#acceptedJobSurvivesCoordinatorRestart` (TF-0701/TF-0705) | Prove the post-commit/pre-response crash window and restart survival end to end. |
 | <a id="e-i2"></a> I2 | Partial; blocked by I3 gap | [`TaskSchedulerFailureTest#staleResultFromWrongPeerIsIgnoredUntilAssignedPeerCompletesTask`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java); [`RabbitMqCoordinatorLiveIntegrationTest#replayedTaskAssignmentDoesNotCreateDuplicateAcceptedResults`](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqCoordinatorLiveIntegrationTest.java) | `PersistenceContractTest#matchingAssignmentCommitsExactlyOnce` (TF-0105/TF-0701) | Add durable conditional commitment and cover same-participant reassignment. |
-| <a id="e-i3"></a> I3 | Planned; known correctness gap | [`TaskSchedulerFailureTest#expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java) proves only different-participant rejection | `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit` (TF-0106) | Persist/echo attempt number and assignment ID, then fence the same-participant ABA case. |
+| <a id="e-i3"></a> I3 | Partial; known commitment gap | [`TaskSchedulerPersistenceTest#successfulJobPersistsLifecycleTransitions`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java) proves wire/persistence identity equality; [`DatabaseManagerTest#assignedTaskPersistsAssignmentIdentityLeaseAndAuditForResume`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java) proves task/audit persistence; [`CoordinatorStartupRecoveryTest#sqliteRestartRecoveryDoesNotResetPersistedAssignmentGeneration`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java) proves restart continuity; [`TaskSchedulerFailureTest#expiredLeaseReassignsTaskAndRejectsLateResultFromOldPeer`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java) proves only different-participant rejection | `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit` (TF-0106) | Add database-conditional identity matching, classify stale/duplicate results, and fence the same-participant ABA case. |
 | <a id="e-i4"></a> I4 | Existing persistence guards; broader property proof planned | [`DatabaseManagerTest#taskStatusUpdatesRejectInvalidTransitions`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java); [`DatabaseManagerTest#jobStatusUpdatesRejectTerminalOverwrites`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java) | `PersistenceContractTest#terminalStatesAreMonotonic` (TF-0701/TF-0704) | Exercise monotonicity across generated event sequences and recovery. |
 | <a id="e-i5"></a> I5 | Partial | [`DatabaseManagerTest#taskAssignmentOutboxCommitsWithAssignedTask`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java); [`DatabaseManagerTest#completedJobOutboxCommitsTerminalStateAndResultMessage`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java); [`RabbitMqOutboxReplayerTest#replayRecordsFailedAttemptAndLeavesRowPending`](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqOutboxReplayerTest.java) | `CrashWindowMatrixTest#publishedAssignmentRemainsReplayableUntilMarked` (TF-0304/TF-0705) | Prove every publish/mark crash window and atomic finalization from the last task result. |
 | <a id="e-i6"></a> I6 | Partial | [`TaskSchedulerFailureTest#duplicateActiveJobIdReturnsFailureWithoutReplacingOriginalJob`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java); [`RabbitMqCoordinatorLiveIntegrationTest#replayedTaskAssignmentDoesNotCreateDuplicateAcceptedResults`](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqCoordinatorLiveIntegrationTest.java) | `TaskFlowModelPropertyTest#duplicateEventsDoNotDuplicateAuthoritativeTransitions` (TF-0207/TF-0704) | Add idempotent same-request submission replay, executor assignment deduplication, and generated duplicate sequences. |
