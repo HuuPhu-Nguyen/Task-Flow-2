@@ -53,7 +53,7 @@ class DatabaseManagerTest {
             db.insertJob("job-1", "TEST_TASK", "requester-1", 1);
             db.insertTask("task-1", "job-1");
             db.markTaskAssigned("task-1", "peer-1", 123L);
-            db.markTaskCompleted("task-1", 456L, 333L);
+            db.markTaskCompleted("task-1", 456L, 333L, "result");
             db.markJobCompleted("job-1");
 
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
@@ -240,6 +240,7 @@ class DatabaseManagerTest {
 
             DatabaseManager.TaskRecord task = db.getTasksForJob("job-result-once").getFirst();
             assertEquals("COMPLETED", task.status());
+            assertEquals("FINALIZING", db.getJobHistory().getFirst().status());
             assertEquals(200L, task.completedAt());
             assertEquals(100L, task.durationMs());
             assertEquals(1, task.attemptNumber());
@@ -252,6 +253,45 @@ class DatabaseManagerTest {
             assertEquals(1, attempts.size());
             assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, attempts.getFirst().outcome());
             assertEquals(200L, attempts.getFirst().finishedAt());
+        }
+    }
+
+    @Test
+    void jsonNullTaskResultRemainsPresentForFinalizationRecovery() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-null-result-finalization.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-null-result", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-null-result", "job-null-result");
+            assertTrue(db.markTaskAssigned(
+                    "task-null-result",
+                    "peer-1",
+                    100L,
+                    "lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-null-result",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            null
+                    )
+            );
+
+            assertEquals("FINALIZING", db.getJobHistory().getFirst().status());
+            JobStateStore.ResumableTaskState restored = db.loadRunningJobsForResume()
+                    .getFirst()
+                    .tasks()
+                    .getFirst();
+            assertNull(restored.resultPayload());
+            assertTrue(restored.resultPayloadPresent());
         }
     }
 
@@ -405,6 +445,116 @@ class DatabaseManagerTest {
                     JobStateStore.ResultCommitOutcome.COMMITTED,
                     db.commitTaskResult(
                             "task-result-storage", 1, ASSIGNMENT_ID, "peer-1", 200L, 100L, "result")
+            );
+        }
+    }
+
+    @Test
+    void lastResultAndFinalizingIntentRollbackTogetherOnIntentFault() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-finalizing-intent-fault.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-finalizing-intent", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-finalizing-intent", "job-finalizing-intent");
+            assertTrue(db.markTaskAssigned(
+                    "task-finalizing-intent",
+                    "peer-1",
+                    100L,
+                    "lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_finalizing_intent
+                        BEFORE UPDATE OF status ON jobs
+                        WHEN OLD.status='RUNNING' AND NEW.status='FINALIZING'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected finalizing intent failure');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STORAGE_FAILURE,
+                    db.commitTaskResult(
+                            "task-finalizing-intent",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "result"
+                    )
+            );
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertEquals("ASSIGNED", db.getTasksForJob("job-finalizing-intent").getFirst().status());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-finalizing-intent").getFirst().outcome()
+            );
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_finalizing_intent");
+            }
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-finalizing-intent",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "result"
+                    )
+            );
+            assertEquals("FINALIZING", db.getJobHistory().getFirst().status());
+            assertEquals("COMPLETED", db.getTasksForJob("job-finalizing-intent").getFirst().status());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.SUCCEEDED,
+                    db.loadTaskAttempts("job-finalizing-intent").getFirst().outcome()
+            );
+            assertEquals(1, db.loadRunningJobsForResume().size());
+            assertTrue(db.loadPendingBrokerOutbox(10).isEmpty());
+        }
+    }
+
+    @Test
+    void resultCommitRejectsIncompleteExpectedTaskSetWithoutPartialCompletion() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-incomplete-task-set-result.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-incomplete-task-set", "TEST_TASK", "requester-1", 2);
+            db.insertTask("task-incomplete-task-set", "job-incomplete-task-set");
+            assertTrue(db.markTaskAssigned(
+                    "task-incomplete-task-set",
+                    "peer-1",
+                    100L,
+                    "lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STORAGE_FAILURE,
+                    db.commitTaskResult(
+                            "task-incomplete-task-set",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "result"
+                    )
+            );
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertEquals("ASSIGNED", db.getTasksForJob("job-incomplete-task-set").getFirst().status());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-incomplete-task-set").getFirst().outcome()
             );
         }
     }
@@ -979,7 +1129,7 @@ class DatabaseManagerTest {
                     JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
                     db.commitJobCompleted("job-completion-storage", Map.of("result", "value"), 300L)
             );
-            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertEquals("FINALIZING", db.getJobHistory().getFirst().status());
 
             try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
                  Statement statement = triggerConnection.createStatement()) {
@@ -1125,7 +1275,7 @@ class DatabaseManagerTest {
             );
             assertEquals(JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE, commit.outcome());
             assertNull(commit.outboxRecord());
-            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertEquals("FINALIZING", db.getJobHistory().getFirst().status());
             assertTrue(db.loadPendingBrokerOutbox(10).isEmpty());
         }
     }
@@ -1269,6 +1419,115 @@ class DatabaseManagerTest {
             assertEquals(JobStateStore.DurableTransitionOutcome.STALE_STATE, conflicting.outcome());
             assertNull(conflicting.outboxRecord());
             assertEquals(1, db.loadPendingBrokerOutbox(10).size());
+        }
+    }
+
+    @Test
+    void concurrentFinalizationCreatesOneTerminalStateAndOneOutbox() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-final-outbox-concurrent.db");
+        try (DatabaseManager first = new DatabaseManager(dbPath.toString())) {
+            first.insertJob("job-final-outbox-concurrent", "TEST_TASK", "requester-1", 1);
+            first.insertTask("task-final-outbox-concurrent", "job-final-outbox-concurrent");
+            assertTrue(first.markTaskAssigned(
+                    "task-final-outbox-concurrent",
+                    "peer-1",
+                    100L,
+                    "lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    first.commitTaskResult(
+                            "task-final-outbox-concurrent",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "result"
+                    )
+            );
+
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-22T00:00:00Z",
+                    "job-final-outbox-concurrent",
+                    "TEST_TASK",
+                    true,
+                    Map.of("result", "value"),
+                    List.of("result")
+            );
+            BrokerOutboxStore.OutboxMessage message = jobResultOutboxMessage("requester-1", result);
+            try (DatabaseManager second = new DatabaseManager(dbPath.toString())) {
+                ExecutorService executor = Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                try {
+                    List<Future<BrokerOutboxStore.OutboxCommit>> futures = List.of(
+                            executor.submit(() -> {
+                                start.await();
+                                return first.commitJobCompletedAndEnqueueBrokerOutbox(
+                                        "job-final-outbox-concurrent",
+                                        result.getResultPayload(),
+                                        message
+                                );
+                            }),
+                            executor.submit(() -> {
+                                start.await();
+                                return second.commitJobCompletedAndEnqueueBrokerOutbox(
+                                        "job-final-outbox-concurrent",
+                                        result.getResultPayload(),
+                                        message
+                                );
+                            })
+                    );
+                    start.countDown();
+                    List<BrokerOutboxStore.OutboxCommit> concurrent = futures.stream()
+                            .map(future -> {
+                                try {
+                                    return future.get(5, TimeUnit.SECONDS);
+                                } catch (Exception e) {
+                                    throw new IllegalStateException(e);
+                                }
+                            })
+                            .toList();
+                    assertEquals(
+                            1L,
+                            concurrent.stream()
+                                    .filter(commit -> commit.outcome()
+                                            == JobStateStore.DurableTransitionOutcome.COMMITTED)
+                                    .count()
+                    );
+                    assertEquals(
+                            1L,
+                            concurrent.stream()
+                                    .filter(commit -> commit.outcome()
+                                            == JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED)
+                                    .count()
+                    );
+                } finally {
+                    executor.shutdownNow();
+                }
+
+                BrokerOutboxStore.OutboxCommit firstReplay =
+                        first.commitJobCompletedAndEnqueueBrokerOutbox(
+                                "job-final-outbox-concurrent",
+                                result.getResultPayload(),
+                                message
+                        );
+                BrokerOutboxStore.OutboxCommit secondReplay =
+                        second.commitJobCompletedAndEnqueueBrokerOutbox(
+                                "job-final-outbox-concurrent",
+                                result.getResultPayload(),
+                                message
+                        );
+                assertEquals(JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED, firstReplay.outcome());
+                assertEquals(JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED, secondReplay.outcome());
+                assertEquals(firstReplay.outboxRecord().outboxId(), secondReplay.outboxRecord().outboxId());
+                assertEquals("COMPLETED", first.getJobHistory().getFirst().status());
+                assertEquals(1, first.loadPendingBrokerOutbox(10).size());
+            }
         }
     }
 
@@ -1939,7 +2198,7 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void completedJobResultLookupRejectsMissingTaskResults() throws Exception {
+    void jobCompletionRejectsMissingTaskResults() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-incomplete-result-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
 
@@ -1956,7 +2215,8 @@ class DatabaseManagerTest {
             ));
             assertTrue(db.markTaskAssigned("task-job-incomplete-result-0", "peer-1", 123L));
             assertTrue(db.markTaskCompleted("task-job-incomplete-result-0", 456L, 333L, "result-alpha"));
-            assertTrue(db.markJobCompleted("job-incomplete-result"));
+            assertFalse(db.markJobCompleted("job-incomplete-result"));
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
 
             assertTrue(db.loadCompletedJobResult("job-incomplete-result").isEmpty());
         } finally {
@@ -2036,6 +2296,15 @@ class DatabaseManagerTest {
 
         try {
             db.insertJob("job-completed", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-job-completed", "job-completed");
+            assertFalse(db.markJobCompleted("job-completed"));
+            assertTrue(db.markTaskAssigned("task-job-completed", "peer-1", 100L));
+            assertTrue(db.markTaskCompleted("task-job-completed", 200L, 100L, "result"));
+            assertEquals("FINALIZING", db.getJobHistory().stream()
+                    .filter(job -> job.jobId().equals("job-completed"))
+                    .findFirst()
+                    .orElseThrow()
+                    .status());
             assertTrue(db.markJobCompleted("job-completed"));
             assertFalse(db.markJobFailed("job-completed"));
 
@@ -2086,12 +2355,12 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void migratesVersion9AssignmentStateAndAttemptAuditToVersion10() throws Exception {
+    void migratesVersion9AssignmentStateAndAttemptAuditThroughCurrentSchema() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-v9-assignment-migration-test.db");
         createVersion9AssignmentDatabase(dbPath);
 
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
-            assertEquals(10, DatabaseManager.CURRENT_SCHEMA_VERSION);
+            assertEquals(11, DatabaseManager.CURRENT_SCHEMA_VERSION);
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(columnExists(dbPath, "tasks", "attempt_number"));
             assertTrue(columnExists(dbPath, "tasks", "assignment_id"));
@@ -2143,7 +2412,71 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void rollsBackVersion10MigrationWhenSchemaValidationFails() throws Exception {
+    void migratesVersion10CompletedRunningJobToFinalizingIntent() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v10-finalizing-migration-test.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-v10-finalizing", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-v10-finalizing", "job-v10-finalizing");
+            assertTrue(db.markTaskAssigned(
+                    "task-v10-finalizing",
+                    "peer-1",
+                    100L,
+                    "lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            "task-v10-finalizing",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            200L,
+                            100L,
+                            "result"
+                    )
+            );
+        }
+
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("UPDATE jobs SET status='RUNNING' WHERE job_id='job-v10-finalizing'");
+            stmt.execute("UPDATE schema_version SET version=10 WHERE id=1");
+        }
+
+        try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
+            assertEquals(11, migrated.getSchemaVersion());
+            assertEquals("FINALIZING", migrated.getJobHistory().getFirst().status());
+            JobStateStore.ResumableTaskState task = migrated.loadRunningJobsForResume()
+                    .getFirst()
+                    .tasks()
+                    .getFirst();
+            assertEquals("COMPLETED", task.status());
+            assertEquals("result", task.resultPayload());
+            assertTrue(task.resultPayloadPresent());
+        }
+    }
+
+    @Test
+    void rejectsFinalizingJobWithoutCompleteResultBearingTaskSet() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-invalid-finalizing-state.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-invalid-finalizing", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-invalid-finalizing", "job-invalid-finalizing");
+        }
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("UPDATE jobs SET status='FINALIZING' WHERE job_id='job-invalid-finalizing'");
+        }
+
+        assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
+        assertEquals(11, schemaVersion(dbPath));
+    }
+
+    @Test
+    void rollsBackCurrentSchemaMigrationWhenSchemaValidationFails() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-v10-migration-rollback-test.db");
         createVersion9AssignmentDatabase(dbPath);
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
@@ -2185,7 +2518,7 @@ class DatabaseManagerTest {
             db.insertJob("completed-job", "TEST_TASK", "requester-2", 1);
             db.insertTask("completed-job-task", "completed-job");
             db.markTaskAssigned("completed-job-task", "peer-3", 220L);
-            db.markTaskCompleted("completed-job-task", 250L, 50L);
+            db.markTaskCompleted("completed-job-task", 250L, 50L, "result");
             db.markJobCompleted("completed-job");
 
             assertEquals(1, db.markRunningJobsFailedOnStartup(999L));

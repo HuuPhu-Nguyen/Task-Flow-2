@@ -188,7 +188,7 @@ final class CoordinatorStartupRecovery {
 
         for (JobStateStore.ResumableTaskState taskState : persistedJob.tasks()) {
             TaskUnit.TaskStatus status = TaskUnit.TaskStatus.valueOf(taskState.status());
-            if (status == TaskUnit.TaskStatus.COMPLETED && taskState.resultPayload() == null) {
+            if (status == TaskUnit.TaskStatus.COMPLETED && !taskState.resultPayloadPresent()) {
                 LOGGER.warn("event=running_job_not_resumable job_id={} task_id={} reason=missing_result_payload",
                         persistedJob.jobId(), taskState.taskId());
                 return null;

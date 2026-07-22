@@ -94,6 +94,11 @@ public interface JobStateStore {
         }
     }
 
+    /**
+     * Durable task snapshot used for restart hydration. {@code
+     * resultPayloadPresent} distinguishes a stored JSON {@code null} result
+     * from an absent SQL result value.
+     */
     record ResumableTaskState(String taskId,
                               String status,
                               Object payload,
@@ -104,7 +109,35 @@ public interface JobStateStore {
                               String leaseOwnerId,
                               long leaseExpiresAt,
                               int attemptNumber,
-                              String assignmentId) {
+                              String assignmentId,
+                              boolean resultPayloadPresent) {
+        public ResumableTaskState(String taskId,
+                                  String status,
+                                  Object payload,
+                                  Object resultPayload,
+                                  int retryCount,
+                                  String assignedPeerId,
+                                  long startedAt,
+                                  String leaseOwnerId,
+                                  long leaseExpiresAt,
+                                  int attemptNumber,
+                                  String assignmentId) {
+            this(
+                    taskId,
+                    status,
+                    payload,
+                    resultPayload,
+                    retryCount,
+                    assignedPeerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    attemptNumber,
+                    assignmentId,
+                    resultPayload != null
+            );
+        }
+
         public ResumableTaskState(String taskId,
                                   String status,
                                   Object payload,
@@ -125,7 +158,8 @@ public interface JobStateStore {
                     leaseOwnerId,
                     leaseExpiresAt,
                     0,
-                    null
+                    null,
+                    resultPayload != null
             );
         }
 
@@ -134,7 +168,20 @@ public interface JobStateStore {
                                   Object payload,
                                   Object resultPayload,
                                   int retryCount) {
-            this(taskId, status, payload, resultPayload, retryCount, "", 0L, "", 0L, 0, null);
+            this(
+                    taskId,
+                    status,
+                    payload,
+                    resultPayload,
+                    retryCount,
+                    "",
+                    0L,
+                    "",
+                    0L,
+                    0,
+                    null,
+                    resultPayload != null
+            );
         }
     }
 
@@ -274,7 +321,10 @@ public interface JobStateStore {
     /**
      * Conditionally commits a successful result for one exact assignment
      * generation. Persistent implementations must make the complete tuple
-     * comparison and task transition atomically.
+     * comparison and task transition atomically. When that result completes
+     * every task successfully, the same transaction must also persist a
+     * replayable job-finalization intent before returning {@link
+     * ResultCommitOutcome#COMMITTED}.
      */
     default ResultCommitOutcome commitTaskResult(String taskId,
                                                  int attemptNumber,
@@ -365,6 +415,11 @@ public interface JobStateStore {
 
     int markRunningJobsFailedOnStartup(long completedAt);
 
+    /**
+     * Loads resumable nonterminal jobs. Implementations with a durable
+     * finalization state include both ordinary running work and jobs whose
+     * committed task results are ready for terminal aggregation.
+     */
     default List<ResumableJobState> loadRunningJobsForResume() {
         return List.of();
     }

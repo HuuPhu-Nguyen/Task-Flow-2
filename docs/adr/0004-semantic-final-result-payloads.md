@@ -25,6 +25,11 @@ to produce a plugin-defined final result. Client plugins receive the complete
 `JobResultMessage` through `ClientJobPlugin.handleResult(...)` and decide how
 to save, render, print, or otherwise handle successful final results.
 
+Aggregation is a deterministic replay function of committed per-task results.
+The coordinator may invoke it again after recovering a durable `FINALIZING`
+job, using the canonical task order rather than the original result-arrival
+order.
+
 ## Consequences
 
 - Plugin authors can evolve final result formats without changing scheduler,
@@ -36,6 +41,10 @@ to save, render, print, or otherwise handle successful final results.
 - Persistence stores schema-v6 completed semantic final payloads so successful
   completed results can be reconstructed with both semantic and compatibility
   data when ownership checks pass.
+- Schema-v11 finalization recovery may recompute the semantic payload before it
+  is terminally stored, so server plugins must not make aggregation depend on
+  clocks, randomness, process-local history, or non-idempotent external side
+  effects.
 - Existing list/file-result plugins remain compatible through the default
   `handleResult(...)` implementation.
 

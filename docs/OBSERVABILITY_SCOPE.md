@@ -112,8 +112,9 @@ Persistence and recovery:
 
 - `database_initialized`, `database_unavailable`, and `database_disabled`
   record whether SQLite history is available for the coordinator run.
-- `running_job_resumed` and scheduler `job_resumed` record rebuildable jobs
-  restored at startup.
+- `running_job_resumed` and scheduler `job_resumed` record rebuildable
+  `RUNNING` or `FINALIZING` jobs restored at startup. The first event retains
+  its compatibility name for both nonterminal durable states.
 - `running_job_not_resumable`,
   `non_resumable_running_jobs_marked_failed`,
   `abandoned_jobs_marked_failed`, and
@@ -181,6 +182,8 @@ time, and lease deadline. SQLite task rows also record the latest attempt number
 and current assignment UUID alongside lease owner and expiry for assigned work.
 SQLite broker outbox rows record coordinator-originated
 RabbitMQ task assignments and final job results until they are marked sent.
+The status summary reports `FINALIZING` separately from ordinary `RUNNING`
+jobs so an interrupted aggregation boundary is visible to operators.
 TaskFlow DLQ commands emit decision logs and preserve redrive counts in broker
 headers, but TaskFlow still does not provide promoted lease dashboards, outbox
 dashboards, DLQ dashboards, or aggregated DLQ metrics. The status command is a

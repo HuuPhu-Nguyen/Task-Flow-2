@@ -134,7 +134,11 @@ into independent tasks. A job should:
 - Convert raw payloads and results through typed model objects.
 - Accept results only through `recordResult`; the base class already rejects
   stale results from executor participants that no longer own the task.
-- Aggregate final results in deterministic order when ordering matters.
+- Treat final aggregation as a deterministic replay function of committed task
+  results. Startup may reconstruct a `FINALIZING` job and call aggregation
+  again with results restored in canonical task order; do not depend on result
+  arrival order, wall-clock time, randomness, process-local state, or an
+  external side effect that cannot be repeated safely.
 - Override `aggregateResultPayload()` when the final job result should be a
   report, summary, ranking, reduction, preview model, or another semantic
   object instead of the compatibility `List<Object>` returned by

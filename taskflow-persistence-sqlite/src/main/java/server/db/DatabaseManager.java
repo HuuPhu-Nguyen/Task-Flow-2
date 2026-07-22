@@ -26,7 +26,6 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -37,8 +36,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 10;
+    public static final int CURRENT_SCHEMA_VERSION = 11;
     private static final int ASSIGNMENT_IDENTITY_SCHEMA_VERSION = 10;
+    private static final int FINALIZATION_INTENT_SCHEMA_VERSION = 11;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -101,6 +101,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             }
             createPeerRegistryTable();
             createBrokerOutboxTable();
+            if (version < FINALIZATION_INTENT_SCHEMA_VERSION) {
+                migrateFinalizationIntentSchema();
+            }
 
             writeSchemaVersion(CURRENT_SCHEMA_VERSION);
             validateCurrentSchema();
@@ -300,6 +303,30 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("ALTER TABLE task_attempts ADD COLUMN lease_expires_at INTEGER NOT NULL DEFAULT 0");
             }
+        }
+    }
+
+    private void migrateFinalizationIntentSchema() throws SQLException {
+        String sql = """
+                UPDATE jobs
+                SET status='FINALIZING'
+                WHERE status='RUNNING'
+                  AND file_count > 0
+                  AND file_count = (
+                      SELECT COUNT(*) FROM tasks WHERE tasks.job_id=jobs.job_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tasks
+                      WHERE tasks.job_id=jobs.job_id
+                        AND (
+                            tasks.status<>'COMPLETED'
+                            OR tasks.result_payload_json IS NULL
+                        )
+                  )
+                """;
+        try (Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate(sql);
         }
     }
 
@@ -529,6 +556,37 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 || !columnExists("broker_outbox", "last_attempt_at")
                 || !columnExists("broker_outbox", "last_error")) {
             throw new SQLException("Database schema is missing broker outbox columns.");
+        }
+        if (countInvalidFinalizingJobs() > 0) {
+            throw new SQLException(
+                    "Database contains a FINALIZING job without a complete authoritative task set."
+            );
+        }
+    }
+
+    private int countInvalidFinalizingJobs() throws SQLException {
+        String sql = """
+                SELECT COUNT(*)
+                FROM jobs
+                WHERE status='FINALIZING'
+                  AND (
+                      file_count <= 0
+                      OR file_count <> (
+                          SELECT COUNT(*) FROM tasks WHERE tasks.job_id=jobs.job_id
+                      )
+                      OR EXISTS (
+                          SELECT 1
+                          FROM tasks
+                          WHERE tasks.job_id=jobs.job_id
+                            AND (
+                                tasks.status<>'COMPLETED'
+                                OR tasks.result_payload_json IS NULL
+                            )
+                      )
+                  )
+                """;
+        try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
+            return rs.next() ? rs.getInt(1) : 0;
         }
     }
 
@@ -952,6 +1010,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                   AND attempt_number=?
                   AND assignment_id=?
                   AND assigned_peer_id=?
+                  AND EXISTS (
+                      SELECT 1
+                      FROM jobs
+                      WHERE jobs.job_id=tasks.job_id
+                        AND jobs.status='RUNNING'
+                  )
                 """;
         boolean originalAutoCommit;
         try {
@@ -961,7 +1025,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 long normalizedDuration = Math.max(0L, durationMs);
                 ps.setLong(1, completedAt);
                 ps.setLong(2, normalizedDuration);
-                ps.setString(3, toJson(resultPayload));
+                ps.setString(3, toTaskResultJson(resultPayload));
                 ps.setString(4, taskId);
                 ps.setInt(5, attemptNumber);
                 ps.setString(6, assignmentId);
@@ -995,6 +1059,19 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     );
                     return ResultCommitOutcome.STORAGE_FAILURE;
                 }
+                if (!persistJobFinalizationIntentIfReady(taskId)) {
+                    conn.rollback();
+                    LOGGER.warn(
+                            "event=result_commit_storage_failure task_id={} attempt_number={} "
+                                    + "assignment_id={} assigned_peer_id={} "
+                                    + "reason=job_finalization_intent_mismatch",
+                            taskId,
+                            attemptNumber,
+                            assignmentId,
+                            assignedPeerId
+                    );
+                    return ResultCommitOutcome.STORAGE_FAILURE;
+                }
                 conn.commit();
                 return ResultCommitOutcome.COMMITTED;
             } catch (SQLException | RuntimeException e) {
@@ -1014,6 +1091,71 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 );
             }
             return ResultCommitOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    private boolean persistJobFinalizationIntentIfReady(String taskId) throws SQLException {
+        String updateSql = """
+                UPDATE jobs
+                SET status='FINALIZING'
+                WHERE status='RUNNING'
+                  AND job_id=(SELECT job_id FROM tasks WHERE task_id=?)
+                  AND file_count > 0
+                  AND file_count = (
+                      SELECT COUNT(*) FROM tasks WHERE tasks.job_id=jobs.job_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tasks
+                      WHERE tasks.job_id=jobs.job_id
+                        AND (
+                            tasks.status<>'COMPLETED'
+                            OR tasks.result_payload_json IS NULL
+                        )
+                  )
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
+            ps.setString(1, taskId);
+            ps.executeUpdate();
+        }
+
+        String stateSql = """
+                SELECT jobs.status,
+                       jobs.file_count,
+                       COUNT(job_tasks.task_id) AS task_count,
+                       SUM(CASE WHEN job_tasks.status='COMPLETED' THEN 1 ELSE 0 END)
+                           AS completed_count,
+                       SUM(CASE WHEN job_tasks.result_payload_json IS NOT NULL THEN 1 ELSE 0 END)
+                           AS durable_result_count
+                FROM tasks anchor
+                JOIN jobs ON jobs.job_id=anchor.job_id
+                LEFT JOIN tasks job_tasks ON job_tasks.job_id=jobs.job_id
+                WHERE anchor.task_id=?
+                GROUP BY jobs.job_id, jobs.status, jobs.file_count
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(stateSql)) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return false;
+                }
+                int expectedTasks = rs.getInt("file_count");
+                int taskCount = rs.getInt("task_count");
+                int completedCount = rs.getInt("completed_count");
+                int durableResultCount = rs.getInt("durable_result_count");
+                boolean validTaskSet = expectedTasks > 0
+                        && taskCount == expectedTasks
+                        && completedCount >= 0
+                        && completedCount <= expectedTasks
+                        && durableResultCount == completedCount;
+                if (!validTaskSet) {
+                    return false;
+                }
+                boolean allTasksCompleted = completedCount == expectedTasks;
+                return allTasksCompleted
+                        ? "FINALIZING".equals(rs.getString("status"))
+                        : "RUNNING".equals(rs.getString("status"));
+            }
         }
     }
 
@@ -1489,7 +1631,21 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 SET status='COMPLETED',
                     completed_at=?,
                     result_payload_json=?
-                WHERE job_id=? AND status='RUNNING'
+                WHERE job_id=?
+                  AND status IN ('RUNNING', 'FINALIZING')
+                  AND file_count > 0
+                  AND file_count = (
+                      SELECT COUNT(*) FROM tasks WHERE tasks.job_id=jobs.job_id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM tasks
+                      WHERE tasks.job_id=jobs.job_id
+                        AND (
+                            tasks.status<>'COMPLETED'
+                            OR tasks.result_payload_json IS NULL
+                        )
+                  )
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setLong(1, completedAt);
@@ -1786,7 +1942,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                                            Object resultPayload,
                                                            OutboxMessage message) {
         try {
-            if ("RUNNING".equals(jobStatus(jobId))) {
+            String status = jobStatus(jobId);
+            if ("RUNNING".equals(status) || "FINALIZING".equals(status)) {
                 return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
             }
             return classifyExistingJobOutbox(
@@ -2080,7 +2237,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 WHERE status NOT IN ('COMPLETED', 'FAILED')
                   AND job_id=?
                 """;
-        String failJobSql = "UPDATE jobs SET status='FAILED', completed_at=? WHERE job_id=? AND status='RUNNING'";
+        String failJobSql = """
+                UPDATE jobs
+                SET status='FAILED', completed_at=?
+                WHERE job_id=? AND status IN ('RUNNING', 'FINALIZING')
+                """;
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
@@ -2237,7 +2398,12 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     @Override
     public synchronized List<ResumableJobState> loadRunningJobsForResume() {
         List<ResumableJobState> jobs = new ArrayList<>();
-        String sql = "SELECT * FROM jobs WHERE status='RUNNING' ORDER BY submitted_at ASC";
+        String sql = """
+                SELECT *
+                FROM jobs
+                WHERE status IN ('RUNNING', 'FINALIZING')
+                ORDER BY submitted_at ASC
+                """;
         try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {
             while (rs.next()) {
                 String jobId = rs.getString("job_id");
@@ -2289,13 +2455,14 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                             rs.getString("lease_owner_id"),
                             rs.getLong("lease_expires_at"),
                             rs.getInt("attempt_number"),
-                            rs.getString("assignment_id")
+                            rs.getString("assignment_id"),
+                            rs.getString("result_payload_json") != null
                     ));
                 }
             }
         }
         return tasks.stream()
-                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                .sorted((left, right) -> compareTaskIds(left.taskId(), right.taskId()))
                 .toList();
     }
 
@@ -2335,7 +2502,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                         jobResult.getString("requester_identity_key"),
                         completedResultPayload(jobResult.getString("result_payload_json"), taskResults),
                         taskResults.stream()
-                                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                                .sorted((left, right) -> compareTaskIds(left.taskId(), right.taskId()))
                                 .map(TaskResultSnapshot::resultPayload)
                                 .toList()
                 ));
@@ -2352,7 +2519,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             return resultPayload;
         }
         return taskResults.stream()
-                .sorted(Comparator.comparingInt(task -> taskIndex(task.taskId())))
+                .sorted((left, right) -> compareTaskIds(left.taskId(), right.taskId()))
                 .map(TaskResultSnapshot::resultPayload)
                 .toList();
     }
@@ -2961,6 +3128,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         return payload == null ? null : GSON.toJson(payload);
     }
 
+    private static String toTaskResultJson(Object payload) {
+        return GSON.toJson(payload);
+    }
+
     private record PersistedTaskIdentity(String status,
                                          int attemptNumber,
                                          String assignmentId,
@@ -2995,6 +3166,23 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         } catch (NumberFormatException ignored) {
             return Integer.MAX_VALUE;
         }
+    }
+
+    private static int compareTaskIds(String left, String right) {
+        int indexOrder = Integer.compare(taskIndex(left), taskIndex(right));
+        if (indexOrder != 0) {
+            return indexOrder;
+        }
+        if (Objects.equals(left, right)) {
+            return 0;
+        }
+        if (left == null) {
+            return 1;
+        }
+        if (right == null) {
+            return -1;
+        }
+        return left.compareTo(right);
     }
 
     // -------------------------------------------------------------------------

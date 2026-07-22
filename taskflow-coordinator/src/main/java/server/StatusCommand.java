@@ -94,9 +94,10 @@ final class StatusCommand {
             }
 
             out.printf("database status=available path=%s schema=%d%n", DatabaseManager.DB_PATH, source.schemaVersion());
-            out.printf("jobs total=%d running=%d completed=%d failed=%d%n",
+            out.printf("jobs total=%d running=%d finalizing=%d completed=%d failed=%d%n",
                     jobs.size(),
                     countJobs(jobs, "RUNNING"),
+                    countJobs(jobs, "FINALIZING"),
                     countJobs(jobs, "COMPLETED"),
                     countJobs(jobs, "FAILED"));
             printTaskTotals(out, "tasks", taskTotals);

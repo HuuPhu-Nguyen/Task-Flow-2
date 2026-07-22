@@ -13,13 +13,17 @@ mechanism to a current guarantee.
 ## Scope and Vocabulary
 
 The persisted task states are `PENDING`, `ASSIGNED`, `COMPLETED`, and `FAILED`.
-The persisted job states are `RUNNING`, `COMPLETED`, and `FAILED`.
+The persisted job states are `RUNNING`, `FINALIZING`, `COMPLETED`, and
+`FAILED`. `FINALIZING` is a durable, nonterminal intent: every expected task
+and result snapshot has committed, and terminal aggregation can be replayed
+without another task execution.
 
 `ACCEPTED` is an API-boundary description, not a fourth persisted job value. A
 submission is accepted only after the job row and all initial task rows commit;
 its stored job state is then `RUNNING`. Thus the requested
 `ACCEPTED/RUNNING -> COMPLETED|FAILED` edges below are persisted as
-`RUNNING -> COMPLETED|FAILED`.
+`RUNNING -> FINALIZING -> COMPLETED` for successful execution or
+`RUNNING -> FAILED` for unsuccessful execution.
 
 Task-attempt outcomes such as `RUNNING`, `SUCCEEDED`, `RETRY_SCHEDULED`,
 `TERMINAL_FAILURE`, `DISPATCH_FAILED`, and `JOB_FAILED` are audit values, not
@@ -49,7 +53,7 @@ task creation
 job acceptance
     |
     v
- RUNNING --------------------------------> COMPLETED
+ RUNNING ------------> FINALIZING ------> COMPLETED
     |
     +------------------------------------> FAILED
 ```
@@ -74,11 +78,14 @@ not new business-state edges.
 5. RabbitMQ assignment creation couples T1 to one exact `TASK_ASSIGN` outbox
    envelope. RabbitMQ terminal job transitions couple J1/J2 to one exact
    `JOB_RESULT` outbox envelope.
-6. Outbox replay republishes the stored envelope; it never creates a task
+6. The last successful T2 also persists `FINALIZING` when the expected task
+   set is complete and every task has a durable result snapshot. J1 derives
+   its payload deterministically from those snapshots.
+7. Outbox replay republishes the stored envelope; it never creates a task
    generation or repeats a terminal job transition.
-7. In-memory restoration from a committed snapshot is hydration, not evidence
+8. In-memory restoration from a committed snapshot is hydration, not evidence
    that a new domain transition occurred.
-8. A correctness-relevant live transition follows one order: decide; attempt
+9. A correctness-relevant live transition follows one order: decide; attempt
    its conditional transaction; project only `COMMITTED` or exact
    `ALREADY_APPLIED`; preserve the projection and classify `STALE_STATE`; and
    suppress the requested projection/outbound effect on `UNKNOWN_ENTITY` or
@@ -113,8 +120,9 @@ including participant-unavailability handling, carry the exact
 attempt/assignment/executor fencing tuple rather than using executor identity
 as a substitute. Assignment creation also carries lease owner/deadline state.
 The logical `TASK_ASSIGN` intent becomes a transactional outbox row in
-RabbitMQ mode and uses the direct compatibility output otherwise; T2 itself
-has no final-result intent because J1 remains a separate aggregate decision.
+RabbitMQ mode and uses the direct compatibility output otherwise. T2 does not
+construct the semantic final message inside its transaction, but its last-task
+branch persists the replayable `FINALIZING` intent that requires J1.
 
 This reducer describes effects but does not execute them. Every mandatory live
 scheduler event now passes through `TaskTransitionDecisions`, which adapts the
@@ -202,10 +210,13 @@ when durable state and memory disagree.
   time, duration, and cleared lease fields. The matching attempt receives
   `SUCCEEDED`, finish time, and duration in the same transaction. Persisted
   assignment/participant identity remains available for duplicate
-  classification.
-- **Emitted outbox messages:** none at the task commit point. If this is the
-  last task, J1 later creates the final `JOB_RESULT` intent; the last-task/J1
-  transaction boundary remains TF-0206 scope.
+  classification. If the expected task count now matches the complete task
+  set and every result column is present, the same transaction changes the
+  parent job from `RUNNING` to `FINALIZING`. A valid JSON `null` result is
+  stored as JSON text and remains distinguishable from a missing SQL value.
+- **Emitted outbox messages:** none at the task commit point. `FINALIZING` is
+  the durable instruction for J1 to aggregate the ordered committed result
+  snapshots and create the final `JOB_RESULT` intent.
 - **In-memory projection:** only after `COMMITTED` does `TaskUnit` become
   `COMPLETED`, clear its live assignment/lease projection, add the parsed
   result to job aggregation, increment completed count, and release participant
@@ -218,9 +229,10 @@ when durable state and memory disagree.
   metrics, and emits `task_result_committed`. Duplicate and stale dispositions
   use their distinct counters/events.
 - **Forbidden transitions:** `PENDING -> COMPLETED`, a completion after
-  `FAILED`, a wrong-participant completion, and a stale-generation completion
-  are forbidden. A storage failure rolls back task and attempt together and
-  leaves the in-memory task assigned.
+  `FAILED` or `FINALIZING`, a wrong-participant completion, and a
+  stale-generation completion are forbidden. A task, attempt, or
+  finalization-intent storage failure rolls the transaction back and leaves
+  the in-memory task assigned.
 
 ### T3 — Release for another assignment: `ASSIGNED -> PENDING`
 
@@ -356,16 +368,21 @@ compatibility/store-fixture operations. Calling either one alone does not meet
 J0's runtime acceptance boundary; production scheduler startup uses the atomic
 job-plus-task operation.
 
-### J1 — Finish successfully: `ACCEPTED/RUNNING -> COMPLETED`
+### J1 — Finish successfully: `FINALIZING -> COMPLETED`
 
-- **Trigger:** all task projections are `COMPLETED`, including a running job
-  restored with every durable result snapshot present.
-- **Preconditions:** persisted job is `RUNNING`; final payload aggregation is
-  available; no task is failed; a terminal completion has not already won.
+- **Trigger:** all task projections are `COMPLETED`, including a recovered
+  `FINALIZING` job restored with every durable result snapshot present.
+- **Preconditions:** persisted job is `FINALIZING`; the complete expected task
+  set is `COMPLETED` and result-bearing; deterministic final payload
+  aggregation is available; a terminal completion has not already won. The
+  completion primitive also accepts a fully result-bearing legacy `RUNNING`
+  row as a repair-compatible source, but schema-v11 live T2 creates
+  `FINALIZING` first.
 - **Durable writes:** job becomes `COMPLETED`, receives completion time and the
   semantic final payload. RabbitMQ mode performs this write atomically with the
-  final outbox insert. Direct-output mode commits J1 before delivery. The last
-  T2 transaction is currently separate; TF-0206 owns that remaining boundary.
+  final outbox insert. Direct-output mode commits J1 before delivery. The
+  committed task snapshots are the deterministic inputs across the T2/J1
+  boundary.
 - **Emitted outbox messages:** RabbitMQ mode inserts one exact successful
   `JOB_RESULT`. Direct-output mode has no durable outbox and sends the response
   only after J1 commits.
@@ -374,23 +391,27 @@ job-plus-task operation.
   that active projection and suppresses delivery. After commit, successful
   delivery or bounded delivery exhaustion removes the job from `activeJobs`
   and requester indexes without changing its terminal status.
-- **Idempotent replay:** SQLite accepts only `RUNNING`; a repeated J1 changes
-  nothing. A pending outbox row republishes the same final response. Recovery
-  may derive J1 again from completed task rows only while the job is still
-  `RUNNING`.
+- **Idempotent replay:** a repeated J1 changes no terminal state. For RabbitMQ,
+  exact replay returns the already stored final outbox row; concurrent
+  finalizers therefore converge on one terminal state and one logical final
+  result. A pending outbox row may still be published more than once. Recovery
+  rehydrates `FINALIZING` and invokes J1 again from the ordered committed task
+  snapshots.
 - **Metrics/events:** active-job gauge decrements; `job_completed` records
   `success=true`, result count, and outbox metadata when applicable.
-- **Forbidden transitions:** any failed/nonterminal task forbids J1;
-  `COMPLETED -> RUNNING|FAILED` and a second semantic final payload are
-  forbidden.
+- **Forbidden transitions:** any missing, failed, or result-less task forbids
+  J1; `COMPLETED -> RUNNING|FINALIZING|FAILED` and a second semantic final
+  payload are forbidden.
 
 ### J2 — Finish unsuccessfully: `ACCEPTED/RUNNING -> FAILED`
 
 - **Trigger:** T4, unrecoverable transition persistence/preparation failure, or
   startup determination that a running job cannot be resumed safely. Final
   delivery exhaustion occurs after J2 and is not another J2 edge.
-- **Preconditions:** persisted job is `RUNNING`; no prior terminal job edge has
-  committed. Runtime finalization has a failure reason and failed final result.
+- **Preconditions:** persisted job is `RUNNING`; startup reconciliation may
+  also fail a `FINALIZING` row whose plugin inputs cannot be reconstructed. No
+  prior terminal job edge has committed. Runtime finalization has a failure
+  reason and failed final result.
 - **Durable writes:** job becomes `FAILED` with completion time. Remaining
   nonterminal tasks cross T5 or T4b for assigned work. RabbitMQ
   mode couples those task writes, J2, and the final outbox insert in one
@@ -404,7 +425,8 @@ job-plus-task operation.
   preserves its current task/capacity state and suppresses delivery. After J2
   commits, remaining task failures and capacity releases are projected; the
   job leaves active/requester indexes after delivery or bounded abandonment.
-- **Idempotent replay:** job predicate accepts only `RUNNING`; terminal replay
+- **Idempotent replay:** the runtime job predicate accepts `RUNNING`; the
+  startup-reconciliation predicate also accepts `FINALIZING`. Terminal replay
   changes nothing. Final-result outbox replay republishes the stored response.
 - **Metrics/events:** active-job gauge decrements. Normal runtime failure emits
   `job_completed success=false` plus `job_failed`; delivery exhaustion emits
@@ -448,10 +470,11 @@ through T5 or J0 through J2.
   it.
 - Persisted completed/failed task: H1 preserves the terminal state; it never
   reopens it.
-- Non-resumable running job: T4b/T5 close nonterminal tasks and J2 closes the
-  job in one startup transaction.
-- Running job whose restored tasks are all complete or include a failed task:
-  scheduler restoration invokes J1 or J2 respectively.
+- Non-resumable `RUNNING` or `FINALIZING` job: T4b/T5 close nonterminal tasks
+  where any remain and J2 closes the job in one startup transaction.
+- `FINALIZING` job whose restored tasks are all complete: scheduler restoration
+  invokes J1. A legacy `RUNNING` job whose complete durable result set predates
+  schema v11 is migrated to `FINALIZING` first.
 - Schema migration copies an existing state value into the new table shape; it
   is representation migration, not a lifecycle edge.
 
@@ -504,7 +527,7 @@ different transition IDs.
 | `DatabaseManager.insertJobWithTasks(...)` / `insertTask(...)` task rows | T0 |
 | `DatabaseManager.commitTaskAssignment(...)` / compatibility `markTaskAssigned(...)` / `markTaskAssignedInCurrentTransaction(...)` | T1 |
 | `DatabaseManager.commitTaskAssignmentAndEnqueueBrokerOutbox(...)` / compatibility `createTaskAssignmentAndEnqueueBrokerOutbox(...)` | T1 plus assignment outbox intent |
-| `DatabaseManager.markTaskCompleted(...)` / `commitTaskResult(...)` | T2 |
+| `DatabaseManager.markTaskCompleted(...)` / `commitTaskResult(...)` | T2, plus atomic `RUNNING -> FINALIZING` intent when the complete result set commits |
 | `DatabaseManager.commitAssignedTaskFailure(...)` retry/dispatch branch / compatibility `markTaskRetried(...)` | T3 |
 | `DatabaseManager.commitAssignedTaskFailure(...)` terminal branch / compatibility `markTaskFailed(...)` | T4a |
 | `DatabaseManager.markTaskFailedInCurrentTransaction(...)` from assigned with `JOB_FAILED` | T4b |
@@ -521,6 +544,7 @@ different transition IDs.
 | `DatabaseManager.markRunningJobFailedOnStartup(...)` assigned-task branch | T4b |
 | `DatabaseManager.markRunningJobFailedOnStartup(...)` pending-task branch | T5 |
 | `DatabaseManager.markRunningJobFailedOnStartup(...)` job branch | J2 |
+| `DatabaseManager.migrateFinalizationIntentSchema()` | schema-v10 repair from fully result-bearing `RUNNING` to `FINALIZING`; no task lifecycle edge |
 | `DatabaseManager.resetTaskForResume(...)` from assigned | T3 |
 | `DatabaseManager.resetTaskForResume(...)` from pending | R1 |
 | `DatabaseManager.releaseExpiredTaskLeaseForResume(...)` | T3 |
@@ -547,9 +571,10 @@ never one ambiguous edge.
 | `ASSIGNED` | completion/failure by stale participant or generation | In-memory identity check and SQLite conditional predicate. |
 | `COMPLETED` | `PENDING`, `ASSIGNED`, or `FAILED` | Terminal predicates exclude `COMPLETED`. |
 | `FAILED` | `PENDING`, `ASSIGNED`, or `COMPLETED` | Terminal predicates exclude `FAILED`. |
-| `RUNNING` job | `COMPLETED` with any non-completed task | J1 precondition derives completion from every task. |
-| `COMPLETED` job | `RUNNING` or `FAILED` | Job terminal SQL requires current `RUNNING`. |
-| `FAILED` job | `RUNNING` or `COMPLETED` | Job terminal SQL requires current `RUNNING`. |
+| `RUNNING` job | `COMPLETED` with any non-completed or result-less task | J1 requires the exact expected completed/result-bearing task set; live success first persists `FINALIZING`. |
+| `FINALIZING` job | New assignment or task result | Schema validation requires every expected task already be completed and result-bearing, leaving no `PENDING` task for T1; T2 additionally requires a `RUNNING` parent. |
+| `COMPLETED` job | `RUNNING`, `FINALIZING`, or `FAILED` | Job terminal predicates exclude `COMPLETED`. |
+| `FAILED` job | `RUNNING`, `FINALIZING`, or `COMPLETED` | Job terminal predicates exclude `FAILED`. |
 | Published/pending outbox replay | new task/job lifecycle edge | Replay reads the stored envelope and only marks effect-delivery state. |
 
 ## Current Boundaries and Follow-on Ownership
@@ -576,9 +601,10 @@ never one ambiguous edge.
   boolean write as permission to mutate memory.
 - The SQLite T5 primitive guards the task pre-state but cannot by itself prove
   that its containing job is simultaneously failing; current scheduler call
-  sites own that context. Likewise, the J1 SQL predicate checks `RUNNING` while
-  the scheduler owns the all-tasks-completed precondition. A future reducer
-  must make both cross-entity decisions explicit.
+  sites own that context. J1, by contrast, conditionally checks
+  `RUNNING|FINALIZING`, exact task cardinality, every task's `COMPLETED` state,
+  and every result snapshot before it can commit. The scheduler owns semantic
+  aggregation from that durable input set.
 - The legacy `TaskUnit.markCompletedBy(peer)` and
   `EmbarrassinglyParallelJob.recordResult(...)` projection helpers do not take
   a caller-supplied generation tuple, and the low-level
@@ -589,9 +615,14 @@ never one ambiguous edge.
 - Direct-output compatibility finalization has no durable outbox, but J1/J2
   commits before `JOB_RESULT` delivery. RabbitMQ additionally couples the
   terminal job decision to durable outbound intent.
-- T2 for the last task and RabbitMQ J1 are separate transactions. Recovery can
-  finish a still-running job whose tasks are already complete, but TF-0206 owns
-  the stronger atomic finalization design and crash proof.
+- T2 for the last task and J1 remain separate transactions because plugin
+  aggregation runs outside SQLite. The T2 transaction closes that window by
+  persisting `FINALIZING`; restart reconstructs the plugin job from task
+  snapshots in canonical task order, reruns deterministic aggregation, and
+  atomically commits J1 plus the RabbitMQ final-result outbox row. The
+  in-memory job model remains an active completed-task projection during this
+  durable intermediate state; it does not expose `FINALIZING` as a second
+  authority.
 - T5 is an administrative job-cascade edge, not evidence that pending work
   exhausted retries. A future reducer must retain that distinction.
 - Duplicate job IDs are currently rejected rather than replaying an existing
@@ -648,7 +679,12 @@ never one ambiguous edge.
   cover atomic RabbitMQ/direct T1, rollback, replay classification, exact
   replay projection data, and outbound intent.
 - [`DatabaseManagerTest#matchingAssignmentCommitsExactlyOnceAndDuplicateIsTyped`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
-  covers authoritative T2 and duplicate replay.
+  covers authoritative T2 and duplicate replay;
+  [`DatabaseManagerTest#lastResultAndFinalizingIntentRollbackTogetherOnIntentFault`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  proves the last result, successful attempt close, and `FINALIZING` intent
+  roll back together, while
+  [`DatabaseManagerTest#jsonNullTaskResultRemainsPresentForFinalizationRecovery`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  distinguishes a valid JSON `null` result from a missing snapshot.
 - [`DatabaseManagerTest#retriedTaskRowsClearPreviousAssignmentState`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
   and
   [`DatabaseManagerTest#releaseExpiredTaskLeaseForResumeClearsAssignmentAndClosesAttempt`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
@@ -661,6 +697,12 @@ never one ambiguous edge.
   proves exact final-outbox replay data, while
   [`DatabaseManagerTest#failedFinalResultOutboxFaultRollsBackTasksJobAndAttemptBeforeRetry`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
   proves the failed-result transaction has no partial projection source.
+- [`JobFinalizationCrashTest#lastTaskCommitCannotStrandJob`](../taskflow-coordinator/src/test/java/server/JobFinalizationCrashTest.java)
+  crashes at the durable `FINALIZING` boundary, recovers ordered aggregation,
+  converges duplicate finalizers on one outbox identity, and replays that row
+  after restart;
+  [`DatabaseManagerTest#concurrentFinalizationCreatesOneTerminalStateAndOneOutbox`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  proves the same single logical result under two SQLite finalizers.
 - [`CoordinatorStartupRecoveryTest#preservesAssignedTasksWithUnexpiredLeasesOnResume`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java)
   and
   [`CoordinatorStartupRecoveryTest#releasesExpiredAssignedLeasesOnResume`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java)

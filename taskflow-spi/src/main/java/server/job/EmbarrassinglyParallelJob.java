@@ -188,9 +188,6 @@ public abstract class EmbarrassinglyParallelJob<T, R> {
         }
 
         if (status == TaskUnit.TaskStatus.COMPLETED) {
-            if (rawResultData == null) {
-                return false;
-            }
             R resultData = parseResult(rawResultData);
             task.restoreCompletedForResume(retryCount, lastAssignmentAttemptNumber);
             onTaskSuccess(task, resultData);

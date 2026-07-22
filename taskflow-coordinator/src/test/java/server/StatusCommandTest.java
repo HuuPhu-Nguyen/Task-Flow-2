@@ -39,10 +39,11 @@ class StatusCommandTest {
         String output = runStatus(fakeDataSource(), rabbitMq, Map.of("TASKFLOW_TRANSPORT", "rabbitmq"),
                 "status", "summary", "5");
 
-        assertTrue(output.contains("database status=available path=taskflow.db schema=10"));
-        assertTrue(output.contains("jobs total=2 running=1 completed=1 failed=0"));
-        assertTrue(output.contains("tasks total=3 pending=1 assigned=1 completed=1 failed=0 retries=1 activeLeases=1 expiredLeases=0"));
-        assertTrue(output.contains("attempts total=3 running=1 succeeded=1 retryScheduled=1 terminalFailure=0 dispatchFailed=0 jobFailed=0"));
+        assertTrue(output.contains("database status=available path=taskflow.db schema="
+                + DatabaseManager.CURRENT_SCHEMA_VERSION));
+        assertTrue(output.contains("jobs total=3 running=1 finalizing=1 completed=1 failed=0"));
+        assertTrue(output.contains("tasks total=4 pending=1 assigned=1 completed=2 failed=0 retries=1 activeLeases=1 expiredLeases=0"));
+        assertTrue(output.contains("attempts total=4 running=1 succeeded=2 retryScheduled=1 terminalFailure=0 dispatchFailed=0 jobFailed=0"));
         assertTrue(output.contains("peers total=2 connected=1 disconnected=1"));
         assertTrue(output.contains("outbox pendingVisible=1 limit=1000 failedAttempts=1"));
         assertTrue(output.contains("rabbitmq status=available queues=2 availableQueues=2 queuedMessages=3 dlqVisible=1 dlqRedrivable=1"));
@@ -172,6 +173,15 @@ class StatusCommandTest {
                                 100L,
                                 150L,
                                 1
+                        ),
+                        new DatabaseManager.JobRecord(
+                                "job-finalizing",
+                                "TEXT_ANALYSIS",
+                                "requester-3",
+                                "FINALIZING",
+                                50L,
+                                0L,
+                                1
                         )
                 ),
                 Map.of(
@@ -214,6 +224,19 @@ class StatusCommandTest {
                                 0,
                                 "",
                                 0L
+                        )),
+                        "job-finalizing",
+                        List.of(new DatabaseManager.TaskRecord(
+                                "task-finalizing-0",
+                                "job-finalizing",
+                                "peer-2",
+                                "COMPLETED",
+                                60L,
+                                90L,
+                                30L,
+                                0,
+                                "",
+                                0L
                         ))
                 ),
                 Map.of(
@@ -250,6 +273,18 @@ class StatusCommandTest {
                                 "peer-2",
                                 110L,
                                 140L,
+                                30L,
+                                JobStateStore.TaskAttemptOutcome.SUCCEEDED,
+                                ""
+                        )),
+                        "job-finalizing",
+                        List.of(new JobStateStore.TaskAttemptRecord(
+                                "job-finalizing",
+                                "task-finalizing-0",
+                                1,
+                                "peer-2",
+                                60L,
+                                90L,
                                 30L,
                                 JobStateStore.TaskAttemptOutcome.SUCCEEDED,
                                 ""

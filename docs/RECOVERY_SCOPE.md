@@ -8,18 +8,20 @@ already documented in `docs/EXECUTION_GUARANTEES.md`.
 
 SQLite remains the default and only implemented `JobStateStore`.
 
-Current startup recovery can rebuild resumable `RUNNING` jobs from persisted job
-and task snapshots, restore completed task results when result payload snapshots
-exist, preserve assigned tasks whose complete assignment identities have not
-expired, release expired or incomplete legacy assignments to `PENDING`, and mark
-otherwise non-resumable running jobs failed. Hydration reconstructs task status,
+Current startup recovery can rebuild resumable `RUNNING` jobs and replayable
+`FINALIZING` jobs from persisted job and task snapshots, restore completed task
+results when result payload snapshots exist, preserve assigned tasks whose
+complete assignment identities have not expired, release expired or incomplete
+legacy assignments to `PENDING`, and mark otherwise non-resumable jobs failed.
+Hydration reconstructs task status,
 retry count, last assignment generation, current assignment UUID/participant,
 lease metadata, and committed result payload from SQLite rather than from any
 pre-crash scheduler object. Durable attempt rows exist in
 SQLite schema version 7, task leases exist in SQLite schema version 8,
 coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9, and
 current assignment generation plus audit identity/lease fields exist in schema
-version 10.
+version 10. Schema version 11 adds the `FINALIZING` state used to replay
+semantic aggregation after the last successful task transaction.
 PostgreSQL/Flyway is not implemented.
 
 ## Decision
@@ -67,6 +69,9 @@ Covered behavior:
 - Successful completion conditionally matches task ID, `ASSIGNED` state,
   attempt number, assignment ID, and participant ID, then closes only that
   exact running attempt in the same SQLite transaction before memory changes.
+  When that result completes the exact expected task set and every result
+  snapshot is present, the transaction also moves the job from `RUNNING` to
+  `FINALIZING`.
 - Runtime retry release, timeout, peer disconnect, lease expiry, dispatch
   failure, and terminal failure conditionally match the same complete
   assignment tuple and close that exact attempt before task/capacity projection.
@@ -109,6 +114,12 @@ Covered behavior:
   the normal retry counter.
 - A late result from an expired lease is rejected after reassignment.
 - Completed task result snapshots remain authoritative after restart.
+- A `FINALIZING` job is reconstructed from its ordered durable task snapshots;
+  plugin aggregation must be deterministic for those inputs. Successful
+  terminal state, semantic payload, and the RabbitMQ final-result outbox row
+  then commit atomically. Direct output commits terminal state before send.
+- Schema-v10 `RUNNING` jobs with an exact fully completed, result-bearing task
+  set migrate to `FINALIZING`; incomplete legacy snapshots do not.
 - Non-resumable jobs are still failed explicitly with an inspectable reason.
 - Active scheduler lease expiry closes the current attempt with
   `lease_expired` and schedules retry or terminal failure according to the
@@ -135,6 +146,8 @@ guarantees by itself.
 
 Public docs may claim SQLite-backed task leases for assigned work, unexpired
 lease preservation on startup, expired-lease release, and stale-result rejection
-after reassignment. They should not claim multi-coordinator locking,
-PostgreSQL/Flyway storage, or an operator-managed external database until those
-are implemented and tested.
+after reassignment. They may also claim replayable single-coordinator job
+finalization from durable ordered task results and atomic terminal/outbox
+commit, but not exactly-once broker delivery. They should not claim
+multi-coordinator locking, PostgreSQL/Flyway storage, or an operator-managed
+external database until those are implemented and tested.
