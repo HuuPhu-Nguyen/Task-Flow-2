@@ -39,7 +39,7 @@ Queue pressure and scheduler health:
 Job lifecycle:
 
 - `job_started` records accepted scheduler jobs with `job_id`, `task_type`,
-  requester, and task count.
+  requester, task count, and the plugin's `retry_safety` declaration.
 - `job_submission_replayed` records an exact owner/request-hash replay with job
   ID, type, requester route, and durable job status. It does not imply another
   job/task creation transition.
@@ -59,6 +59,8 @@ Job lifecycle:
 
 Task assignment, retry, and failure:
 
+- `peer_processor_registered` records each discovered executor processor with
+  `task_type`, `retry_safety`, and `plugin_class`.
 - `task_assignment_created` records each newly created assignment generation.
   RabbitMQ outbox assignments also include `outbox_id` and the immediate
   `outbox_published` outcome; direct assignments include the same committed

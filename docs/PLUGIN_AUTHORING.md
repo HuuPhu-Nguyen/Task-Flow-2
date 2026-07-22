@@ -104,6 +104,8 @@ The server module owns coordinator-side validation and job construction.
 Implement `server.job.TaskPlugin`:
 
 - `taskType()` returns the shared task type constant.
+- `retrySafety()` mirrors the value declared by the paired executor plugin so
+  the coordinator can validate retry policy before accepting a job.
 - `validateSubmission(JobSubmitMessage)` rejects bad parameters, missing
   payloads, malformed payload objects, unsupported file extensions or formats,
   and invalid encoded data before tasks are created.
@@ -202,6 +204,7 @@ The `peer` module owns executor-role task execution.
 Implement `peer.engine.PeerProcessorPlugin`:
 
 - `taskType()` returns the shared task type constant.
+- `retrySafety()` declares the processor's retry behavior.
 - `createProcessor()` returns a `TaskProcessor<?>` for that type.
 
 Register the provider in:
@@ -218,6 +221,40 @@ messages.
 
 Keep native, media, ML, or other heavy execution dependencies in the `peer`
 module when requester-only participants do not need them.
+
+## Retry Safety Contract
+
+The paired server and executor providers for every task type must return the
+same non-null `RetrySafety` value:
+
+| Declaration | Required processor behavior | Coordinator behavior |
+|---|---|---|
+| `PURE` | No plugin-owned durable effect occurs outside the returned result. Framework-owned result staging is part of producing that result. | Normal task retry policy is allowed. |
+| `IDEMPOTENT` | Repeating the operation has the same externally visible effect as performing it once. | Normal task retry policy is allowed. |
+| `REQUIRES_IDEMPOTENCY_KEY` | Every external effect uses the documented TaskFlow execution identity as its external idempotency key. | Normal task retry policy is allowed; the declaration is trusted, not inferred. |
+| `UNSAFE_TO_RETRY` | An external effect cannot safely be repeated. | A new submission is rejected before job/task creation when `maxTaskRetries > 0`. The current configuration requires a positive retry value, so these plugins cannot currently accept new jobs. |
+
+`TaskProcessor.process(TaskAssignMessage)` receives the execution context needed
+by `REQUIRES_IDEMPOTENCY_KEY` processors:
+
+- `taskId` is the logical task identity and remains stable across coordinator
+  retry generations. Use it when an external operation must happen once per
+  logical TaskFlow task.
+- `assignmentId` identifies one assignment generation and remains stable across
+  redelivery of that exact assignment. It changes when the coordinator creates
+  a retry generation, so it is sufficient only when a new effect per generation
+  is intentional and safe.
+
+Plugin-specific documentation must name the external request/header/record
+field that receives the chosen key and explain why its scope is correct.
+TaskFlow checks that a declaration exists and contract tests must check that the
+server and executor values match, but the coordinator cannot prove an external
+system honored the key. Generation fencing prevents an obsolete result from
+committing; it cannot undo or make arbitrary external side effects exactly once.
+
+The example, text, image-conversion, and video-transcoding processors currently
+declare `PURE`: their plugin-owned work produces the returned result and does
+not commit a separate business effect to an external system.
 
 ## Runtime Classpaths
 
@@ -268,6 +305,8 @@ conversion and text tests as richer production examples.
 Server module tests should cover:
 
 - `ServiceLoader.load(TaskPlugin.class)` discovers the expected task type.
+- The discovered server declaration is non-null and has the expected
+  `RetrySafety` value.
 - Valid submissions are accepted.
 - Invalid parameters are rejected.
 - Empty or malformed payload lists are rejected.
@@ -296,6 +335,8 @@ Peer module tests should cover:
 
 - `ServiceLoader.load(PeerProcessorPlugin.class)` discovers the expected task
   type.
+- The discovered executor declaration is non-null and has the expected
+  `RetrySafety` value.
 - The processor returns the expected typed result for a representative
   `TaskAssignMessage`.
 - Processor failure behavior is tested directly when invalid task payloads or
@@ -307,7 +348,8 @@ tree checks for the affected modules in addition to focused tests.
 For new domains, keep a harness test similar to
 `plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java`.
 That test should prove the new plugin can run across client, server, peer, and
-result-handler contracts without core, scheduler, transport, GUI, or peer-engine
+result-handler contracts, and that the paired server/executor retry-safety
+declarations match, without core, scheduler, transport, GUI, or peer-engine
 source changes.
 
 ## Add A New Task Type Without Touching Core
@@ -316,20 +358,22 @@ Use this checklist for each new task type:
 
 1. Add a task type constant and shared payload/result records in
    `plugins/<domain>/model`.
-2. Add a server `TaskPlugin`, job, task unit, validation helper, and
+2. Add a server `TaskPlugin`, retry-safety declaration, job, task unit,
+   validation helper, and
    `META-INF/services/server.job.TaskPlugin` entry.
 3. Add a client `ClientJobPlugin`, payload/final-result handling, payload-limit
    checks, safe output naming, and `META-INF/services/client.ClientJobPlugin`
    entry.
-4. Add a peer `PeerProcessorPlugin`, processor implementation, and
+4. Add a peer `PeerProcessorPlugin`, matching retry-safety declaration,
+   processor implementation, and
    `META-INF/services/peer.engine.PeerProcessorPlugin` entry.
 5. Wire the domain modules into Maven reactor and dependency management.
 6. Add server artifacts to `taskflow-coordinator` runtime dependencies.
 7. Add client and peer artifacts to `taskflow-peer` and `taskflow-gui` profiles
    according to `combined-runtime`, `submitter-runtime`, and `executor-runtime`.
 8. Add focused server, client, peer, and harness tests for discovery,
-   validation, payload creation, final-result handling, processing,
-   aggregation, and no-core-change wiring.
+   matching retry-safety declarations, validation, payload creation,
+   final-result handling, processing, aggregation, and no-core-change wiring.
 9. Run the focused tests for the new plugin modules and harness.
 10. Run `git diff --check`; run broader Maven and dependency-tree gates if the
     plugin changed runtime classpaths or packaged runtime behavior.

@@ -1,5 +1,6 @@
 package server.plugins.text;
 
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskPlugin;
@@ -9,6 +10,11 @@ public class TextAnalysisTaskPlugin implements TaskPlugin {
     @Override
     public String taskType() {
         return TextAnalysisTaskTypes.TEXT_ANALYSIS;
+    }
+
+    @Override
+    public RetrySafety retrySafety() {
+        return RetrySafety.PURE;
     }
 
     @Override

@@ -1,6 +1,7 @@
 package server.plugins.text;
 
 import org.junit.jupiter.api.Test;
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskPlugin;
@@ -24,11 +25,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TextAnalysisServerPluginTest {
     @Test
     void discoversTaskPlugin() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(TaskPlugin.class).spliterator(), false)
-                .map(TaskPlugin::taskType)
+        Set<TaskPlugin> plugins = StreamSupport.stream(ServiceLoader.load(TaskPlugin.class).spliterator(), false)
                 .collect(Collectors.toSet());
+        Set<String> taskTypes = plugins.stream().map(TaskPlugin::taskType).collect(Collectors.toSet());
 
         assertTrue(taskTypes.contains(TextAnalysisTaskTypes.TEXT_ANALYSIS));
+        TaskPlugin plugin = plugins.stream()
+                .filter(candidate -> TextAnalysisTaskTypes.TEXT_ANALYSIS.equals(candidate.taskType()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(RetrySafety.PURE, plugin.retrySafety());
     }
 
     @Test

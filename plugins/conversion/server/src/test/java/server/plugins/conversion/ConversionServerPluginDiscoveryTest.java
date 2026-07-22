@@ -3,6 +3,7 @@ package server.plugins.conversion;
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
 import org.junit.jupiter.api.Test;
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import protocol.PayloadReference;
 import server.job.TaskPlugin;
@@ -10,6 +11,7 @@ import server.job.TaskPlugin;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -23,14 +25,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConversionServerPluginDiscoveryTest {
     @Test
     void discoversCoordinatorJobPlugins() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(TaskPlugin.class).spliterator(), false)
-                .map(TaskPlugin::taskType)
-                .collect(Collectors.toSet());
+        Map<String, RetrySafety> retrySafetyByTaskType = StreamSupport.stream(
+                        ServiceLoader.load(TaskPlugin.class).spliterator(),
+                        false
+                )
+                .collect(Collectors.toMap(TaskPlugin::taskType, TaskPlugin::retrySafety));
 
         assertEquals(Set.of(
                 ConversionTaskTypes.IMAGE_CONVERSION,
                 ConversionTaskTypes.VIDEO_TRANSCODING
-        ), taskTypes);
+        ), retrySafetyByTaskType.keySet());
+        assertEquals(RetrySafety.PURE, retrySafetyByTaskType.get(ConversionTaskTypes.IMAGE_CONVERSION));
+        assertEquals(RetrySafety.PURE, retrySafetyByTaskType.get(ConversionTaskTypes.VIDEO_TRANSCODING));
     }
 
     @Test

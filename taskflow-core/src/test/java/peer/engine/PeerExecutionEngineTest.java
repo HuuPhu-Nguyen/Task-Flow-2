@@ -8,8 +8,10 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.io.Writer;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -165,6 +167,46 @@ class PeerExecutionEngineTest {
             assertEquals(firstResult.getAssignmentId(), duplicateResult.getAssignmentId());
             assertEquals(1, invocations.get());
             assertEquals(1, engine.assignmentCacheSnapshot().completedDuplicateCount());
+        } finally {
+            engine.shutdown();
+        }
+    }
+
+    @Test
+    void retryGenerationKeepsLogicalTaskIdAndSuppliesNewStableAssignmentId() throws Exception {
+        List<TaskAssignMessage> executionContexts = new CopyOnWriteArrayList<>();
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
+        try {
+            engine.registerProcessor("TEST", task -> {
+                executionContexts.add(task);
+                return "done-" + task.getAttemptNumber();
+            });
+            TaskAssignMessage first = testTask(
+                    "task-1",
+                    1,
+                    "550e8400-e29b-41d4-a716-446655440001"
+            );
+            TaskAssignMessage retry = testTask(
+                    "task-1",
+                    2,
+                    "550e8400-e29b-41d4-a716-446655440002"
+            );
+
+            engine.executeAssignment(first).resultFuture().get(2, TimeUnit.SECONDS);
+            AssignmentExecution redelivery = engine.executeAssignment(first);
+            redelivery.resultFuture().get(2, TimeUnit.SECONDS);
+            AssignmentExecution retryExecution = engine.executeAssignment(retry);
+            retryExecution.resultFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(AssignmentExecution.Disposition.DUPLICATE_COMPLETED, redelivery.disposition());
+            assertEquals(AssignmentExecution.Disposition.STARTED, retryExecution.disposition());
+            assertEquals(2, executionContexts.size());
+            assertEquals("task-1", executionContexts.get(0).getTaskId());
+            assertEquals("task-1", executionContexts.get(1).getTaskId());
+            assertEquals(1, executionContexts.get(0).getAttemptNumber());
+            assertEquals(2, executionContexts.get(1).getAttemptNumber());
+            assertEquals(first.getAssignmentId(), executionContexts.get(0).getAssignmentId());
+            assertEquals(retry.getAssignmentId(), executionContexts.get(1).getAssignmentId());
         } finally {
             engine.shutdown();
         }
@@ -348,13 +390,17 @@ class PeerExecutionEngineTest {
     }
 
     private static TaskAssignMessage testTask(String taskId, String assignmentId) {
+        return testTask(taskId, 7, assignmentId);
+    }
+
+    private static TaskAssignMessage testTask(String taskId, int attemptNumber, String assignmentId) {
         return new TaskAssignMessage(
                 "coordinator",
                 "2026-06-13T00:00:00Z",
                 taskId,
                 "job-1",
                 "TEST",
-                7,
+                attemptNumber,
                 assignmentId,
                 1_780_000_000_000L,
                 "payload",

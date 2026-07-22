@@ -1,5 +1,6 @@
 package server.scheduler;
 
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
@@ -17,6 +18,11 @@ public class TestTaskPlugin implements TaskPlugin {
     @Override
     public String taskType() {
         return TASK_TYPE;
+    }
+
+    @Override
+    public RetrySafety retrySafety() {
+        return RetrySafety.PURE;
     }
 
     @Override

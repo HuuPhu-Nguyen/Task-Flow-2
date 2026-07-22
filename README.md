@@ -356,6 +356,19 @@ partial, and planned test evidence kept explicit.
 Detailed baseline implementation behavior is recorded separately in
 [Current execution behavior](docs/EXECUTION_GUARANTEES.md).
 
+Every server/executor plugin pair declares a `RetrySafety` value. `PURE`,
+`IDEMPOTENT`, and correctly implemented `REQUIRES_IDEMPOTENCY_KEY` processors
+may use the normal task retry policy. An `UNSAFE_TO_RETRY` submission is rejected
+before job acceptance while `maxTaskRetries` is greater than zero; the current
+configuration contract requires that value to be positive. For external
+idempotency, `taskId` is stable across logical retry generations, while
+`assignmentId` is stable only for redelivery of one generation.
+
+Coordinator generation fencing controls which task result becomes
+authoritative. It does **not** make arbitrary plugin side effects exactly once;
+plugin authors remain responsible for purity, idempotence, or correct use of a
+documented external idempotency key.
+
 Every task/job lifecycle mutation, conditional guard, durable/outbox effect,
 replay rule, and forbidden edge is mapped in the
 [task and job state machine](docs/STATE_MACHINE.md).

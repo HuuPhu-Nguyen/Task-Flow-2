@@ -28,6 +28,14 @@ allowed. Recovery progress is subject to I10's assumptions, including restored
 SQLite and RabbitMQ availability, a compatible executor participant, and
 terminating or timed-out plugin execution.
 
+Every accepted task type has a paired retry-safety declaration. `PURE`,
+`IDEMPOTENT`, and correctly implemented `REQUIRES_IDEMPOTENCY_KEY` processors
+remain subject to the duplicate windows below. A new `UNSAFE_TO_RETRY` job is
+rejected before J0 while task retries are configured; the current scheduler
+requires a positive retry value. This admission check prevents knowingly unsafe
+retry-capable work from entering the state machine, but declarations cannot
+make an external side effect transactional with SQLite or RabbitMQ.
+
 ## Failure-window matrix
 
 | Failure window | Durable state before failure | Expected recovery | Duplicate allowed? | Required test |
@@ -243,6 +251,9 @@ can be judged against a stable failure contract. On the current baseline:
 - executor assignment deduplication uses the bounded, configurable in-memory
   assignment-ID cache proved above; cache loss still permits re-execution and
   therefore does not replace coordinator fencing;
+- paired server/executor plugins declare retry safety; unsafe work is rejected
+  before acceptance under the current positive retry configuration, while a
+  keyed plugin remains responsible for using its documented external key;
 - delayed broker retry and automatic poison quarantine are incomplete;
 - broker publication remains at least once, and the complete multi-window
   crash harness remains planned even though last-task finalization is now

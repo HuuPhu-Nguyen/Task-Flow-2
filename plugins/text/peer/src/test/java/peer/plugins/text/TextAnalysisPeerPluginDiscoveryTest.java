@@ -3,6 +3,7 @@ package peer.plugins.text;
 import org.junit.jupiter.api.Test;
 import peer.engine.PeerProcessorPlugin;
 import peer.processors.TextAnalysisProcessor;
+import plugin.RetrySafety;
 import protocol.TaskAssignMessage;
 import text.model.TextAnalysisPayload;
 import text.model.TextAnalysisResult;
@@ -20,11 +21,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TextAnalysisPeerPluginDiscoveryTest {
     @Test
     void discoversPeerProcessorPlugin() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(PeerProcessorPlugin.class).spliterator(), false)
+        Set<PeerProcessorPlugin> plugins = StreamSupport.stream(
+                        ServiceLoader.load(PeerProcessorPlugin.class).spliterator(),
+                        false
+                )
+                .collect(Collectors.toSet());
+        Set<String> taskTypes = plugins.stream()
                 .map(PeerProcessorPlugin::taskType)
                 .collect(Collectors.toSet());
 
         assertTrue(taskTypes.contains(TextAnalysisTaskTypes.TEXT_ANALYSIS));
+        PeerProcessorPlugin plugin = plugins.stream()
+                .filter(candidate -> TextAnalysisTaskTypes.TEXT_ANALYSIS.equals(candidate.taskType()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(RetrySafety.PURE, plugin.retrySafety());
     }
 
     @Test

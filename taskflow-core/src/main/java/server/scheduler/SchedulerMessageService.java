@@ -1,5 +1,6 @@
 package server.scheduler;
 
+import plugin.RetrySafety;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
@@ -31,6 +32,7 @@ final class SchedulerMessageService {
     private final SchedulerState state;
     private final SchedulerPersistence persistence;
     private final SchedulerOutput output;
+    private final SchedulerConfig config;
     private final TaskFlowClock clock;
     private final AssignmentIdGenerator assignmentIdGenerator;
     private final SchedulerMetrics metrics;
@@ -43,6 +45,7 @@ final class SchedulerMessageService {
     SchedulerMessageService(SchedulerState state,
                             SchedulerPersistence persistence,
                             SchedulerOutput output,
+                            SchedulerConfig config,
                             TaskFlowClock clock,
                             AssignmentIdGenerator assignmentIdGenerator,
                             SchedulerMetrics metrics,
@@ -54,6 +57,7 @@ final class SchedulerMessageService {
         this.state = state;
         this.persistence = persistence;
         this.output = output;
+        this.config = Objects.requireNonNull(config, "config");
         this.clock = clock;
         this.assignmentIdGenerator = assignmentIdGenerator;
         this.metrics = metrics;
@@ -139,6 +143,7 @@ final class SchedulerMessageService {
                 return;
             }
 
+            RetrySafety retrySafety = validatePluginRetrySafety(submit.getTaskType());
             long acceptedAt = clock.nowEpochMillis();
             TransitionDecision decision = transitions.jobSubmitted(acceptedAt);
             if (!decision.accepted()) {
@@ -173,7 +178,8 @@ final class SchedulerMessageService {
                     "job_id", job.getJobId(),
                     "task_type", job.getTaskType(),
                     "requester_id", job.getRequesterNodeId(),
-                    "task_count", job.getTasks().size()
+                    "task_count", job.getTasks().size(),
+                    "retry_safety", retrySafety
             ));
         } catch (Exception e) {
             events.error("job_start_failed", events.fields(
@@ -184,6 +190,17 @@ final class SchedulerMessageService {
             ));
             sendJobStartFailure(envelope.fromNodeId(), submit, e.getMessage());
         }
+    }
+
+    private RetrySafety validatePluginRetrySafety(String taskType) {
+        RetrySafety retrySafety = JobFactory.retrySafety(taskType);
+        if (!retrySafety.permitsAutomaticRetry() && config.maxTaskRetries() > 0) {
+            throw new IllegalArgumentException(
+                    "Task plugin " + safeTaskType(taskType) + " declares UNSAFE_TO_RETRY and cannot be "
+                            + "accepted while maxTaskRetries is " + config.maxTaskRetries() + "."
+            );
+        }
+        return retrySafety;
     }
 
     private JobStateStore.JobSubmissionDecision persistJobStartup(EmbarrassinglyParallelJob<?, ?> job,

@@ -158,15 +158,27 @@ Planned automated evidence: [E-I10 — `CorrectnessChaosExperiment#allJobsTermin
 
 - Execution-capable participants may execute a task more than once.
 - Re-execution may follow assignment redelivery, an executor crash, a timeout,
-  lease expiry, lost result publication, or eviction/restart of the planned
-  bounded executor deduplication cache.
+  lease expiry, lost result publication, or eviction/restart of the bounded
+  executor deduplication cache.
 - Coordinator fencing limits which result becomes authoritative; it does not
   undo work already performed by a plugin.
 - Plugin external side effects are not made exactly once by the coordinator.
   A plugin that calls an external system must be pure, idempotent, use an
   appropriate idempotency key, or explicitly reject retry-capable operation.
-- The current runtime bounds task attempts with its configured retry policy,
-  but the complete plugin retry-safety contract is planned in TF-0208.
+- Every paired server/executor plugin declares `PURE`, `IDEMPOTENT`,
+  `REQUIRES_IDEMPOTENCY_KEY`, or `UNSAFE_TO_RETRY`. The coordinator permits the
+  normal task retry policy for the first three and rejects a new unsafe job
+  before acceptance when `maxTaskRetries > 0`; current configuration requires a
+  positive value.
+- For a keyed plugin, logical `taskId` is stable across retry generations and
+  `assignmentId` is stable only within one generation. Plugin documentation
+  must identify the external key used. TaskFlow validates the declaration but
+  cannot prove the external operation honored it.
+- Current evidence includes
+  [`TaskSchedulerFailureTest#unsafePluginIsRejectedBeforeJobAcceptanceWhenRetriesAreEnabled`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java),
+  [`PeerExecutionEngineTest#retryGenerationKeepsLogicalTaskIdAndSuppliesNewStableAssignmentId`](../taskflow-core/src/test/java/peer/engine/PeerExecutionEngineTest.java),
+  and
+  [`ExamplePluginContractHarnessTest#examplePluginRunsAcrossClientServerPeerAndResultHandlerContracts`](../plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java).
 
 ## Result-commit semantics
 

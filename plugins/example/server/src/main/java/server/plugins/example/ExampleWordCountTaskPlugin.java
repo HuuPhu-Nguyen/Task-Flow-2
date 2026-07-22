@@ -3,6 +3,7 @@ package server.plugins.example;
 import com.google.gson.Gson;
 import example.model.ExamplePayload;
 import example.model.ExampleTaskTypes;
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import protocol.PayloadLimits;
 import server.job.EmbarrassinglyParallelJob;
@@ -17,6 +18,11 @@ public class ExampleWordCountTaskPlugin implements TaskPlugin {
     @Override
     public String taskType() {
         return ExampleTaskTypes.WORD_COUNT;
+    }
+
+    @Override
+    public RetrySafety retrySafety() {
+        return RetrySafety.PURE;
     }
 
     @Override

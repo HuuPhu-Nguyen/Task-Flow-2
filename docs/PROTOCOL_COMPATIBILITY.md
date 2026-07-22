@@ -167,6 +167,14 @@ continue to produce task-assignment payload templates; the coordinator adds its
 framework-owned assignment identity before publication. Participant processors
 should return through the shared execution engine so results echo that identity.
 
+Retry safety is an SPI declaration, not a new wire field. The existing version-2
+`TaskAssignMessage` is the processor execution context: `taskId` stays stable
+across logical retry generations, while `assignmentId` stays stable only across
+redelivery of one generation. A `REQUIRES_IDEMPOTENCY_KEY` plugin must document
+which identity it sends to which external key. Paired server/executor artifacts
+must declare the same value; the coordinator uses the server-side mirror for
+pre-acceptance policy validation.
+
 Plugins must not construct RabbitMQ envelopes or bypass transport codecs. New
 transports must emit the current version, apply the per-message compatibility
 matrix, call the shared validator after parsing, and give permanent validation

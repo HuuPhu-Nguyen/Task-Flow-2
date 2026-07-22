@@ -154,6 +154,55 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void unsafePluginIsRejectedBeforeJobAcceptanceWhenRetriesAreEnabled() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        CapturingOutput output = new CapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-unsafe-plugin-test");
+        UnsafeTestTaskPlugin.resetCreateCalls();
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage unsafeJob = new JobSubmitMessage(
+                    "client-1",
+                    "2026-07-22T00:00:00Z",
+                    "job-unsafe-plugin",
+                    UnsafeTestTaskPlugin.TASK_TYPE,
+                    List.of("payload"),
+                    "",
+                    "token-job-unsafe-plugin"
+            );
+            mailbox.put(new MessageEnvelope(unsafeJob, "client-1", acknowledgement));
+
+            assertTrue(output.awaitResult());
+            assertTrue(acknowledgement.awaitAck());
+            JobResultMessage result = output.result();
+            assertNotNull(result);
+            assertEquals("job-unsafe-plugin", result.getJobId());
+            assertEquals(UnsafeTestTaskPlugin.TASK_TYPE, result.getTaskType());
+            assertFalse(result.isSuccessful());
+            assertTrue(result.getErrorMessage().contains("UNSAFE_TO_RETRY"));
+            assertEquals(0, UnsafeTestTaskPlugin.createCalls());
+            assertEquals(0, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(0, scheduler.getMetricsSnapshot().assignmentGenerationsTotal());
+            assertEquals(1, acknowledgement.ackCount());
+            assertEquals(0, acknowledgement.requeueCount());
+            assertEquals(0, acknowledgement.rejectCount());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+            UnsafeTestTaskPlugin.resetCreateCalls();
+        }
+    }
+
+    @Test
     void brokerDeliveryIsAcknowledgedAfterJobSubmitHandling() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         CapturingOutput output = new CapturingOutput();

@@ -1,6 +1,7 @@
 package server.job;
 
 import org.junit.jupiter.api.Test;
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 
 import java.util.List;
@@ -33,6 +34,24 @@ class JobFactoryTest {
     }
 
     @Test
+    void loadPluginsRejectsMissingRetrySafetyDeclaration() {
+        IllegalStateException error = assertThrows(IllegalStateException.class, () ->
+                JobFactory.loadPlugins(List.of(new MissingRetrySafetyPlugin())));
+
+        assertTrue(error.getMessage().contains("must declare retry safety"));
+    }
+
+    @Test
+    void retrySafetyLookupNormalizesTaskType() {
+        StubPlugin plugin = new StubPlugin("TEST_TASK");
+
+        assertSame(
+                RetrySafety.PURE,
+                JobFactory.retrySafety(" test_task ", Map.of("TEST_TASK", plugin))
+        );
+    }
+
+    @Test
     void createRunsPluginValidationBeforeCreatingJob() {
         ValidatingPlugin plugin = new ValidatingPlugin();
         JobSubmitMessage submit = new JobSubmitMessage(
@@ -52,6 +71,11 @@ class JobFactoryTest {
 
     private record StubPlugin(String taskType) implements TaskPlugin {
         @Override
+        public RetrySafety retrySafety() {
+            return RetrySafety.PURE;
+        }
+
+        @Override
         public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
             throw new UnsupportedOperationException("Test plugin does not create jobs.");
         }
@@ -64,6 +88,11 @@ class JobFactoryTest {
         }
 
         @Override
+        public RetrySafety retrySafety() {
+            return RetrySafety.IDEMPOTENT;
+        }
+
+        @Override
         public void validateSubmission(JobSubmitMessage message) {
             throw new IllegalArgumentException("Rejected by validating plugin.");
         }
@@ -71,6 +100,23 @@ class JobFactoryTest {
         @Override
         public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
             throw new AssertionError("Invalid submissions should not create jobs.");
+        }
+    }
+
+    private static final class MissingRetrySafetyPlugin implements TaskPlugin {
+        @Override
+        public String taskType() {
+            return "MISSING_RETRY_SAFETY";
+        }
+
+        @Override
+        public RetrySafety retrySafety() {
+            return null;
+        }
+
+        @Override
+        public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
+            throw new UnsupportedOperationException();
         }
     }
 }

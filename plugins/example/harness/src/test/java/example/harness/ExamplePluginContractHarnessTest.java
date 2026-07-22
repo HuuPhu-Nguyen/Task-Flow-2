@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
+import plugin.RetrySafety;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
@@ -38,6 +39,9 @@ class ExamplePluginContractHarnessTest {
         ClientJobPlugin clientPlugin = loadClientPlugin();
         TaskPlugin taskPlugin = loadTaskPlugin();
         PeerProcessorPlugin peerPlugin = loadPeerPlugin();
+
+        assertEquals(RetrySafety.PURE, taskPlugin.retrySafety());
+        assertEquals(taskPlugin.retrySafety(), peerPlugin.retrySafety());
 
         Path first = tempDir.resolve("first.txt");
         Path second = tempDir.resolve("second.txt");

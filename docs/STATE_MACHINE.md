@@ -90,6 +90,9 @@ not new business-state edges.
    `ALREADY_APPLIED`; preserve the projection and classify `STALE_STATE`; and
    suppress the requested projection/outbound effect on `UNKNOWN_ENTITY` or
    `STORAGE_FAILURE`.
+10. A new submission crosses J0 only when its plugin declares retry safety and
+    that declaration permits the configured retry policy. Rejection creates no
+    job/task transition; exact replay classification occurs before this check.
 
 The general SQLite transition result is
 `COMMITTED | ALREADY_APPLIED | STALE_STATE | UNKNOWN_ENTITY | STORAGE_FAILURE`.
@@ -355,8 +358,11 @@ terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
 
 - **Trigger:** validated `JOB_SUBMIT` plus successful plugin task creation.
 - **Preconditions:** the requester token/optional identity signature and route
-  binding are valid; the owner/job-ID pair is classified `NEW_SUBMISSION`; at
-  least one task was created; T0 can commit for the complete task set.
+  binding are valid; the owner/job-ID pair is classified `NEW_SUBMISSION`; the
+  server plugin has a non-null retry-safety declaration compatible with the
+  configured retry policy; at least one task was created; T0 can commit for the
+  complete task set. With the current positive `maxTaskRetries` contract,
+  `UNSAFE_TO_RETRY` fails before plugin job construction or T0.
 - **Durable writes:** the job row is inserted as `RUNNING` in the same
   transaction as all T0 rows and the schema-v12 canonical request hash.
 - **Emitted outbox messages:** none.
@@ -366,7 +372,8 @@ terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
   `JOB_RESULT_REQUEST`, an in-memory durable pending result, or a reconstructed
   completed result. Request, owner, and unverifiable-legacy conflicts return a
   failed `JOB_RESULT`. None performs another J0.
-- **Metrics/events:** active-job gauge increments and `job_started` is emitted.
+- **Metrics/events:** active-job gauge increments and `job_started` is emitted
+  with the accepted plugin's `retry_safety` declaration.
 - **Forbidden transitions:** no accepted response, active projection, or task
   dispatch may precede successful durable creation when SQLite is enabled.
 

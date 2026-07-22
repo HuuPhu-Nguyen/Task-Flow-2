@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
 import peer.processors.ExampleWordCountProcessor;
+import plugin.RetrySafety;
 import protocol.TaskAssignMessage;
 
 import java.time.Instant;
@@ -22,11 +23,21 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExampleWordCountPeerPluginTest {
     @Test
     void discoversPeerProcessorPlugin() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(PeerProcessorPlugin.class).spliterator(), false)
+        Set<PeerProcessorPlugin> plugins = StreamSupport.stream(
+                        ServiceLoader.load(PeerProcessorPlugin.class).spliterator(),
+                        false
+                )
+                .collect(Collectors.toSet());
+        Set<String> taskTypes = plugins.stream()
                 .map(PeerProcessorPlugin::taskType)
                 .collect(Collectors.toSet());
 
         assertTrue(taskTypes.contains(ExampleTaskTypes.WORD_COUNT));
+        PeerProcessorPlugin plugin = plugins.stream()
+                .filter(candidate -> ExampleTaskTypes.WORD_COUNT.equals(candidate.taskType()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(RetrySafety.PURE, plugin.retrySafety());
     }
 
     @Test

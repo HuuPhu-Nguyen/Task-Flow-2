@@ -44,7 +44,9 @@ direction and the gates before TCP can be removed.
 4. Participants use the explicit peer ID compatibility contract in `docs/PEER_IDENTITY.md`; set
    `TASKFLOW_PEER_ID` for stable identity across restarts.
 5. Executor-enabled participants advertise supported task types through heartbeat
-   metadata and process `TASK_ASSIGN` messages with peer processor plugins.
+   metadata and process `TASK_ASSIGN` messages with peer processor plugins. Each
+   processor declares retry safety; `taskId` identifies the logical task across
+   retries and `assignmentId` identifies one redeliverable generation.
 6. The coordinator validates submissions and aggregates task results through
    server-side task plugins.
 7. The coordinator returns a terminal `JOB_RESULT` to the requester role of the

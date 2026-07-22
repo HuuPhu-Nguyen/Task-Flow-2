@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import plugin.RetrySafety;
 import protocol.MessageValidator;
 import protocol.PeerIdentity;
 import protocol.TaskAssignMessage;
@@ -12,6 +13,7 @@ import protocol.TaskResultMessage;
 import java.io.PrintWriter;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.ServiceLoader;
 import java.util.concurrent.*;
@@ -39,14 +41,14 @@ public class PeerExecutionEngine implements AutoCloseable {
                         AssignmentCacheConfig assignmentCacheConfig,
                         LongSupplier clock) {
         this.nodeId = PeerIdentity.require(nodeId);
-        this.assignmentCacheConfig = java.util.Objects.requireNonNull(
+        this.assignmentCacheConfig = Objects.requireNonNull(
                 assignmentCacheConfig,
                 "assignmentCacheConfig"
         );
         this.assignmentCache = new AssignmentResultCache(
                 this.nodeId,
                 assignmentCacheConfig,
-                java.util.Objects.requireNonNull(clock, "clock")
+                Objects.requireNonNull(clock, "clock")
         );
         registerDiscoveredProcessors();
     }
@@ -65,7 +67,18 @@ public class PeerExecutionEngine implements AutoCloseable {
 
     public void registerDiscoveredProcessors() {
         for (PeerProcessorPlugin plugin : ServiceLoader.load(PeerProcessorPlugin.class)) {
-            registerProcessor(plugin.taskType(), plugin.createProcessor());
+            String taskType = plugin.taskType();
+            RetrySafety retrySafety = Objects.requireNonNull(
+                    plugin.retrySafety(),
+                    "Peer processor plugin " + plugin.getClass().getName() + " must declare retry safety."
+            );
+            registerProcessor(taskType, plugin.createProcessor());
+            LOGGER.info(
+                    "event=peer_processor_registered task_type={} retry_safety={} plugin_class={}",
+                    normalize(taskType),
+                    retrySafety,
+                    plugin.getClass().getName()
+            );
         }
     }
 

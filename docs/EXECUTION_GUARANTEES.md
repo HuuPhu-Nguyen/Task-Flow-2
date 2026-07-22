@@ -41,6 +41,31 @@ nodes may enable the requester role, executor role, or both.
   Assignment-ID reuse for a different task identity while an entry is live is
   rejected as a permanent conflict.
 
+## Plugin Retry Safety
+
+- Every `PeerProcessorPlugin` and its paired coordinator-side `TaskPlugin`
+  declare the same non-null `RetrySafety` value. The server declaration is the
+  coordinator-visible admission authority; cross-role contract tests keep it
+  aligned with the executor declaration.
+- `PURE` and `IDEMPOTENT` allow the configured task retry policy.
+  `REQUIRES_IDEMPOTENCY_KEY` also allows retries, but the plugin must document
+  and supply the appropriate execution identity to its external system.
+- `TaskAssignMessage.taskId` is stable across logical retry generations.
+  `assignmentId` is stable across redelivery of one assignment generation and
+  changes for a new generation. The former is normally the external key for a
+  once-per-logical-task effect; the latter only deduplicates one generation.
+- `UNSAFE_TO_RETRY` is rejected before plugin job construction, task creation,
+  persistence, active-job projection, or dispatch when `maxTaskRetries > 0`.
+  Current scheduler configuration requires a positive value, so an unsafe
+  processor cannot currently accept a new job. Exact replay of a previously
+  accepted job is still classified before this new-submission check.
+- The example, text, image-conversion, and video-transcoding plugins declare
+  `PURE`. Their framework-managed result creation/staging is not a separate
+  plugin-owned external business effect.
+- A declaration is an enforceable admission contract, not a distributed
+  transaction. Coordinator fencing does not undo plugin work or make arbitrary
+  external side effects exactly once.
+
 ## Job Submission Validation
 
 - GUI and command-line submitters generate peer-scoped job IDs with the
@@ -273,6 +298,8 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - **Timeout per assigned task:** 60 seconds.
 - **Lease per assigned task:** 120 seconds.
 - **Maximum retries per task:** 20 attempts.
+- The policy applies only after the plugin's retry-safety declaration permits
+  retry-capable admission; see **Plugin Retry Safety** above.
 - During active scheduler operation, on timeout, lease expiry, or explicit executor failure:
   - the attempt is counted as failed,
   - the task is retried if attempts remain,

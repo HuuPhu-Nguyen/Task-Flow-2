@@ -5,6 +5,7 @@ import example.model.ExamplePayload;
 import example.model.ExampleTaskResult;
 import example.model.ExampleTaskTypes;
 import org.junit.jupiter.api.Test;
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
@@ -27,11 +28,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExampleWordCountServerPluginTest {
     @Test
     void discoversTaskPlugin() {
-        Set<String> taskTypes = StreamSupport.stream(ServiceLoader.load(TaskPlugin.class).spliterator(), false)
-                .map(TaskPlugin::taskType)
+        Set<TaskPlugin> plugins = StreamSupport.stream(ServiceLoader.load(TaskPlugin.class).spliterator(), false)
                 .collect(Collectors.toSet());
+        Set<String> taskTypes = plugins.stream().map(TaskPlugin::taskType).collect(Collectors.toSet());
 
         assertTrue(taskTypes.contains(ExampleTaskTypes.WORD_COUNT));
+        TaskPlugin plugin = plugins.stream()
+                .filter(candidate -> ExampleTaskTypes.WORD_COUNT.equals(candidate.taskType()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(RetrySafety.PURE, plugin.retrySafety());
     }
 
     @Test

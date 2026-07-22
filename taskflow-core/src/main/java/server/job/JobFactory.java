@@ -1,10 +1,12 @@
 package server.job;
 
+import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.ServiceLoader;
 
 /**
@@ -20,14 +22,17 @@ public class JobFactory {
     static EmbarrassinglyParallelJob<?,?> create(JobSubmitMessage msg,
                                                 String requesterId,
                                                 Map<String, TaskPlugin> plugins) {
-        String type = normalize(msg.getTaskType());
-        TaskPlugin plugin = plugins.get(type);
-        if (plugin == null) {
-            throw new IllegalArgumentException(
-                    "Unsupported job type: " + msg.getTaskType() + ". Available types: " + plugins.keySet());
-        }
+        TaskPlugin plugin = requirePlugin(msg.getTaskType(), plugins);
         plugin.validateSubmission(msg);
         return plugin.createJob(msg, requesterId);
+    }
+
+    public static RetrySafety retrySafety(String taskType) {
+        return retrySafety(taskType, PLUGINS);
+    }
+
+    static RetrySafety retrySafety(String taskType, Map<String, TaskPlugin> plugins) {
+        return requireRetrySafety(requirePlugin(taskType, plugins));
     }
 
     public static Map<String, TaskPlugin> availablePlugins() {
@@ -41,7 +46,9 @@ public class JobFactory {
     static Map<String, TaskPlugin> loadPlugins(Iterable<TaskPlugin> discoveredPlugins) {
         Map<String, TaskPlugin> plugins = new LinkedHashMap<>();
         for (TaskPlugin plugin : discoveredPlugins) {
+            Objects.requireNonNull(plugin, "Discovered task plugin is required.");
             String taskType = normalize(plugin.taskType());
+            requireRetrySafety(plugin);
             TaskPlugin existing = plugins.putIfAbsent(taskType, plugin);
             if (existing != null) {
                 throw new IllegalStateException("Duplicate task plugin for type " + taskType
@@ -50,6 +57,26 @@ public class JobFactory {
             }
         }
         return Map.copyOf(plugins);
+    }
+
+    private static TaskPlugin requirePlugin(String taskType, Map<String, TaskPlugin> plugins) {
+        String normalized = normalize(taskType);
+        TaskPlugin plugin = plugins.get(normalized);
+        if (plugin == null) {
+            throw new IllegalArgumentException(
+                    "Unsupported job type: " + taskType + ". Available types: " + plugins.keySet());
+        }
+        return plugin;
+    }
+
+    private static RetrySafety requireRetrySafety(TaskPlugin plugin) {
+        RetrySafety retrySafety = plugin.retrySafety();
+        if (retrySafety == null) {
+            throw new IllegalStateException(
+                    "Task plugin " + plugin.getClass().getName() + " must declare retry safety."
+            );
+        }
+        return retrySafety;
     }
 
     private static String normalize(String taskType) {

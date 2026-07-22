@@ -143,6 +143,7 @@ public class TaskScheduler implements Runnable {
                 state,
                 persistence,
                 checkedOutput,
+                effectiveConfig,
                 checkedClock,
                 checkedIdGenerator,
                 metrics,

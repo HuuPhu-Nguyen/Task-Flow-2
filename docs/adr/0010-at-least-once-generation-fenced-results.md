@@ -5,8 +5,8 @@ Status: Accepted
 Date: 2026-07-22
 
 Scope: Frozen architecture for Phases 0–8; the database/scheduler mechanism,
-same-participant ABA proof, and bounded executor deduplication are implemented
-through TF-0107.
+same-participant ABA proof, bounded executor deduplication, and plugin
+retry-safety admission contract are implemented through TF-0208.
 
 ## Context
 
@@ -53,8 +53,14 @@ side effects exactly once.
 - Executor participants suppress a duplicate delivery while its assignment is
   cached as running and replay the exact cached result after completion.
   Eviction or restart may still cause duplicate execution.
-- Plugins must declare whether retry is pure, idempotent, requires an
-  idempotency key, or is unsafe.
+- Paired server/executor plugins must declare whether retry is pure, idempotent,
+  requires an idempotency key, or is unsafe. Unsafe plugins fail before job
+  acceptance under the current positive retry configuration.
+- A keyed plugin uses the logical task ID for a once-per-task effect across
+  retries. It may use the assignment ID only to deduplicate one generation when
+  another effect in a later generation is intentional and safe. It documents
+  which external key receives that identity and remains responsible for the
+  external system's behavior.
 - The database, not scheduler memory, decides whether a result commits.
 - Assignment/outbox replay republishes the same identity; publication retry does
   not create a new generation.
@@ -98,6 +104,11 @@ transport nor a different database invalidates generation fencing by itself.
   and `#duplicateCompletedAssignmentRepublishesSameResult` prove the RabbitMQ
   executor acknowledgement/execution/publication decisions; engine tests prove
   bounds, TTL, cache-loss re-execution, and eviction counters.
+- `TaskSchedulerFailureTest#unsafePluginIsRejectedBeforeJobAcceptanceWhenRetriesAreEnabled`
+  proves unsafe admission creates no job or assignment, while
+  `PeerExecutionEngineTest#retryGenerationKeepsLogicalTaskIdAndSuppliesNewStableAssignmentId`
+  proves the execution-context identity scopes. The example plugin harness and
+  production plugin discovery tests require explicit paired declarations.
 
 ## Related Documents
 
