@@ -6,6 +6,7 @@ import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.MessageType;
+import protocol.MessageValidator;
 import protocol.PingMessage;
 import protocol.PongMessage;
 import protocol.TaskAssignMessage;
@@ -1063,87 +1064,81 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     }
 
     @Override
-    public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                                     String peerId,
-                                                                                     long startedAt,
-                                                                                     String leaseOwnerId,
-                                                                                     long leaseExpiresAt,
-                                                                                     OutboxMessage message) {
-        if (!(message != null && message.message() instanceof TaskAssignMessage assignment)) {
-            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=missing_task_assignment_message",
+    public synchronized Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
+            String taskId,
+            String peerId,
+            long startedAt,
+            String leaseOwnerId,
+            long leaseExpiresAt,
+            OutboxMessage messageTemplate) {
+        if (!outboxTemplateMatchesTask(messageTemplate, taskId, peerId)) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_outbox_template",
                     taskId);
             return Optional.empty();
         }
-        return markTaskAssignedAndEnqueueBrokerOutbox(
-                taskId,
-                peerId,
-                startedAt,
-                leaseOwnerId,
-                leaseExpiresAt,
-                assignment.getAttemptNumber(),
-                assignment.getAssignmentId(),
-                message
-        );
-    }
-
-    @Override
-    public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                                     String peerId,
-                                                                                     long startedAt,
-                                                                                     String leaseOwnerId,
-                                                                                     long leaseExpiresAt,
-                                                                                     int attemptNumber,
-                                                                                     String assignmentId,
-                                                                                     OutboxMessage message) {
-        AssignmentIdentity identity;
-        try {
-            identity = new AssignmentIdentity(taskId, attemptNumber, assignmentId, peerId, leaseExpiresAt);
-        } catch (IllegalArgumentException e) {
-            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_assignment_identity error={}",
-                    taskId, e.getMessage());
-            return Optional.empty();
-        }
-        if (!outboxMatchesAssignment(message, identity)) {
-            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=outbox_assignment_identity_mismatch",
-                    taskId);
-            return Optional.empty();
-        }
-
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
+                AssignmentIdentity identity = nextAssignmentIdentity(taskId, peerId, leaseExpiresAt);
+                if (identity == null) {
+                    conn.rollback();
+                    return Optional.empty();
+                }
+                OutboxMessage committedMessage = assignmentOutboxMessage(messageTemplate, identity);
                 if (!markTaskAssignedInCurrentTransaction(taskId, startedAt, leaseOwnerId, identity)) {
                     conn.rollback();
                     return Optional.empty();
                 }
-                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
+                OutboxRecord record = insertBrokerOutboxInCurrentTransaction(
+                        committedMessage,
+                        System.currentTimeMillis()
+                );
+                CommittedTaskAssignment committed = new CommittedTaskAssignment(identity, record);
                 conn.commit();
-                return Optional.of(record);
-            } catch (SQLException e) {
+                return Optional.of(committed);
+            } catch (SQLException | RuntimeException e) {
                 conn.rollback();
                 throw e;
             } finally {
                 conn.setAutoCommit(originalAutoCommit);
             }
         } catch (SQLException e) {
-            logSqlFailure("markTaskAssignedAndEnqueueBrokerOutbox", e);
+            logSqlFailure("createTaskAssignmentAndEnqueueBrokerOutbox", e);
+            return Optional.empty();
+        } catch (RuntimeException e) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_committed_outbox error={}",
+                    taskId, e.getMessage());
             return Optional.empty();
         }
     }
 
-    private static boolean outboxMatchesAssignment(OutboxMessage message, AssignmentIdentity identity) {
-        if (message == null
-                || message.route() != TransportRoute.TASK_ASSIGN
-                || !identity.workerId().equals(message.peerNodeId())
-                || !(message.message() instanceof TaskAssignMessage assignment)) {
-            return false;
-        }
-        return identity.taskId().equals(assignment.getTaskId())
-                && identity.attemptNumber() == assignment.getAttemptNumber()
-                && identity.assignmentId().equals(assignment.getAssignmentId())
-                && identity.leaseExpiresAtEpochMillis() == assignment.getLeaseExpiresAtEpochMillis();
+    private static boolean outboxTemplateMatchesTask(OutboxMessage message,
+                                                     String taskId,
+                                                     String peerId) {
+        return message != null
+                && message.route() == TransportRoute.TASK_ASSIGN
+                && Objects.equals(peerId, message.peerNodeId())
+                && message.message() instanceof TaskAssignMessage assignment
+                && Objects.equals(taskId, assignment.getTaskId());
+    }
+
+    private static OutboxMessage assignmentOutboxMessage(OutboxMessage template,
+                                                         AssignmentIdentity identity) {
+        TaskAssignMessage assignmentTemplate = (TaskAssignMessage) template.message();
+        TaskAssignMessage assignment = assignmentTemplate.withAssignmentIdentity(
+                identity.attemptNumber(),
+                identity.assignmentId(),
+                identity.leaseExpiresAtEpochMillis()
+        );
+        MessageValidator.validate(assignment);
+        return new OutboxMessage(
+                template.route(),
+                template.peerNodeId(),
+                template.fromNodeId(),
+                assignment
+        );
     }
 
     @Override

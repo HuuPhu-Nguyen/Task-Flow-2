@@ -11,6 +11,7 @@ import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
 import server.job.TaskUnit;
@@ -442,6 +443,8 @@ class TaskSchedulerPersistenceTest {
 
             assertTrue(store.awaitTaskAssigned());
             assertTrue(output.awaitPublishAttempt());
+            TaskAssignMessage publishedAssignment = output.awaitTaskAssignmentOutbox();
+            assertNotNull(publishedAssignment);
             assertEquals(List.of(
                     "insertJobWithTasks:job-outbox-assignment:TEST_TASK:requester-1:1:"
                             + "task-job-outbox-assignment-0",
@@ -451,6 +454,10 @@ class TaskSchedulerPersistenceTest {
             assertEquals(1, pending.size());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
             assertEquals("peer-1", pending.getFirst().message().peerNodeId());
+            JobStateStore.TaskAttemptRecord attempt = store.loadTaskAttempts("job-outbox-assignment").getFirst();
+            assertEquals(attempt.attemptNumber(), publishedAssignment.getAttemptNumber());
+            assertEquals(attempt.assignmentId(), publishedAssignment.getAssignmentId());
+            assertEquals(attempt.leaseExpiresAt(), publishedAssignment.getLeaseExpiresAtEpochMillis());
             assertTrue(awaitFailedOutboxIds(store, List.of(1L)));
             assertEquals(List.of(1L), store.failedOutboxIds());
             assertEquals(List.of(), store.publishedOutboxIds());
@@ -1819,27 +1826,38 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
-        public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                                          String peerId,
-                                                                                          long startedAt,
-                                                                                         String leaseOwnerId,
-                                                                                         long leaseExpiresAt,
-                                                                                         OutboxMessage message) {
-            if (!markTaskAssigned(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt)) {
-                return Optional.empty();
-            }
-            return enqueueBrokerOutbox(message);
-        }
-
-        @Override
-        public synchronized Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                                          String peerId,
-                                                                                          long startedAt,
-                                                                                          String leaseOwnerId,
-                                                                                          long leaseExpiresAt,
-                                                                                          int attemptNumber,
-                                                                                          String assignmentId,
-                                                                                          OutboxMessage message) {
+        public synchronized Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
+                String taskId,
+                String peerId,
+                long startedAt,
+                String leaseOwnerId,
+                long leaseExpiresAt,
+                OutboxMessage messageTemplate) {
+            int attemptNumber = (int) outboxRecords.stream()
+                    .map(OutboxRecord::message)
+                    .map(OutboxMessage::message)
+                    .filter(TaskAssignMessage.class::isInstance)
+                    .map(TaskAssignMessage.class::cast)
+                    .filter(message -> taskId.equals(message.getTaskId()))
+                    .count() + 1;
+            AssignmentIdentity identity = AssignmentIdentity.create(
+                    taskId,
+                    attemptNumber,
+                    peerId,
+                    leaseExpiresAt
+            );
+            TaskAssignMessage message = ((TaskAssignMessage) messageTemplate.message())
+                    .withAssignmentIdentity(
+                            identity.attemptNumber(),
+                            identity.assignmentId(),
+                            identity.leaseExpiresAtEpochMillis()
+                    );
+            OutboxMessage committedMessage = new OutboxMessage(
+                    messageTemplate.route(),
+                    messageTemplate.peerNodeId(),
+                    messageTemplate.fromNodeId(),
+                    message
+            );
             if (!markTaskAssigned(
                     taskId,
                     peerId,
@@ -1847,11 +1865,12 @@ class TaskSchedulerPersistenceTest {
                     leaseOwnerId,
                     leaseExpiresAt,
                     attemptNumber,
-                    assignmentId
+                    identity.assignmentId()
             )) {
                 return Optional.empty();
             }
-            return enqueueBrokerOutbox(message);
+            OutboxRecord record = enqueueBrokerOutbox(committedMessage).orElseThrow();
+            return Optional.of(new CommittedTaskAssignment(identity, record));
         }
 
         @Override

@@ -1,6 +1,9 @@
 package server.db;
 
 import protocol.Message;
+import protocol.MessageValidator;
+import protocol.TaskAssignMessage;
+import server.job.AssignmentIdentity;
 import transport.TransportRoute;
 
 import java.util.Collection;
@@ -46,6 +49,36 @@ public interface BrokerOutboxStore {
         }
     }
 
+    /**
+     * One database-committed task-assignment generation and the exact durable
+     * broker envelope that carries it.
+     */
+    record CommittedTaskAssignment(AssignmentIdentity identity,
+                                   OutboxRecord outboxRecord) {
+        public CommittedTaskAssignment {
+            if (identity == null) {
+                throw new IllegalArgumentException("identity is required");
+            }
+            if (outboxRecord == null) {
+                throw new IllegalArgumentException("outboxRecord is required");
+            }
+            OutboxMessage outboxMessage = outboxRecord.message();
+            if (outboxMessage.route() != TransportRoute.TASK_ASSIGN
+                    || !identity.workerId().equals(outboxMessage.peerNodeId())
+                    || !(outboxMessage.message() instanceof TaskAssignMessage assignment)) {
+                throw new IllegalArgumentException("outboxRecord must carry the committed task assignment");
+            }
+            MessageValidator.validate(assignment);
+            if (!identity.taskId().equals(assignment.getTaskId())
+                    || !identity.workerId().equals(assignment.getNodeId())
+                    || identity.attemptNumber() != assignment.getAttemptNumber()
+                    || !identity.assignmentId().equals(assignment.getAssignmentId())
+                    || identity.leaseExpiresAtEpochMillis() != assignment.getLeaseExpiresAtEpochMillis()) {
+                throw new IllegalArgumentException("outboxRecord assignment identity does not match identity");
+            }
+        }
+    }
+
     record TaskFailureUpdate(String taskId,
                              JobStateStore.TaskAttemptOutcome outcome,
                              String failureReason,
@@ -64,30 +97,18 @@ public interface BrokerOutboxStore {
 
     Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message);
 
-    Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                  String peerId,
-                                                                  long startedAt,
-                                                                  String leaseOwnerId,
-                                                                  long leaseExpiresAt,
-                                                                  OutboxMessage message);
-
-    default Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                          String peerId,
-                                                                          long startedAt,
-                                                                          String leaseOwnerId,
-                                                                          long leaseExpiresAt,
-                                                                          int attemptNumber,
-                                                                          String assignmentId,
-                                                                          OutboxMessage message) {
-        return markTaskAssignedAndEnqueueBrokerOutbox(
-                taskId,
-                peerId,
-                startedAt,
-                leaseOwnerId,
-                leaseExpiresAt,
-                message
-        );
-    }
+    /**
+     * Creates the next assignment generation and its exact TASK_ASSIGN outbox
+     * row in one durable transaction. The supplied message is an identity-free
+     * routing/payload template; the store owns the generation and UUID.
+     */
+    Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
+            String taskId,
+            String peerId,
+            long startedAt,
+            String leaseOwnerId,
+            long leaseExpiresAt,
+            OutboxMessage messageTemplate);
 
     Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
                                                                   Object resultPayload,

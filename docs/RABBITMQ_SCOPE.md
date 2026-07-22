@@ -60,7 +60,10 @@ The current RabbitMQ path includes:
   `JOB_RESULT` publications. Task assignment state and terminal job state are
   committed transactionally with the corresponding outbound row, pending rows
   replay on coordinator startup and retry periodically, and confirmed publishes
-  mark rows sent.
+  mark rows sent. For `TASK_ASSIGN`, SQLite also owns the persisted-generation
+  increment and assignment UUID; the scheduler publishes the exact envelope
+  returned by that transaction, so a publish retry cannot create a replacement
+  identity.
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject
   behavior.
 - RabbitMQ prefetch configuration.

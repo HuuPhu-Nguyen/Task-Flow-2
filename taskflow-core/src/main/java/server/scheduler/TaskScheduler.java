@@ -695,10 +695,25 @@ public class TaskScheduler implements Runnable {
         long pendingSince = task.getPendingSinceMillis();
         long startedAt = System.currentTimeMillis();
         long leaseExpiresAt = leaseExpiresAt(startedAt);
+        long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
+        BrokerOutboxStore outboxStore = brokerOutboxStore();
+        BrokerOutboxPublisher outboxPublisher = brokerOutboxPublisher();
+        if (outboxStore != null && outboxPublisher != null) {
+            assignWithBrokerOutbox(
+                    job,
+                    task,
+                    peer,
+                    startedAt,
+                    leaseExpiresAt,
+                    dispatchLatencyMs,
+                    outboxStore,
+                    outboxPublisher
+            );
+            return;
+        }
         if (!task.markAssigned(peer.getNodeId(), startedAt, leaseOwnerId, leaseExpiresAt)) {
             return;
         }
-        long dispatchLatencyMs = pendingSince > 0 ? Math.max(0L, startedAt - pendingSince) : 0L;
         AssignmentIdentity assignmentIdentity;
         TaskAssignMessage message;
         try {
@@ -714,23 +729,6 @@ public class TaskScheduler implements Runnable {
         } catch (RuntimeException e) {
             task.resetToPending();
             failJob(job, "Task assignment could not be prepared: " + e.getMessage());
-            return;
-        }
-        BrokerOutboxStore outboxStore = brokerOutboxStore();
-        BrokerOutboxPublisher outboxPublisher = brokerOutboxPublisher();
-        if (outboxStore != null && outboxPublisher != null) {
-            assignWithBrokerOutbox(
-                    job,
-                    task,
-                    peer,
-                    startedAt,
-                    leaseExpiresAt,
-                    dispatchLatencyMs,
-                    assignmentIdentity,
-                    message,
-                    outboxStore,
-                    outboxPublisher
-            );
             return;
         }
         if (db != null) {
@@ -798,45 +796,52 @@ public class TaskScheduler implements Runnable {
                                         long startedAt,
                                         long leaseExpiresAt,
                                         long dispatchLatencyMs,
-                                        AssignmentIdentity assignmentIdentity,
-                                        TaskAssignMessage message,
                                         BrokerOutboxStore outboxStore,
                                         BrokerOutboxPublisher outboxPublisher) {
-        BrokerOutboxStore.OutboxMessage outboxMessage;
+        BrokerOutboxStore.OutboxMessage outboxTemplate;
         try {
-            outboxMessage = outboxPublisher.taskAssignmentOutboxMessage(peer, message);
+            TaskAssignMessage messageTemplate = job.createTaskAssignMessage(task);
+            outboxTemplate = outboxPublisher.taskAssignmentOutboxMessage(peer, messageTemplate);
         } catch (RuntimeException e) {
-            task.resetToPending();
             failJob(job, "Broker outbox task assignment could not be prepared: " + e.getMessage());
             return;
         }
 
-        Optional<BrokerOutboxStore.OutboxRecord> outboxRecord =
-                outboxStore.markTaskAssignedAndEnqueueBrokerOutbox(
+        Optional<BrokerOutboxStore.CommittedTaskAssignment> committedAssignment =
+                outboxStore.createTaskAssignmentAndEnqueueBrokerOutbox(
                         task.getTaskId(),
                         peer.getNodeId(),
                         startedAt,
                         leaseOwnerId,
                         leaseExpiresAt,
-                        assignmentIdentity.attemptNumber(),
-                        assignmentIdentity.assignmentId(),
-                        outboxMessage
+                        outboxTemplate
                 );
-        if (outboxRecord.isEmpty()) {
-            task.resetToPending();
-            failJob(job, persistenceFailureReason("markTaskAssignedAndEnqueueBrokerOutbox"));
+        if (committedAssignment.isEmpty()) {
+            failJob(job, persistenceFailureReason("createTaskAssignmentAndEnqueueBrokerOutbox"));
+            return;
+        }
+        BrokerOutboxStore.CommittedTaskAssignment committed = committedAssignment.get();
+        try {
+            if (!task.markAssigned(committed.identity(), startedAt, leaseOwnerId)) {
+                throw new IllegalStateException("Task was no longer pending after assignment commit.");
+            }
+        } catch (RuntimeException e) {
+            failJob(job, "Committed broker assignment could not be installed in memory: " + e.getMessage());
             return;
         }
 
         metrics.recordDispatch(dispatchLatencyMs);
         peer.incrementTasks();
-        boolean published = publishBrokerOutboxRecord(outboxStore, outboxPublisher, outboxRecord.get());
+        BrokerOutboxStore.OutboxRecord outboxRecord = committed.outboxRecord();
+        boolean published = publishBrokerOutboxRecord(outboxStore, outboxPublisher, outboxRecord);
         logInfoEvent("task_assigned", fields(
                 "job_id", job.getJobId(),
                 "task_id", task.getTaskId(),
                 "peer_id", peer.getNodeId(),
                 "dispatch_latency_ms", dispatchLatencyMs,
-                "outbox_id", outboxRecord.get().outboxId(),
+                "assignment_attempt", committed.identity().attemptNumber(),
+                "assignment_id", committed.identity().assignmentId(),
+                "outbox_id", outboxRecord.outboxId(),
                 "outbox_published", published
         ));
     }

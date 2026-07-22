@@ -87,15 +87,52 @@ public abstract class TaskUnit<T> {
                 peerId,
                 normalizedLeaseExpiry
         );
-        this.assignedPeerId = peerId;
+        applyAssignment(nextIdentity, startAtMillis, leaseOwnerId);
+        return true;
+    }
+
+    /**
+     * Installs an assignment identity already committed by the authoritative
+     * state store. The generation must be exactly the next local generation.
+     */
+    public synchronized boolean markAssigned(AssignmentIdentity committedIdentity,
+                                             long startAtMillis,
+                                             String leaseOwnerId) {
+        if (this.status != TaskStatus.PENDING) {
+            return false;
+        }
+        if (committedIdentity == null) {
+            throw new IllegalArgumentException("Committed assignment identity is required.");
+        }
+        if (!taskId.equals(committedIdentity.taskId())) {
+            throw new IllegalArgumentException("Committed assignment identity belongs to a different task.");
+        }
+        int expectedAttemptNumber;
+        try {
+            expectedAttemptNumber = Math.incrementExact(this.assignmentAttemptNumber);
+        } catch (ArithmeticException e) {
+            throw new IllegalStateException("Assignment attempt number overflow for task " + taskId, e);
+        }
+        if (committedIdentity.attemptNumber() != expectedAttemptNumber) {
+            throw new IllegalArgumentException(
+                    "Committed assignment attempt number must be exactly " + expectedAttemptNumber + "."
+            );
+        }
+        applyAssignment(committedIdentity, startAtMillis, leaseOwnerId);
+        return true;
+    }
+
+    private void applyAssignment(AssignmentIdentity identity,
+                                 long startAtMillis,
+                                 String leaseOwnerId) {
+        this.assignedPeerId = identity.workerId();
         this.startTime = startAtMillis;
         this.leaseOwnerId = leaseOwnerId == null ? "" : leaseOwnerId;
-        this.leaseExpiresAtMillis = normalizedLeaseExpiry;
-        this.assignmentAttemptNumber = nextAttemptNumber;
-        this.assignmentIdentity = nextIdentity;
+        this.leaseExpiresAtMillis = identity.leaseExpiresAtEpochMillis();
+        this.assignmentAttemptNumber = identity.attemptNumber();
+        this.assignmentIdentity = identity;
         this.pendingSinceMillis = -1L;
         this.status = TaskStatus.ASSIGNED;
-        return true;
     }
 
     public synchronized void resetToPending() {

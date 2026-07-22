@@ -102,6 +102,46 @@ class TaskUnitLifecycleTest {
     }
 
     @Test
+    void installsExactIdentityCommittedByStateStore() {
+        DummyTask task = new DummyTask("t-committed", "job-1", "payload");
+        AssignmentIdentity committed = new AssignmentIdentity(
+                "t-committed",
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "peer-a",
+                500L
+        );
+
+        assertTrue(task.markAssigned(committed, 100L, "coordinator-1"));
+
+        assertEquals(committed, task.getAssignmentIdentity().orElseThrow());
+        assertEquals("peer-a", task.getAssignedPeerId());
+        assertEquals(100L, task.getStartTime());
+        assertEquals("coordinator-1", task.getLeaseOwnerId());
+        assertEquals(500L, task.getLeaseExpiresAtMillis());
+    }
+
+    @Test
+    void rejectsNonNextCommittedGenerationWithoutMutation() {
+        DummyTask task = new DummyTask("t-invalid-committed", "job-1", "payload");
+        AssignmentIdentity skipped = new AssignmentIdentity(
+                "t-invalid-committed",
+                2,
+                "550e8400-e29b-41d4-a716-446655440000",
+                "peer-a",
+                500L
+        );
+
+        assertThrows(IllegalArgumentException.class,
+                () -> task.markAssigned(skipped, 100L, "coordinator-1"));
+
+        assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
+        assertEquals(0, task.getAttemptNumber());
+        assertTrue(task.getAssignmentIdentity().isEmpty());
+        assertEquals(0L, task.getStartTime());
+    }
+
+    @Test
     void restoredGenerationContinuesMonotonicallyAfterRecovery() {
         DummyTask task = new DummyTask("t-recovery", "job-1", "payload");
 

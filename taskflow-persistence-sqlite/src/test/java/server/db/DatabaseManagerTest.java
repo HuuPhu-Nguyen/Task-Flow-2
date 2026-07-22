@@ -19,7 +19,13 @@ import java.sql.Statement;
 import java.sql.ResultSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,39 +103,39 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void taskAssignmentOutboxCommitsWithAssignedTask() throws Exception {
+    void assignmentCommitBeforePublishLeavesOneDurableIdentityAndPendingOutbox() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-task-outbox-test.db");
+        BrokerOutboxStore.CommittedTaskAssignment committed;
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
             db.insertJob("job-outbox", "TEST_TASK", "requester-1", 1);
             db.insertTask("task-outbox-0", "job-outbox");
 
-            var outbox = db.markTaskAssignedAndEnqueueBrokerOutbox(
+            committed = db.createTaskAssignmentAndEnqueueBrokerOutbox(
                     "task-outbox-0",
                     "peer-1",
                     123L,
                     "coordinator-lease",
                     456L,
-                    taskAssignmentOutboxMessage("peer-1", "task-outbox-0", "job-outbox", 456L)
-            );
+                    taskAssignmentOutboxTemplate("peer-1", "task-outbox-0", "job-outbox")
+            ).orElseThrow();
 
-            assertTrue(outbox.isPresent());
             List<DatabaseManager.TaskRecord> tasks = db.getTasksForJob("job-outbox");
             assertEquals("ASSIGNED", tasks.getFirst().status());
             assertEquals("peer-1", tasks.getFirst().assignedPeerId());
             assertEquals("coordinator-lease", tasks.getFirst().leaseOwnerId());
             assertEquals(456L, tasks.getFirst().leaseExpiresAt());
             assertEquals(1, tasks.getFirst().attemptNumber());
-            assertEquals(ASSIGNMENT_ID, tasks.getFirst().assignmentId());
+            assertEquals(committed.identity().assignmentId(), tasks.getFirst().assignmentId());
 
             List<JobStateStore.TaskAttemptRecord> attempts = db.loadTaskAttempts("job-outbox");
             assertEquals(1, attempts.size());
             assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.getFirst().outcome());
-            assertEquals(ASSIGNMENT_ID, attempts.getFirst().assignmentId());
+            assertEquals(committed.identity().assignmentId(), attempts.getFirst().assignmentId());
             assertEquals(456L, attempts.getFirst().leaseExpiresAt());
 
             List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
             assertEquals(1, pending.size());
-            assertEquals(outbox.get().outboxId(), pending.getFirst().outboxId());
+            assertEquals(committed.outboxRecord().outboxId(), pending.getFirst().outboxId());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
             assertEquals("peer-1", pending.getFirst().message().peerNodeId());
             TaskAssignMessage message = assertInstanceOf(
@@ -137,9 +143,29 @@ class DatabaseManagerTest {
                     pending.getFirst().message().message()
             );
             assertEquals("task-outbox-0", message.getTaskId());
+            assertEquals(committed.identity().attemptNumber(), message.getAttemptNumber());
+            assertEquals(committed.identity().assignmentId(), message.getAssignmentId());
+            assertEquals(committed.identity().leaseExpiresAtEpochMillis(),
+                    message.getLeaseExpiresAtEpochMillis());
+        }
 
-            assertTrue(db.markBrokerOutboxPublished(outbox.get().outboxId(), 789L));
-            assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+        try (DatabaseManager reopened = new DatabaseManager(dbPath.toString())) {
+            DatabaseManager.TaskRecord task = reopened.getTasksForJob("job-outbox").getFirst();
+            assertEquals(committed.identity().attemptNumber(), task.attemptNumber());
+            assertEquals(committed.identity().assignmentId(), task.assignmentId());
+            List<BrokerOutboxStore.OutboxRecord> pending = reopened.loadPendingBrokerOutbox(10);
+            assertEquals(1, pending.size());
+            assertEquals(committed.outboxRecord().outboxId(), pending.getFirst().outboxId());
+            TaskAssignMessage replay = assertInstanceOf(
+                    TaskAssignMessage.class,
+                    pending.getFirst().message().message()
+            );
+            assertEquals(committed.identity().attemptNumber(), replay.getAttemptNumber());
+            assertEquals(committed.identity().assignmentId(), replay.getAssignmentId());
+            assertEquals(committed.identity().leaseExpiresAtEpochMillis(), replay.getLeaseExpiresAtEpochMillis());
+
+            assertTrue(reopened.markBrokerOutboxPublished(committed.outboxRecord().outboxId(), 789L));
+            assertEquals(List.of(), reopened.loadPendingBrokerOutbox(10));
         }
     }
 
@@ -151,13 +177,13 @@ class DatabaseManagerTest {
             db.insertTask("task-outbox-rollback-0", "job-outbox-rollback");
             assertTrue(db.markTaskAssigned("task-outbox-rollback-0", "peer-1", 100L));
 
-            var outbox = db.markTaskAssignedAndEnqueueBrokerOutbox(
+            var outbox = db.createTaskAssignmentAndEnqueueBrokerOutbox(
                     "task-outbox-rollback-0",
                     "peer-2",
                     200L,
                     "coordinator-lease",
                     300L,
-                    taskAssignmentOutboxMessage("peer-2", "task-outbox-rollback-0", "job-outbox-rollback", 300L)
+                    taskAssignmentOutboxTemplate("peer-2", "task-outbox-rollback-0", "job-outbox-rollback")
             );
 
             assertTrue(outbox.isEmpty());
@@ -166,6 +192,183 @@ class DatabaseManagerTest {
             assertEquals("ASSIGNED", tasks.getFirst().status());
             assertEquals("peer-1", tasks.getFirst().assignedPeerId());
             assertEquals(1, db.loadTaskAttempts("job-outbox-rollback").size());
+        }
+    }
+
+    @Test
+    void outboxInsertFailureRollsBackTaskAndAttemptTogether() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-insert-failure.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-failure", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-failure-0", "job-outbox-failure");
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_task_assignment_outbox
+                        BEFORE INSERT ON broker_outbox
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected outbox failure');
+                        END
+                        """);
+            }
+
+            assertTrue(db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                    "task-outbox-failure-0",
+                    "peer-1",
+                    100L,
+                    "coordinator-lease",
+                    500L,
+                    taskAssignmentOutboxTemplate(
+                            "peer-1",
+                            "task-outbox-failure-0",
+                            "job-outbox-failure"
+                    )
+            ).isEmpty());
+
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-outbox-failure").getFirst();
+            assertEquals("PENDING", task.status());
+            assertEquals(0, task.attemptNumber());
+            assertNull(task.assignmentId());
+            assertEquals(List.of(), db.loadTaskAttempts("job-outbox-failure"));
+            assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+        }
+    }
+
+    @Test
+    void repeatedAssignmentCallsCreateOnlyOneGenerationAndOutbox() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-repeat.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-repeat", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-repeat-0", "job-outbox-repeat");
+
+            Optional<BrokerOutboxStore.CommittedTaskAssignment> first =
+                    db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-repeat-0",
+                            "peer-1",
+                            100L,
+                            "coordinator-lease",
+                            500L,
+                            taskAssignmentOutboxTemplate(
+                                    "peer-1",
+                                    "task-outbox-repeat-0",
+                                    "job-outbox-repeat"
+                            )
+                    );
+            Optional<BrokerOutboxStore.CommittedTaskAssignment> repeated =
+                    db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-repeat-0",
+                            "peer-1",
+                            101L,
+                            "coordinator-lease",
+                            501L,
+                            taskAssignmentOutboxTemplate(
+                                    "peer-1",
+                                    "task-outbox-repeat-0",
+                                    "job-outbox-repeat"
+                            )
+                    );
+
+            assertTrue(first.isPresent());
+            assertTrue(repeated.isEmpty());
+            assertEquals(1, db.getTasksForJob("job-outbox-repeat").getFirst().attemptNumber());
+            assertEquals(1, db.loadTaskAttempts("job-outbox-repeat").size());
+            assertEquals(1, db.loadPendingBrokerOutbox(10).size());
+        }
+    }
+
+    @Test
+    void assignmentTransactionAdvancesPersistedGenerationAfterRetry() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-next-generation.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-next", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-next-0", "job-outbox-next");
+
+            BrokerOutboxStore.CommittedTaskAssignment first =
+                    db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-next-0",
+                            "peer-1",
+                            100L,
+                            "coordinator-lease",
+                            500L,
+                            taskAssignmentOutboxTemplate(
+                                    "peer-1",
+                                    "task-outbox-next-0",
+                                    "job-outbox-next"
+                            )
+                    ).orElseThrow();
+            assertTrue(db.markTaskRetried(
+                    "task-outbox-next-0",
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "retry",
+                    200L
+            ));
+            BrokerOutboxStore.CommittedTaskAssignment second =
+                    db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-next-0",
+                            "peer-1",
+                            300L,
+                            "coordinator-lease",
+                            700L,
+                            taskAssignmentOutboxTemplate(
+                                    "peer-1",
+                                    "task-outbox-next-0",
+                                    "job-outbox-next"
+                            )
+                    ).orElseThrow();
+
+            assertEquals(1, first.identity().attemptNumber());
+            assertEquals(2, second.identity().attemptNumber());
+            assertNotEquals(first.identity().assignmentId(), second.identity().assignmentId());
+            assertEquals(2, db.getTasksForJob("job-outbox-next").getFirst().attemptNumber());
+            assertEquals(2, db.loadTaskAttempts("job-outbox-next").size());
+            assertEquals(2, db.loadPendingBrokerOutbox(10).size());
+        }
+    }
+
+    @Test
+    void concurrentAssignmentCallsCreateOnlyOneGenerationAndOutbox() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-concurrent.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-concurrent", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-concurrent-0", "job-outbox-concurrent");
+            ExecutorService executor = Executors.newFixedThreadPool(4);
+            CountDownLatch start = new CountDownLatch(1);
+            try {
+                List<Future<Optional<BrokerOutboxStore.CommittedTaskAssignment>>> futures =
+                        java.util.stream.IntStream.range(0, 4)
+                                .mapToObj(index -> executor.submit(() -> {
+                                    start.await();
+                                    return db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                                            "task-outbox-concurrent-0",
+                                            "peer-1",
+                                            100L + index,
+                                            "coordinator-lease",
+                                            500L + index,
+                                            taskAssignmentOutboxTemplate(
+                                                    "peer-1",
+                                                    "task-outbox-concurrent-0",
+                                                    "job-outbox-concurrent"
+                                            )
+                                    );
+                                }))
+                                .toList();
+                start.countDown();
+
+                long committedCount = 0L;
+                for (Future<Optional<BrokerOutboxStore.CommittedTaskAssignment>> future : futures) {
+                    if (future.get(2, TimeUnit.SECONDS).isPresent()) {
+                        committedCount++;
+                    }
+                }
+                assertEquals(1L, committedCount);
+            } finally {
+                executor.shutdownNow();
+            }
+
+            assertEquals(1, db.getTasksForJob("job-outbox-concurrent").getFirst().attemptNumber());
+            assertEquals(1, db.loadTaskAttempts("job-outbox-concurrent").size());
+            assertEquals(1, db.loadPendingBrokerOutbox(10).size());
         }
     }
 
@@ -1145,10 +1348,9 @@ class DatabaseManagerTest {
         }
     }
 
-    private static BrokerOutboxStore.OutboxMessage taskAssignmentOutboxMessage(String peerId,
-                                                                               String taskId,
-                                                                               String jobId,
-                                                                               long leaseExpiresAt) {
+    private static BrokerOutboxStore.OutboxMessage taskAssignmentOutboxTemplate(String peerId,
+                                                                                String taskId,
+                                                                                String jobId) {
         return new BrokerOutboxStore.OutboxMessage(
                 TransportRoute.TASK_ASSIGN,
                 peerId,
@@ -1159,9 +1361,6 @@ class DatabaseManagerTest {
                         taskId,
                         jobId,
                         "TEST_TASK",
-                        1,
-                        "550e8400-e29b-41d4-a716-446655440000",
-                        leaseExpiresAt,
                         "payload",
                         ""
                 )

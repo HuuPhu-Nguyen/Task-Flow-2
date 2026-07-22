@@ -1,11 +1,15 @@
 package server.rabbitmq;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import protocol.JobResultMessage;
+import protocol.TaskAssignMessage;
 import server.db.BrokerOutboxStore;
+import server.db.DatabaseManager;
 import server.scheduler.BrokerOutboxPublisher;
 import transport.TransportRoute;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashSet;
@@ -14,8 +18,13 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqOutboxReplayerTest {
+
+    @TempDir
+    Path tempDir;
 
     @Test
     void replayMarksPublishedRowsSent() {
@@ -49,6 +58,59 @@ class RabbitMqOutboxReplayerTest {
         replayer.close();
     }
 
+    @Test
+    void replayPublishesOriginalDatabaseCommittedAssignmentIdentity() throws Exception {
+        Path dbPath = tempDir.resolve("assignment-replay.db");
+        BrokerOutboxStore.CommittedTaskAssignment committed;
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertTrue(db.insertJob("job-replay", "TEST_TASK", "requester-1", 1));
+            assertTrue(db.insertTask("task-replay-0", "job-replay"));
+            committed = db.createTaskAssignmentAndEnqueueBrokerOutbox(
+                    "task-replay-0",
+                    "peer-1",
+                    100L,
+                    "coordinator-1",
+                    500L,
+                    new BrokerOutboxStore.OutboxMessage(
+                            TransportRoute.TASK_ASSIGN,
+                            "peer-1",
+                            "COORDINATOR",
+                            new TaskAssignMessage(
+                                    "peer-1",
+                                    "2026-07-22T00:00:00Z",
+                                    "task-replay-0",
+                                    "job-replay",
+                                    "TEST_TASK",
+                                    "payload",
+                                    ""
+                            )
+                    )
+            ).orElseThrow();
+        }
+
+        try (DatabaseManager reopened = new DatabaseManager(dbPath.toString())) {
+            RecordingPublisher publisher = new RecordingPublisher(true);
+            RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(reopened, publisher, 10, 100L);
+            try {
+                assertEquals(1, replayer.replayOnce());
+            } finally {
+                replayer.close();
+            }
+
+            assertEquals(List.of(committed.outboxRecord().outboxId()), publisher.publishedIds);
+            BrokerOutboxStore.OutboxRecord replayedRecord = publisher.publishedRecords.getFirst();
+            TaskAssignMessage replayed = assertInstanceOf(
+                    TaskAssignMessage.class,
+                    replayedRecord.message().message()
+            );
+            assertEquals(committed.identity().attemptNumber(), replayed.getAttemptNumber());
+            assertEquals(committed.identity().assignmentId(), replayed.getAssignmentId());
+            assertEquals(committed.identity().leaseExpiresAtEpochMillis(),
+                    replayed.getLeaseExpiresAtEpochMillis());
+            assertEquals(List.of(), reopened.loadPendingBrokerOutbox(10));
+        }
+    }
+
     private static BrokerOutboxStore.OutboxRecord outboxRecord(long id) {
         JobResultMessage result = new JobResultMessage(
                 "COORDINATOR",
@@ -76,6 +138,7 @@ class RabbitMqOutboxReplayerTest {
     private static final class RecordingPublisher implements BrokerOutboxPublisher {
         private final boolean publishResult;
         private final List<Long> publishedIds = new ArrayList<>();
+        private final List<BrokerOutboxStore.OutboxRecord> publishedRecords = new ArrayList<>();
 
         private RecordingPublisher(boolean publishResult) {
             this.publishResult = publishResult;
@@ -98,6 +161,7 @@ class RabbitMqOutboxReplayerTest {
         @Override
         public boolean publishOutbox(BrokerOutboxStore.OutboxRecord record) {
             publishedIds.add(record.outboxId());
+            publishedRecords.add(record);
             return publishResult;
         }
     }
@@ -117,12 +181,13 @@ class RabbitMqOutboxReplayerTest {
         }
 
         @Override
-        public Optional<OutboxRecord> markTaskAssignedAndEnqueueBrokerOutbox(String taskId,
-                                                                             String peerId,
-                                                                             long startedAt,
-                                                                             String leaseOwnerId,
-                                                                             long leaseExpiresAt,
-                                                                             OutboxMessage message) {
+        public Optional<CommittedTaskAssignment> createTaskAssignmentAndEnqueueBrokerOutbox(
+                String taskId,
+                String peerId,
+                long startedAt,
+                String leaseOwnerId,
+                long leaseExpiresAt,
+                OutboxMessage messageTemplate) {
             throw new UnsupportedOperationException();
         }
 

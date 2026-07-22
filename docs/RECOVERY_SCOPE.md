@@ -55,7 +55,11 @@ The implemented contract records:
 
 Covered behavior:
 
-- Assignment creates a new attempt row before dispatch.
+- For RabbitMQ, SQLite reads only a `PENDING` task, calculates persisted
+  generation plus one, creates the assignment UUID, and commits task state,
+  attempt audit, and the exact `TASK_ASSIGN` outbox envelope together before
+  dispatch. Retrying publication reuses that envelope without advancing the
+  generation.
 - Successful completion closes only the current attempt.
 - Timeout and peer-disconnect release close the current attempt and preserve
   retry count.

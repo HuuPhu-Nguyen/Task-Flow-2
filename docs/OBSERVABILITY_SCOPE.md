@@ -48,7 +48,9 @@ Job lifecycle:
 Task assignment, retry, and failure:
 
 - `task_assigned` records assignment ownership with `job_id`, `task_id`,
-  `peer_id`, and `dispatch_latency_ms`.
+  `peer_id`, and `dispatch_latency_ms`. RabbitMQ outbox assignments also include
+  the database-committed `assignment_attempt`, `assignment_id`, `outbox_id`, and
+  immediate `outbox_published` outcome.
 - `task_completed` records accepted successful task results.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
   attempts with `retry_count` and `terminal_failure`.
