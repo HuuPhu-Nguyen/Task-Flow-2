@@ -331,6 +331,9 @@ partial, and planned test evidence kept explicit.
 Detailed baseline implementation behavior is recorded separately in
 [Current execution behavior](docs/EXECUTION_GUARANTEES.md).
 
+The reproducible Phase 0 source, test, throughput, and 10,000-task heap snapshot
+is recorded in the [baseline report](docs/reports/baseline.md).
+
 For a repeatable supported fault-injection demo covering TCP peer-disconnect
 retry, see [docs/FAULT_INJECTION_DEMO.md](docs/FAULT_INJECTION_DEMO.md).
 
