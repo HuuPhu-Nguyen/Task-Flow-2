@@ -130,6 +130,12 @@ nodes may enable the requester role, executor role, or both.
   rows unchanged. A crash after commit leaves the completed task/result
   recoverable from SQLite even if memory was not projected; complete
   last-task/job-finalization crash proof remains tracked separately.
+- **Same-participant reassignment evidence:**
+  `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit` and
+  `RabbitMqCoordinatorLiveIntegrationTest#sameWorkerAbaResultCannotCommitThroughLiveBroker`
+  drive attempt 1 / assignment X through failure, reassign the same participant
+  with attempt 2 / assignment Y, acknowledge X as stale without mutation, and
+  prove that only Y commits.
 
 ## Task State Machine
 

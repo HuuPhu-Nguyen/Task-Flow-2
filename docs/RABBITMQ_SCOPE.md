@@ -67,8 +67,9 @@ The current RabbitMQ path includes:
 - Manual acknowledgement, deferred acknowledgement, requeue, and reject
   behavior. Scheduler-level tests prove typed duplicate/stale task-result
   outcomes acknowledge without requeue, while result-commit storage failure
-  requeues without an in-memory completion; the live same-participant ABA
-  scenario remains TF-0106 work.
+  requeues without an in-memory completion. Live broker coverage also proves an
+  obsolete attempt-1/X result from a participant reassigned under attempt-2/Y
+  is acknowledged as stale without changing Y, and only Y commits.
 - RabbitMQ prefetch configuration.
 - Dead-letter exchange, dead-letter queue, and quarantine queue topology
   declaration.
@@ -85,7 +86,8 @@ The current RabbitMQ path includes:
   connection-close recovery, coordinator job completion, seeded pending outbox
   replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
   publish-before-sent-marking, and duplicate task-result rejection after
-  replayed task assignments.
+  replayed task assignments, plus same-participant ABA fencing across failure,
+  reassignment, obsolete result delivery, and current result commitment.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
   transport/coordinator gates plus command-line participant and JavaFX GUI

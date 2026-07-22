@@ -4,9 +4,8 @@ Status: Accepted
 
 Date: 2026-07-22
 
-Scope: Frozen architecture for Phases 0–8; the database/scheduler mechanism is
-implemented through TF-0105, while full end-to-end proof remains pending in
-TF-0106.
+Scope: Frozen architecture for Phases 0–8; the database/scheduler mechanism and
+same-participant ABA proof are implemented through TF-0106.
 
 ## Context
 
@@ -57,9 +56,9 @@ side effects exactly once.
 - Assignment/outbox replay republishes the same identity; publication retry does
   not create a new generation.
 - Logs and metrics must distinguish committed, duplicate, and stale results.
-- The SQLite/store boundary rejects same-participant ABA results; release-level
-  proof remains limited until the deterministic scheduler and live RabbitMQ
-  TF-0106 scenarios pass.
+- The SQLite/store boundary rejects same-participant ABA results. Deterministic
+  scheduler/SQLite and live RabbitMQ scenarios prove the complete obsolete-X,
+  current-Y disposition and one-result outcome.
 
 ## Conditions That Would Invalidate This Decision
 
@@ -84,8 +83,10 @@ transport nor a different database invalidates generation fencing by itself.
 - `TaskSchedulerPersistenceTest#staleResultIsAcknowledgedWithoutRequeueOrSuccessAccounting`
   and `#duplicateResultIsAcknowledgedWithoutRequeueOrSecondSuccess` prove the
   scheduler disposition and metric boundary.
-- TF-0106 must still prove the complete same-participant scenario through the
-  scheduler and live RabbitMQ.
+- `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit` and
+  `RabbitMqCoordinatorLiveIntegrationTest#sameWorkerAbaResultCannotCommitThroughLiveBroker`
+  prove the complete same-participant scenario through the scheduler, SQLite,
+  and live RabbitMQ.
 
 ## Related Documents
 

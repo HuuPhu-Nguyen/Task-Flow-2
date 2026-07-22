@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -409,6 +410,218 @@ class RabbitMqCoordinatorLiveIntegrationTest {
         }
     }
 
+    @Test
+    void sameWorkerAbaResultCannotCommitThroughLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "same-worker-aba-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+        Thread schedulerThread = null;
+
+        try {
+            cleanup(config, topology, peerId);
+
+            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+                 RabbitMqTransport coordinatorTransport = new RabbitMqTransport(config);
+                 RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
+                coordinatorTransport.declareTopology();
+
+                BlockingQueue<MessageEnvelope> schedulerMailbox = new LinkedBlockingQueue<>();
+                InMemoryPeerRegistry registry = new InMemoryPeerRegistry(db);
+                PeerInfo peer = new PeerInfo(
+                        peerId,
+                        SchedulerConfig.defaults(),
+                        List.of(TestTaskPlugin.TASK_TYPE)
+                );
+                registry.register(peerId, peer);
+                TaskScheduler scheduler = new TaskScheduler(
+                        schedulerMailbox,
+                        registry,
+                        db,
+                        new RabbitMqSchedulerOutput(coordinatorTransport),
+                        SchedulerConfig.defaults()
+                );
+                schedulerThread = new Thread(scheduler, "rabbitmq-same-worker-aba-live-test-scheduler");
+                schedulerThread.start();
+
+                BlockingQueue<ResultSettlement> resultSettlements = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> taskResultSettlementFailure = new AtomicReference<>();
+                coordinatorTransport.subscribe(TransportRoute.TASK_RESULT,
+                        delivery -> enqueueTaskResultForScheduler(
+                                schedulerMailbox,
+                                delivery,
+                                resultSettlements,
+                                taskResultSettlementFailure
+                        ));
+
+                BlockingQueue<TaskAssignMessage> assignments = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> assignmentFailure = new AtomicReference<>();
+                peerTransport.subscribePeer(TransportRoute.TASK_ASSIGN, peerId, delivery -> {
+                    try {
+                        assignments.add(captureAssignment(peerId, jobId, delivery));
+                    } catch (Throwable e) {
+                        assignmentFailure.set(e);
+                        throw e;
+                    }
+                });
+
+                BlockingQueue<JobResultMessage> results = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> resultFailure = new AtomicReference<>();
+                peerTransport.subscribePeer(TransportRoute.JOB_RESULT, peerId, delivery -> {
+                    try {
+                        results.add(captureJobResult(jobId, delivery));
+                    } catch (Throwable e) {
+                        resultFailure.set(e);
+                        throw e;
+                    }
+                });
+
+                schedulerMailbox.put(new MessageEnvelope(
+                        new JobSubmitMessage(
+                                peerId,
+                                Instant.now().toString(),
+                                jobId,
+                                TestTaskPlugin.TASK_TYPE,
+                                List.of("alpha"),
+                                "",
+                                "token-" + jobId
+                        ),
+                        peerId
+                ));
+
+                TaskAssignMessage first = awaitQueue(
+                        assignments,
+                        assignmentFailure,
+                        "same-worker ABA attempt 1 / assignment X"
+                );
+                assertEquals(1, first.getAttemptNumber());
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(peerId, first, null, false, "attempt 1 deliberately failed")
+                ));
+                assertAcknowledged(awaitQueue(
+                        resultSettlements,
+                        taskResultSettlementFailure,
+                        "attempt 1 failure acknowledgement"
+                ), first);
+
+                TaskAssignMessage current = awaitQueue(
+                        assignments,
+                        assignmentFailure,
+                        "same-worker ABA attempt 2 / assignment Y"
+                );
+                assertEquals(first.getTaskId(), current.getTaskId());
+                assertEquals(2, current.getAttemptNumber());
+                assertNotEquals(first.getAssignmentId(), current.getAssignmentId());
+
+                DatabaseManager.TaskRecord beforeStale = db.getTasksForJob(jobId).getFirst();
+                long successesBeforeStale = scheduler.getMetricsSnapshot().successCount();
+                long failuresBeforeStale = scheduler.getMetricsSnapshot().failureCount();
+                int activeTasksBeforeStale = peer.getActiveTasks();
+                long completedTasksBeforeStale = peer.getCompletedTasks();
+                assertCurrentLiveAssignment(beforeStale, peerId, current);
+                assertNull(db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload());
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(peerId, first, "obsolete-result", true, null)
+                ));
+                assertAcknowledged(awaitQueue(
+                        resultSettlements,
+                        taskResultSettlementFailure,
+                        "obsolete attempt 1 result acknowledgement"
+                ), first);
+
+                DatabaseManager.TaskRecord afterStale = db.getTasksForJob(jobId).getFirst();
+                assertCurrentLiveAssignment(afterStale, peerId, current);
+                assertEquals(beforeStale.startedAt(), afterStale.startedAt());
+                assertEquals(beforeStale.leaseOwnerId(), afterStale.leaseOwnerId());
+                assertEquals(beforeStale.leaseExpiresAt(), afterStale.leaseExpiresAt());
+                assertEquals(beforeStale.completedAt(), afterStale.completedAt());
+                assertEquals(beforeStale.durationMs(), afterStale.durationMs());
+                assertNull(db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload());
+                assertEquals("RUNNING", db.getJobHistory().stream()
+                        .filter(job -> jobId.equals(job.jobId()))
+                        .findFirst()
+                        .orElseThrow()
+                        .status());
+                assertEquals(successesBeforeStale, scheduler.getMetricsSnapshot().successCount());
+                assertEquals(failuresBeforeStale, scheduler.getMetricsSnapshot().failureCount());
+                assertEquals(1, scheduler.getMetricsSnapshot().staleResultCount());
+                assertEquals(activeTasksBeforeStale, peer.getActiveTasks());
+                assertEquals(completedTasksBeforeStale, peer.getCompletedTasks());
+                assertNull(results.poll(300, TimeUnit.MILLISECONDS), "Obsolete result completed the live job.");
+
+                List<JobStateStore.TaskAttemptRecord> attemptsAfterStale = db.loadTaskAttempts(jobId);
+                assertEquals(2, attemptsAfterStale.size());
+                assertEquals(first.getAttemptNumber(), attemptsAfterStale.getFirst().attemptNumber());
+                assertEquals(first.getAssignmentId(), attemptsAfterStale.getFirst().assignmentId());
+                assertEquals(peerId, attemptsAfterStale.getFirst().peerId());
+                assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                        attemptsAfterStale.getFirst().outcome());
+                assertEquals(current.getAttemptNumber(), attemptsAfterStale.get(1).attemptNumber());
+                assertEquals(current.getAssignmentId(), attemptsAfterStale.get(1).assignmentId());
+                assertEquals(peerId, attemptsAfterStale.get(1).peerId());
+                assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attemptsAfterStale.get(1).outcome());
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(peerId, current, "current-result", true, null)
+                ));
+                assertAcknowledged(awaitQueue(
+                        resultSettlements,
+                        taskResultSettlementFailure,
+                        "current attempt 2 result acknowledgement"
+                ), current);
+                JobResultMessage finalResult = awaitQueue(results, resultFailure, "same-worker ABA final result");
+
+                assertEquals(List.of("current-result"), finalResult.getResultsByTaskId());
+                assertNull(results.poll(1, TimeUnit.SECONDS), "Same-worker ABA produced a second final result.");
+                DatabaseManager.TaskRecord completed = db.getTasksForJob(jobId).getFirst();
+                assertEquals("COMPLETED", completed.status());
+                assertEquals(2, completed.attemptNumber());
+                assertEquals(current.getAssignmentId(), completed.assignmentId());
+                assertEquals("COMPLETED", db.getJobHistory().stream()
+                        .filter(job -> jobId.equals(job.jobId()))
+                        .findFirst()
+                        .orElseThrow()
+                        .status());
+                List<JobStateStore.TaskAttemptRecord> finalAttempts = db.loadTaskAttempts(jobId);
+                assertEquals(2, finalAttempts.size());
+                assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                        finalAttempts.getFirst().outcome());
+                assertEquals(JobStateStore.TaskAttemptOutcome.SUCCEEDED, finalAttempts.get(1).outcome());
+                assertEquals(1, finalAttempts.stream()
+                        .filter(attempt -> attempt.outcome() == JobStateStore.TaskAttemptOutcome.SUCCEEDED)
+                        .count());
+                assertEquals(
+                        List.of("current-result"),
+                        db.loadCompletedJobResult(jobId).orElseThrow().resultsByTaskId()
+                );
+                assertEquals(1, scheduler.getMetricsSnapshot().successCount());
+                assertEquals(1, scheduler.getMetricsSnapshot().staleResultCount());
+                assertEquals(0, peer.getActiveTasks());
+                assertEquals(1L, peer.getCompletedTasks());
+                assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+                assertQueueDrained(config, topology.queueName(TransportRoute.TASK_RESULT));
+            }
+        } finally {
+            if (schedulerThread != null) {
+                schedulerThread.interrupt();
+                schedulerThread.join(2_000);
+            }
+            cleanup(config, topology, peerId);
+        }
+    }
+
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> schedulerMailbox,
                                             InboundTransportMessage delivery,
                                             CountDownLatch acknowledged,
@@ -430,6 +643,72 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 delivery.fromNodeId(),
                 acknowledgement
         ));
+    }
+
+    private static void enqueueTaskResultForScheduler(
+            BlockingQueue<MessageEnvelope> schedulerMailbox,
+            InboundTransportMessage delivery,
+            BlockingQueue<ResultSettlement> settlements,
+            AtomicReference<Throwable> settlementFailure) throws InterruptedException {
+        try {
+            TaskResultMessage result = assertInstanceOf(TaskResultMessage.class, delivery.message());
+            TransportAcknowledgement acknowledgement = delivery.acknowledgement();
+            if (acknowledgement == null) {
+                throw new AssertionError("Live task-result delivery did not expose an acknowledgement.");
+            }
+            acknowledgement.defer();
+            schedulerMailbox.put(new MessageEnvelope(
+                    result,
+                    delivery.fromNodeId(),
+                    new ResultDispositionAcknowledgement(
+                            acknowledgement,
+                            result.getAttemptNumber(),
+                            result.getAssignmentId(),
+                            settlements,
+                            settlementFailure
+                    )
+            ));
+        } catch (InterruptedException e) {
+            settlementFailure.compareAndSet(null, e);
+            throw e;
+        } catch (RuntimeException | Error e) {
+            settlementFailure.compareAndSet(null, e);
+            throw e;
+        }
+    }
+
+    private static TaskResultMessage taskResult(String peerId,
+                                                TaskAssignMessage assignment,
+                                                Object payload,
+                                                boolean successful,
+                                                String errorMessage) {
+        return new TaskResultMessage(
+                peerId,
+                Instant.now().toString(),
+                assignment.getTaskId(),
+                assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
+                payload,
+                successful,
+                errorMessage
+        );
+    }
+
+    private static void assertAcknowledged(ResultSettlement settlement, TaskAssignMessage assignment) {
+        assertEquals(assignment.getAttemptNumber(), settlement.attemptNumber());
+        assertEquals(assignment.getAssignmentId(), settlement.assignmentId());
+        assertEquals("ACK", settlement.disposition());
+    }
+
+    private static void assertCurrentLiveAssignment(DatabaseManager.TaskRecord task,
+                                                    String peerId,
+                                                    TaskAssignMessage assignment) {
+        assertEquals("ASSIGNED", task.status());
+        assertEquals(peerId, task.assignedPeerId());
+        assertEquals(assignment.getAttemptNumber(), task.attemptNumber());
+        assertEquals(assignment.getAssignmentId(), task.assignmentId());
+        assertTrue(task.leaseExpiresAt() > 0L);
     }
 
     private static void handleHeartbeat(InMemoryPeerRegistry registry,
@@ -694,6 +973,59 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 throw e;
             } finally {
                 settled.countDown();
+            }
+        }
+    }
+
+    private record ResultSettlement(int attemptNumber, String assignmentId, String disposition) {
+    }
+
+    private static class ResultDispositionAcknowledgement implements TransportAcknowledgement {
+        private final TransportAcknowledgement delegate;
+        private final int attemptNumber;
+        private final String assignmentId;
+        private final BlockingQueue<ResultSettlement> settlements;
+        private final AtomicReference<Throwable> settlementFailure;
+
+        private ResultDispositionAcknowledgement(TransportAcknowledgement delegate,
+                                                 int attemptNumber,
+                                                 String assignmentId,
+                                                 BlockingQueue<ResultSettlement> settlements,
+                                                 AtomicReference<Throwable> settlementFailure) {
+            this.delegate = delegate;
+            this.attemptNumber = attemptNumber;
+            this.assignmentId = assignmentId;
+            this.settlements = settlements;
+            this.settlementFailure = settlementFailure;
+        }
+
+        @Override
+        public void ack() throws Exception {
+            settle("ACK", delegate::ack);
+        }
+
+        @Override
+        public void requeue() throws Exception {
+            settle("REQUEUE", delegate::requeue);
+        }
+
+        @Override
+        public void reject() throws Exception {
+            settle("REJECT", delegate::reject);
+        }
+
+        @Override
+        public void defer() {
+            delegate.defer();
+        }
+
+        private void settle(String disposition, CheckedAssertion operation) throws Exception {
+            try {
+                operation.run();
+                settlements.add(new ResultSettlement(attemptNumber, assignmentId, disposition));
+            } catch (Exception e) {
+                settlementFailure.compareAndSet(null, e);
+                throw e;
             }
         }
     }

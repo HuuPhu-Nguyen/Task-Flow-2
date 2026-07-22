@@ -131,9 +131,10 @@ complete unexpired identities, and releases incomplete legacy assignments. It
 also makes the supplied v2 identity authoritative during successful-result
 commitment: task ID, `ASSIGNED` state, attempt number, assignment ID, and the
 reporting participant must all match in SQLite. Matching, duplicate, and stale
-store/scheduler dispositions are automated. Full same-participant ABA coverage
-is still described as partial until TF-0106 runs the complete scenario through
-deterministic scheduler and RabbitMQ integration tests.
+store/scheduler dispositions are automated. The complete same-participant
+attempt-1/X to attempt-2/Y sequence is covered by deterministic real-SQLite and
+live RabbitMQ integration tests, so identity reuse cannot bypass the v2
+generation fence.
 
 ## Plugin and Transport Expectations
 

@@ -548,7 +548,7 @@ The transport live tests create unique non-durable exchanges and queues, validat
 
 The connection-recovery live test uses the RabbitMQ management API to close the test transport connection from the broker side. It defaults to `http://<TASKFLOW_RABBITMQ_HOST>:15672` with the same RabbitMQ username and password. Override it with `TASKFLOW_RABBITMQ_MANAGEMENT_URL`, `TASKFLOW_RABBITMQ_MANAGEMENT_USERNAME`, and `TASKFLOW_RABBITMQ_MANAGEMENT_PASSWORD` when your broker exposes management elsewhere. If the management API is unavailable, that recovery test is skipped while the other live tests can still run.
 
-The coordinator live test submits a test job through the broker, heartbeat-registers an executor-capable participant, verifies peer-specific compatibility routing for task assignment, publishes its task result, receives a requester-scoped `JOB_RESULT`, and verifies the shared job/result queues drain.
+The coordinator live suite covers broker-backed job completion, seeded assignment/final-result outbox replay, duplicate delivery after an uncertain assignment publish, and the complete same-participant ABA sequence. In the ABA scenario, attempt 1 / assignment X is failed, the same participant receives attempt 2 / assignment Y, a late successful X result is acknowledged as stale without changing Y, and only Y produces the authoritative result.
 
 ---
 
