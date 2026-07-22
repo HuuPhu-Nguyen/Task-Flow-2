@@ -319,15 +319,13 @@ Requester tokens and the GUI requester identity private key are stored by defaul
 
 ## Execution Guarantees
 
-TaskFlow currently provides:
+The authoritative contract, non-goals, liveness assumptions, and current-versus-
+planned test evidence for invariants I1–I10 are centralized in
+[Guarantees and non-goals](docs/GUARANTEES.md). An invariant marked partial or
+planned there is not a current runtime guarantee.
 
-- At-least-once task execution semantics
-- Timeout + retry handling with terminal task failure after max retries
-- Duplicate/stale result rejection based on assignment ownership
-- Explicit job failure when any task reaches terminal failed state
-
-Detailed guarantee definitions are documented in:
-`docs/EXECUTION_GUARANTEES.md`
+Detailed baseline implementation behavior is recorded separately in
+[Current execution behavior](docs/EXECUTION_GUARANTEES.md).
 
 For a repeatable supported fault-injection demo covering TCP peer-disconnect
 retry, see [docs/FAULT_INJECTION_DEMO.md](docs/FAULT_INJECTION_DEMO.md).

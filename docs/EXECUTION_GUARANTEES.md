@@ -1,6 +1,10 @@
-# Execution Guarantees
+# Current Execution Behavior
 
-This document defines the current runtime guarantees of TaskFlow.
+This document records detailed current runtime behavior. The authoritative
+guarantee contract, explicit non-goals, and current-versus-planned evidence
+status live in [Guarantees and non-goals](GUARANTEES.md). A target invariant
+marked partial or planned there is not promoted to a current guarantee by the
+implementation notes below.
 
 TaskFlow is a coordinator-mediated distributed task-execution framework. The
 coordinator owns authoritative scheduling and state transitions; participant
