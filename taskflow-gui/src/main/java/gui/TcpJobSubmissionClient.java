@@ -71,15 +71,8 @@ final class TcpJobSubmissionClient implements JobSubmissionClient {
                 signature
         );
 
-        boolean sent;
-        try {
-            sent = SafeJsonWriter.send(out, gson, message);
-        } catch (RuntimeException sendFailure) {
-            requesterTokenStore.forgetToken(jobId);
-            throw sendFailure;
-        }
+        boolean sent = SafeJsonWriter.send(out, gson, message);
         if (!sent) {
-            requesterTokenStore.forgetToken(jobId);
             throw new IllegalStateException("Could not send job submit message to coordinator.");
         }
     }

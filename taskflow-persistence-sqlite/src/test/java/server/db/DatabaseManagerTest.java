@@ -105,6 +105,122 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void submissionCommitIsTypedAndDeterministicAcrossRestart() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-submission-idempotency.db");
+        String tokenHash = RequesterTokens.hashToken("owner-token");
+        String requestHash = "v1:canonical-request";
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.COMMITTED,
+                    db.commitJobSubmission(
+                            "job-idempotent",
+                            "TEST_TASK",
+                            "requester-route-1",
+                            tokenHash,
+                            "owner-key",
+                            requestHash,
+                            "parameter",
+                            List.of(new JobStateStore.TaskStartupState("task-job-idempotent-0", "payload"))
+                    ).outcome()
+            );
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.REPLAY,
+                    db.inspectJobSubmission("job-idempotent", tokenHash, "owner-key", requestHash).outcome()
+            );
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.REQUEST_CONFLICT,
+                    db.inspectJobSubmission("job-idempotent", tokenHash, "owner-key", "v1:different").outcome()
+            );
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.OWNER_CONFLICT,
+                    db.inspectJobSubmission(
+                            "job-idempotent",
+                            RequesterTokens.hashToken("other-token"),
+                            "owner-key",
+                            requestHash
+                    ).outcome()
+            );
+            assertEquals(1, db.getTasksForJob("job-idempotent").size());
+        }
+
+        try (DatabaseManager restarted = new DatabaseManager(dbPath.toString())) {
+            JobStateStore.JobSubmissionDecision replay = restarted.inspectJobSubmission(
+                    "job-idempotent",
+                    tokenHash,
+                    "owner-key",
+                    requestHash
+            );
+            assertEquals(JobStateStore.JobSubmissionOutcome.REPLAY, replay.outcome());
+            assertEquals("RUNNING", replay.status());
+            assertEquals("TEST_TASK", replay.taskType());
+            assertEquals(1, restarted.getTasksForJob("job-idempotent").size());
+        }
+    }
+
+    @Test
+    void concurrentIdenticalSubmissionCommitsOneJobAndOneTaskSet() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-concurrent-submission-idempotency.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            CountDownLatch start = new CountDownLatch(1);
+            try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+                List<Future<JobStateStore.JobSubmissionOutcome>> outcomes = List.of(
+                        executor.submit(() -> commitAfterStart(db, start)),
+                        executor.submit(() -> commitAfterStart(db, start))
+                );
+                start.countDown();
+
+                Set<JobStateStore.JobSubmissionOutcome> distinct = Set.of(
+                        outcomes.get(0).get(2, TimeUnit.SECONDS),
+                        outcomes.get(1).get(2, TimeUnit.SECONDS)
+                );
+                assertEquals(Set.of(
+                        JobStateStore.JobSubmissionOutcome.COMMITTED,
+                        JobStateStore.JobSubmissionOutcome.REPLAY
+                ), distinct);
+            }
+
+            assertEquals(1, db.getJobHistory().size());
+            assertEquals(2, db.getTasksForJob("job-concurrent-submit").size());
+        }
+    }
+
+    @Test
+    void failedTaskInsertRollsBackSubmissionHashAndJobTogether() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-submission-hash-rollback.db");
+        String tokenHash = RequesterTokens.hashToken("owner-token");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertTrue(db.insertJob("existing-job", "TEST_TASK", "requester", 1));
+            assertTrue(db.insertTask("shared-task-id", "existing-job"));
+
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.STORAGE_FAILURE,
+                    db.commitJobSubmission(
+                            "rolled-back-job",
+                            "TEST_TASK",
+                            "requester",
+                            tokenHash,
+                            "owner-key",
+                            "v1:must-roll-back",
+                            "",
+                            List.of(new JobStateStore.TaskStartupState("shared-task-id", "payload"))
+                    ).outcome()
+            );
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.NEW_SUBMISSION,
+                    db.inspectJobSubmission(
+                            "rolled-back-job",
+                            tokenHash,
+                            "owner-key",
+                            "v1:must-roll-back"
+                    ).outcome()
+            );
+            assertTrue(db.getJobHistory().stream().noneMatch(job -> job.jobId().equals("rolled-back-job")));
+            assertTrue(db.getTasksForJob("rolled-back-job").isEmpty());
+        }
+    }
+
+    @Test
     void taskAssignmentStorageFaultPreservesPendingStateAndReplayIsTyped() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-assignment-storage-fault.db");
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
@@ -2342,6 +2458,7 @@ class DatabaseManagerTest {
             assertTrue(columnExists(dbPath, "jobs", "requester_token_hash"));
             assertTrue(columnExists(dbPath, "jobs", "requester_identity_key"));
             assertTrue(columnExists(dbPath, "jobs", "result_payload_json"));
+            assertTrue(columnExists(dbPath, "jobs", "request_hash"));
             assertTrue(columnExists(dbPath, "tasks", "payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "result_payload_json"));
             assertTrue(columnExists(dbPath, "tasks", "lease_owner_id"));
@@ -2360,7 +2477,7 @@ class DatabaseManagerTest {
         createVersion9AssignmentDatabase(dbPath);
 
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
-            assertEquals(11, DatabaseManager.CURRENT_SCHEMA_VERSION);
+            assertEquals(12, DatabaseManager.CURRENT_SCHEMA_VERSION);
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(columnExists(dbPath, "tasks", "attempt_number"));
             assertTrue(columnExists(dbPath, "tasks", "assignment_id"));
@@ -2415,8 +2532,15 @@ class DatabaseManagerTest {
     void migratesVersion10CompletedRunningJobToFinalizingIntent() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-v10-finalizing-migration-test.db");
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
-            db.insertJob("job-v10-finalizing", "TEST_TASK", "requester-1", 1);
-            db.insertTask("task-v10-finalizing", "job-v10-finalizing");
+            assertTrue(db.insertJobWithTasks(
+                    "job-v10-finalizing",
+                    "TEST_TASK",
+                    "requester-1",
+                    RequesterTokens.hashToken("requester-token"),
+                    "",
+                    "",
+                    List.of(new JobStateStore.TaskStartupState("task-v10-finalizing", "payload"))
+            ));
             assertTrue(db.markTaskAssigned(
                     "task-v10-finalizing",
                     "peer-1",
@@ -2447,8 +2571,18 @@ class DatabaseManagerTest {
         }
 
         try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
-            assertEquals(11, migrated.getSchemaVersion());
+            assertEquals(12, migrated.getSchemaVersion());
             assertEquals("FINALIZING", migrated.getJobHistory().getFirst().status());
+            assertTrue(columnExists(dbPath, "jobs", "request_hash"));
+            assertEquals(
+                    JobStateStore.JobSubmissionOutcome.LEGACY_CONFLICT,
+                    migrated.inspectJobSubmission(
+                            "job-v10-finalizing",
+                            RequesterTokens.hashToken("requester-token"),
+                            "",
+                            "v1:cannot-reconstruct"
+                    ).outcome()
+            );
             JobStateStore.ResumableTaskState task = migrated.loadRunningJobsForResume()
                     .getFirst()
                     .tasks()
@@ -2472,7 +2606,7 @@ class DatabaseManagerTest {
         }
 
         assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
-        assertEquals(11, schemaVersion(dbPath));
+        assertEquals(12, schemaVersion(dbPath));
     }
 
     @Test
@@ -2491,6 +2625,7 @@ class DatabaseManagerTest {
         assertFalse(columnExists(dbPath, "tasks", "assignment_id"));
         assertFalse(columnExists(dbPath, "task_attempts", "assignment_id"));
         assertFalse(columnExists(dbPath, "task_attempts", "lease_expires_at"));
+        assertFalse(columnExists(dbPath, "jobs", "request_hash"));
     }
 
     @Test
@@ -2598,6 +2733,25 @@ class DatabaseManagerTest {
                         ""
                 )
         );
+    }
+
+    private static JobStateStore.JobSubmissionOutcome commitAfterStart(DatabaseManager db,
+                                                                        CountDownLatch start)
+            throws Exception {
+        assertTrue(start.await(2, TimeUnit.SECONDS));
+        return db.commitJobSubmission(
+                "job-concurrent-submit",
+                "TEST_TASK",
+                "requester-route",
+                RequesterTokens.hashToken("owner-token"),
+                "owner-key",
+                "v1:concurrent-request",
+                "",
+                List.of(
+                        new JobStateStore.TaskStartupState("task-job-concurrent-submit-0", "payload-0"),
+                        new JobStateStore.TaskStartupState("task-job-concurrent-submit-1", "payload-1")
+                )
+        ).outcome();
     }
 
     private static BrokerOutboxStore.OutboxMessage jobResultOutboxMessage(String requesterId,

@@ -22,6 +22,8 @@ import server.registry.PeerTransport;
 import server.runtime.UuidAssignmentIdGenerator;
 import transport.TransportRoute;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -36,7 +38,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 11;
+    public static final int CURRENT_SCHEMA_VERSION = 12;
     private static final int ASSIGNMENT_IDENTITY_SCHEMA_VERSION = 10;
     private static final int FINALIZATION_INTENT_SCHEMA_VERSION = 11;
     private static final Gson GSON = new Gson();
@@ -142,6 +144,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     completed_at     INTEGER,
                     file_count       INTEGER NOT NULL,
                     parameter        TEXT    NOT NULL DEFAULT '',
+                    request_hash     TEXT    NOT NULL DEFAULT '',
                     result_payload_json TEXT
                 )
             """);
@@ -256,6 +259,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         if (!columnExists("jobs", "result_payload_json")) {
             try (Statement stmt = conn.createStatement()) {
                 stmt.execute("ALTER TABLE jobs ADD COLUMN result_payload_json TEXT");
+            }
+        }
+        if (!columnExists("jobs", "request_hash")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.execute("ALTER TABLE jobs ADD COLUMN request_hash TEXT NOT NULL DEFAULT ''");
             }
         }
     }
@@ -502,6 +510,9 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         if (!columnExists("jobs", "result_payload_json")) {
             throw new SQLException("Database schema is missing jobs.result_payload_json.");
         }
+        if (!columnExists("jobs", "request_hash")) {
+            throw new SQLException("Database schema is missing jobs.request_hash.");
+        }
         if (!columnExists("tasks", "payload_json")
                 || !columnExists("tasks", "result_payload_json")
                 || !columnExists("tasks", "lease_owner_id")
@@ -618,6 +629,75 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                                    String requesterIdentityKey,
                                                    String parameter,
                                                    Collection<TaskStartupState> tasks) {
+        return commitJobSubmissionInternal(
+                jobId,
+                taskType,
+                requesterId,
+                requesterTokenHash,
+                requesterIdentityKey,
+                "",
+                parameter,
+                tasks,
+                false
+        ).outcome() == JobSubmissionOutcome.COMMITTED;
+    }
+
+    @Override
+    public synchronized JobSubmissionDecision inspectJobSubmission(String jobId,
+                                                                   String requesterTokenHash,
+                                                                   String requesterIdentityKey,
+                                                                   String requestHash) {
+        if (jobId == null || jobId.isBlank()) {
+            return JobSubmissionDecision.newSubmission();
+        }
+        try {
+            return classifyJobSubmission(
+                    jobId,
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    requestHash
+            );
+        } catch (SQLException e) {
+            logSqlFailure("inspectJobSubmission", e);
+            return JobSubmissionDecision.storageFailure();
+        }
+    }
+
+    @Override
+    public synchronized JobSubmissionDecision commitJobSubmission(String jobId,
+                                                                  String taskType,
+                                                                  String requesterId,
+                                                                  String requesterTokenHash,
+                                                                  String requesterIdentityKey,
+                                                                  String requestHash,
+                                                                  String parameter,
+                                                                  Collection<TaskStartupState> tasks) {
+        return commitJobSubmissionInternal(
+                jobId,
+                taskType,
+                requesterId,
+                requesterTokenHash,
+                requesterIdentityKey,
+                requestHash,
+                parameter,
+                tasks,
+                true
+        );
+    }
+
+    private JobSubmissionDecision commitJobSubmissionInternal(String jobId,
+                                                              String taskType,
+                                                              String requesterId,
+                                                              String requesterTokenHash,
+                                                              String requesterIdentityKey,
+                                                              String requestHash,
+                                                              String parameter,
+                                                              Collection<TaskStartupState> tasks,
+                                                              boolean requireRequestHash) {
+        if (requireRequestHash && (requestHash == null || requestHash.isBlank())) {
+            LOGGER.error("event=sqlite_operation_failed operation=commitJobSubmission error=missing_request_hash");
+            return JobSubmissionDecision.storageFailure();
+        }
         List<TaskStartupState> taskStates = List.copyOf(tasks);
         String insertJobSql = """
                 INSERT INTO jobs(
@@ -629,9 +709,10 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     status,
                     submitted_at,
                     file_count,
-                    parameter
+                    parameter,
+                    request_hash
                 )
-                VALUES(?,?,?,?,?,?,?,?,?)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
                 """;
         String insertTaskSql = "INSERT INTO tasks(task_id,job_id,status,payload_json) VALUES(?,?,?,?)";
         boolean originalAutoCommit;
@@ -640,6 +721,17 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             conn.setAutoCommit(false);
             try (PreparedStatement job = conn.prepareStatement(insertJobSql);
                  PreparedStatement task = conn.prepareStatement(insertTaskSql)) {
+                JobSubmissionDecision existing = classifyJobSubmission(
+                        jobId,
+                        requesterTokenHash,
+                        requesterIdentityKey,
+                        requestHash
+                );
+                if (existing.outcome() != JobSubmissionOutcome.NEW_SUBMISSION) {
+                    conn.rollback();
+                    return existing;
+                }
+
                 job.setString(1, jobId);
                 job.setString(2, taskType);
                 job.setString(3, requesterId);
@@ -649,6 +741,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 job.setLong(7, System.currentTimeMillis());
                 job.setInt(8, taskStates.size());
                 job.setString(9, parameter == null ? "" : parameter);
+                job.setString(10, requestHash == null ? "" : requestHash);
                 if (job.executeUpdate() <= 0) {
                     throw new SQLException("No job row inserted.");
                 }
@@ -664,7 +757,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 }
 
                 conn.commit();
-                return true;
+                return JobSubmissionDecision.committed(taskType);
             } catch (SQLException e) {
                 conn.rollback();
                 throw e;
@@ -672,9 +765,74 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 conn.setAutoCommit(originalAutoCommit);
             }
         } catch (SQLException e) {
-            logSqlFailure("insertJobWithTasks", e);
-            return false;
+            logSqlFailure(requireRequestHash ? "commitJobSubmission" : "insertJobWithTasks", e);
+            return JobSubmissionDecision.storageFailure();
         }
+    }
+
+    private JobSubmissionDecision classifyJobSubmission(String jobId,
+                                                        String requesterTokenHash,
+                                                        String requesterIdentityKey,
+                                                        String requestHash) throws SQLException {
+        String sql = """
+                SELECT task_type,
+                       status,
+                       requester_token_hash,
+                       requester_identity_key,
+                       request_hash
+                FROM jobs
+                WHERE job_id=?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return JobSubmissionDecision.newSubmission();
+                }
+
+                String status = rs.getString("status");
+                String taskType = rs.getString("task_type");
+                if (!secureEquals(rs.getString("requester_token_hash"), requesterTokenHash)
+                        || !Objects.equals(
+                                value(rs.getString("requester_identity_key")),
+                                value(requesterIdentityKey)
+                        )) {
+                    return new JobSubmissionDecision(
+                            JobSubmissionOutcome.OWNER_CONFLICT,
+                            status,
+                            taskType
+                    );
+                }
+
+                String storedRequestHash = rs.getString("request_hash");
+                if (storedRequestHash == null || storedRequestHash.isBlank()) {
+                    return new JobSubmissionDecision(
+                            JobSubmissionOutcome.LEGACY_CONFLICT,
+                            status,
+                            taskType
+                    );
+                }
+                if (!secureEquals(storedRequestHash, requestHash)) {
+                    return new JobSubmissionDecision(
+                            JobSubmissionOutcome.REQUEST_CONFLICT,
+                            status,
+                            taskType
+                    );
+                }
+                return new JobSubmissionDecision(JobSubmissionOutcome.REPLAY, status, taskType);
+            }
+        }
+    }
+
+    private static boolean secureEquals(String left, String right) {
+        return MessageDigest.isEqual(
+                value(left).getBytes(StandardCharsets.UTF_8),
+                value(right).getBytes(StandardCharsets.UTF_8)
+        );
+    }
+
+    private static String value(String value) {
+        return value == null ? "" : value;
     }
 
     public synchronized boolean insertJob(String jobId, String taskType, String requesterId, int fileCount) {

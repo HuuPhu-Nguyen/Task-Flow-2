@@ -84,14 +84,11 @@ final class RabbitMqJobSubmissionClient implements JobSubmissionClient {
                     message
             ));
             if (!published) {
-                requesterTokenStore.forgetToken(jobId);
                 throw new IllegalStateException("Job submit publish was not confirmed for job " + jobId + ".");
             }
         } catch (RuntimeException e) {
-            requesterTokenStore.forgetToken(jobId);
             throw e;
         } catch (Exception e) {
-            requesterTokenStore.forgetToken(jobId);
             throw new IllegalStateException("Could not publish job submit message to RabbitMQ.", e);
         }
     }

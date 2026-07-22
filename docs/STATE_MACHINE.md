@@ -148,20 +148,24 @@ when durable state and memory disagree.
 ### T0 — Create task: `∅ -> PENDING`
 
 - **Trigger:** a validated job submission creates its plugin-defined task set.
-- **Preconditions:** the job ID is neither active nor present in persisted
-  history; plugin initialization produced at least one uniquely identified
-  task; the job startup transaction has not already committed.
+- **Preconditions:** the requester-owner/job-ID pair is new after typed durable
+  submission inspection; plugin initialization produced at least one uniquely
+  identified task; the job startup transaction has not already committed.
 - **Durable writes:** one `RUNNING` job row and every `PENDING` task row are
   inserted in one SQLite transaction. Task payload snapshots, requester
-  ownership fields, and job parameters are stored with that transaction.
+  ownership fields, job parameters, and the versioned canonical submission
+  request hash are stored with that transaction.
 - **Emitted outbox messages:** none. Acceptance does not itself publish a task
   assignment or final result.
 - **In-memory projection:** plugin initialization constructs each `TaskUnit` as
   `PENDING`; only after durable startup succeeds is the job placed in
   `activeJobs`.
-- **Idempotent replay:** current submission behavior rejects an active or any
-  persisted duplicate job ID. Same-request response replay is deferred to
-  TF-0207; a rejection is not a second T0.
+- **Idempotent replay:** an exact owner/job/request-hash replay returns current
+  status or the terminal result without plugin initialization, task insertion,
+  or another T0. A changed request is `REQUEST_CONFLICT`; a changed owner is
+  `OWNER_CONFLICT`; a pre-schema-v12 row without a request hash is
+  `LEGACY_CONFLICT`. The atomic insert repeats this classification to close the
+  preflight/commit race.
 - **Metrics/events:** active-job gauge is refreshed and `job_started` records
   job ID, type, requester, and task count after acceptance.
 - **Forbidden transitions:** a failed startup transaction must not leave only
@@ -350,15 +354,18 @@ terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
 ### J0 — Accept job: `∅ -> ACCEPTED/RUNNING`
 
 - **Trigger:** validated `JOB_SUBMIT` plus successful plugin task creation.
-- **Preconditions:** job ID is absent from active memory and persisted history;
-  requester token/optional identity signature is valid; at least one task was
-  created; T0 can commit for the complete task set.
+- **Preconditions:** the requester token/optional identity signature and route
+  binding are valid; the owner/job-ID pair is classified `NEW_SUBMISSION`; at
+  least one task was created; T0 can commit for the complete task set.
 - **Durable writes:** the job row is inserted as `RUNNING` in the same
-  transaction as all T0 rows.
+  transaction as all T0 rows and the schema-v12 canonical request hash.
 - **Emitted outbox messages:** none.
 - **In-memory projection:** after commit, the job enters `activeJobs`, requester
   authorization metadata is indexed, and scheduler dispatch may begin.
-- **Idempotent replay:** current duplicates are rejected without another J0.
+- **Idempotent replay:** `REPLAY` sends the same running-status shape used by
+  `JOB_RESULT_REQUEST`, an in-memory durable pending result, or a reconstructed
+  completed result. Request, owner, and unverifiable-legacy conflicts return a
+  failed `JOB_RESULT`. None performs another J0.
 - **Metrics/events:** active-job gauge increments and `job_started` is emitted.
 - **Forbidden transitions:** no accepted response, active projection, or task
   dispatch may precede successful durable creation when SQLite is enabled.
@@ -625,8 +632,10 @@ never one ambiguous edge.
   authority.
 - T5 is an administrative job-cascade edge, not evidence that pending work
   exhausted retries. A future reducer must retain that distinction.
-- Duplicate job IDs are currently rejected rather than replaying an existing
-  accepted response; TF-0207 owns requester-scoped idempotent submission.
+- Submission idempotency is scoped to the stored token hash plus optional
+  verified public key, not the routing peer ID. Exact canonical-request replay
+  is supported across reconnect and coordinator restart. Pre-schema-v12 rows
+  remain collision-safe but cannot be replayed as exact submissions.
 
 ## Automated Evidence
 
@@ -638,6 +647,17 @@ never one ambiguous edge.
   [`TaskStateMachineTest#replayOfEveryAcceptedEventIsClassifiedDuplicate`](../taskflow-core/src/test/java/server/scheduler/transition/TaskStateMachineTest.java)
   prove explicit invalid edges and duplicate replay without another durable or
   outbound intent.
+- [`DuplicateSubmissionIntegrationTest#lostAcceptanceResponseReplaysAcceptedJob`](../taskflow-coordinator/src/test/java/server/DuplicateSubmissionIntegrationTest.java)
+  restarts after the accepted job/task/hash transaction and proves an exact
+  signed replay returns running status with the original two task identities;
+  [`DuplicateSubmissionIntegrationTest#exactDuplicateReplaysPersistedTerminalResult`](../taskflow-coordinator/src/test/java/server/DuplicateSubmissionIntegrationTest.java)
+  proves the terminal replay path.
+- [`DatabaseManagerTest#submissionCommitIsTypedAndDeterministicAcrossRestart`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java),
+  [`DatabaseManagerTest#concurrentIdenticalSubmissionCommitsOneJobAndOneTaskSet`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java),
+  and
+  [`DatabaseManagerTest#failedTaskInsertRollsBackSubmissionHashAndJobTogether`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  cover typed replay/conflicts, concurrent convergence, restart stability, and
+  atomic rollback at J0/T0.
 - [`SchedulerLoopTest#oneCycleDelegatesEnvelopeAndMaintenanceInStableOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
   proves the loop using an in-memory mailbox and fake work boundary, while
   [`SchedulerArchitectureTest#schedulerFacadeAndLoopCannotOwnTransitionEffects`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)

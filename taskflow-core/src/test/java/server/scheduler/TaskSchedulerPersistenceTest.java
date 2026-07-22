@@ -394,7 +394,7 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
-    void persistedJobIdCollisionReturnsFailureWithoutStartupWrite() throws Exception {
+    void legacyPersistedJobIdCollisionReturnsFailureWithoutStartupWrite() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore();
@@ -414,7 +414,7 @@ class TaskSchedulerPersistenceTest {
             JobResultMessage result = output.result();
             assertFalse(result.isSuccessful());
             assertEquals("job-persisted-duplicate", result.getJobId());
-            assertTrue(result.getErrorMessage().contains("already exists in persisted history"));
+            assertTrue(result.getErrorMessage().contains("legacy submission cannot be verified"));
             assertNull(output.task());
             assertEquals(List.of(), store.events());
         } finally {

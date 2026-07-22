@@ -3,6 +3,7 @@ package server.scheduler;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
+import protocol.JobSubmissionHasher;
 import protocol.Message;
 import protocol.MessageValidationException;
 import protocol.MessageValidator;
@@ -18,8 +19,11 @@ import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 /** Owns envelope disposition, J0 submission, result requests, and event routing. */
@@ -107,28 +111,34 @@ final class SchedulerMessageService {
     private void handleJobSubmit(MessageEnvelope envelope, JobSubmitMessage submit) throws Exception {
         try {
             MessageValidator.validate(submit);
-            if (state.hasActiveJob(submit.getJobId())) {
-                sendJobStartFailure(
-                        envelope.fromNodeId(),
-                        submit,
-                        "Job id is already active: " + submit.getJobId()
+            if (!Objects.equals(envelope.fromNodeId(), submit.getNodeId())) {
+                throw new IllegalArgumentException(
+                        "Requester route does not match job submission node id."
                 );
-                return;
-            }
-            JobStateStore store = persistence.store();
-            if (store != null && store.hasJob(submit.getJobId())) {
-                sendJobStartFailure(
-                        envelope.fromNodeId(),
-                        submit,
-                        "Job id already exists in persisted history: " + submit.getJobId()
-                );
-                return;
             }
             String requesterTokenHash = RequesterTokens.hashToken(submit.getRequesterToken());
             if (!RequesterTokens.hasTokenHash(requesterTokenHash)) {
                 throw new IllegalArgumentException("Requester token is required.");
             }
             String requesterIdentityKey = requesterIdentityKey(submit);
+            String requestHash = JobSubmissionHasher.hash(
+                    submit,
+                    requesterTokenHash,
+                    requesterIdentityKey
+            );
+
+            JobStateStore store = persistence.store();
+            JobStateStore.JobSubmissionDecision preflight = inspectSubmission(
+                    store,
+                    submit.getJobId(),
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    requestHash
+            );
+            if (handleExistingSubmission(envelope.fromNodeId(), submit, preflight)) {
+                return;
+            }
+
             long acceptedAt = clock.nowEpochMillis();
             TransitionDecision decision = transitions.jobSubmitted(acceptedAt);
             if (!decision.accepted()) {
@@ -141,8 +151,23 @@ final class SchedulerMessageService {
             if (job.getTasks().isEmpty()) {
                 throw new IllegalArgumentException("Job must create at least one task.");
             }
-            persistJobStartup(job, submit.getParameter(), requesterTokenHash, requesterIdentityKey);
-            state.addActiveJob(job, requesterTokenHash, requesterIdentityKey);
+            JobStateStore.JobSubmissionDecision persisted = persistJobStartup(
+                    job,
+                    submit.getParameter(),
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    requestHash
+            );
+            if (persisted.outcome() == JobStateStore.JobSubmissionOutcome.STORAGE_FAILURE) {
+                throw new IllegalStateException("Job could not be persisted.");
+            }
+            if (handleExistingSubmission(envelope.fromNodeId(), submit, persisted)) {
+                return;
+            }
+            if (persisted.outcome() != JobStateStore.JobSubmissionOutcome.COMMITTED) {
+                throw new IllegalStateException("Job could not be persisted.");
+            }
+            state.addActiveJob(job, requesterTokenHash, requesterIdentityKey, requestHash);
             metrics.setActiveJobs(state.activeJobCount());
             events.info("job_started", events.fields(
                     "job_id", job.getJobId(),
@@ -161,30 +186,212 @@ final class SchedulerMessageService {
         }
     }
 
-    private void persistJobStartup(EmbarrassinglyParallelJob<?, ?> job,
-                                   String parameter,
-                                   String requesterTokenHash,
-                                   String requesterIdentityKey) {
+    private JobStateStore.JobSubmissionDecision persistJobStartup(EmbarrassinglyParallelJob<?, ?> job,
+                                                                  String parameter,
+                                                                  String requesterTokenHash,
+                                                                  String requesterIdentityKey,
+                                                                  String requestHash) {
         JobStateStore store = persistence.store();
         if (store == null) {
-            return;
+            return JobStateStore.JobSubmissionDecision.committed(job.getTaskType());
         }
-        boolean persisted = store.insertJobWithTasks(
+        JobStateStore.JobSubmissionDecision persisted = store.commitJobSubmission(
                 job.getJobId(),
                 job.getTaskType(),
                 job.getRequesterNodeId(),
                 requesterTokenHash,
                 requesterIdentityKey,
+                requestHash,
                 parameter,
                 job.getTasks().values().stream()
                         .sorted(Comparator.comparingInt(task -> taskIndex(task.getTaskId())))
                         .map(task -> new JobStateStore.TaskStartupState(task.getTaskId(), task.getPayload()))
                         .toList()
         );
-        if (!persisted) {
+        if (persisted == null
+                || persisted.outcome() == JobStateStore.JobSubmissionOutcome.STORAGE_FAILURE) {
             persistence.record("insertJobWithTasks", job.getJobId(), "", false);
-            throw new IllegalStateException("Job could not be persisted.");
+            return JobStateStore.JobSubmissionDecision.storageFailure();
         }
+        return persisted;
+    }
+
+    private JobStateStore.JobSubmissionDecision inspectSubmission(JobStateStore store,
+                                                                   String jobId,
+                                                                   String requesterTokenHash,
+                                                                   String requesterIdentityKey,
+                                                                   String requestHash) {
+        if (store != null) {
+            JobStateStore.JobSubmissionDecision durable = store.inspectJobSubmission(
+                    jobId,
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    requestHash
+            );
+            if (durable == null) {
+                return JobStateStore.JobSubmissionDecision.storageFailure();
+            }
+            if (durable.outcome() != JobStateStore.JobSubmissionOutcome.NEW_SUBMISSION) {
+                if (durable.outcome() == JobStateStore.JobSubmissionOutcome.LEGACY_CONFLICT
+                        && state.hasActiveJob(jobId)
+                        && hasText(state.requestHash(jobId))) {
+                    return classifyActiveSubmission(
+                            jobId,
+                            requesterTokenHash,
+                            requesterIdentityKey,
+                            requestHash
+                    );
+                }
+                return durable;
+            }
+        }
+        if (state.hasActiveJob(jobId)) {
+            return classifyActiveSubmission(
+                    jobId,
+                    requesterTokenHash,
+                    requesterIdentityKey,
+                    requestHash
+            );
+        }
+        return JobStateStore.JobSubmissionDecision.newSubmission();
+    }
+
+    private JobStateStore.JobSubmissionDecision classifyActiveSubmission(String jobId,
+                                                                          String requesterTokenHash,
+                                                                          String requesterIdentityKey,
+                                                                          String requestHash) {
+        EmbarrassinglyParallelJob<?, ?> active = state.activeJob(jobId);
+        String taskType = active == null ? "" : active.getTaskType();
+        if (!secureEquals(state.requesterTokenHash(jobId), requesterTokenHash)
+                || !Objects.equals(value(state.requesterIdentityKey(jobId)), value(requesterIdentityKey))) {
+            return new JobStateStore.JobSubmissionDecision(
+                    JobStateStore.JobSubmissionOutcome.OWNER_CONFLICT,
+                    "RUNNING",
+                    taskType
+            );
+        }
+        if (!hasText(state.requestHash(jobId))) {
+            return new JobStateStore.JobSubmissionDecision(
+                    JobStateStore.JobSubmissionOutcome.LEGACY_CONFLICT,
+                    "RUNNING",
+                    taskType
+            );
+        }
+        if (!secureEquals(state.requestHash(jobId), requestHash)) {
+            return new JobStateStore.JobSubmissionDecision(
+                    JobStateStore.JobSubmissionOutcome.REQUEST_CONFLICT,
+                    "RUNNING",
+                    taskType
+            );
+        }
+        return new JobStateStore.JobSubmissionDecision(
+                JobStateStore.JobSubmissionOutcome.REPLAY,
+                "RUNNING",
+                taskType
+        );
+    }
+
+    private boolean handleExistingSubmission(String requesterNodeId,
+                                             JobSubmitMessage submit,
+                                             JobStateStore.JobSubmissionDecision decision) throws Exception {
+        JobStateStore.JobSubmissionOutcome outcome = decision == null
+                ? JobStateStore.JobSubmissionOutcome.STORAGE_FAILURE
+                : decision.outcome();
+        if (outcome == JobStateStore.JobSubmissionOutcome.NEW_SUBMISSION
+                || outcome == JobStateStore.JobSubmissionOutcome.COMMITTED) {
+            return false;
+        }
+        if (outcome == JobStateStore.JobSubmissionOutcome.STORAGE_FAILURE) {
+            throw new IllegalStateException("Job submission state could not be persisted.");
+        }
+        if (outcome == JobStateStore.JobSubmissionOutcome.REPLAY) {
+            events.info("job_submission_replayed", events.fields(
+                    "job_id", submit.getJobId(),
+                    "task_type", decision.taskType(),
+                    "requester_id", requesterNodeId,
+                    "job_status", decision.status()
+            ));
+            sendSubmissionReplay(requesterNodeId, submit, decision);
+            return true;
+        }
+
+        String reason = switch (outcome) {
+            case REQUEST_CONFLICT -> "Idempotency conflict: job id is already bound to a different request.";
+            case OWNER_CONFLICT -> "Job id is owned by a different requester.";
+            case LEGACY_CONFLICT -> "Job id already exists, but its legacy submission cannot be verified for idempotent replay.";
+            default -> "Job id could not be accepted.";
+        };
+        events.info("job_submission_conflict", events.fields(
+                "job_id", submit.getJobId(),
+                "task_type", decision.taskType(),
+                "requester_id", requesterNodeId,
+                "outcome", outcome
+        ));
+        sendJobStartFailure(requesterNodeId, submit, reason);
+        return true;
+    }
+
+    private void sendSubmissionReplay(String requesterNodeId,
+                                      JobSubmitMessage submit,
+                                      JobStateStore.JobSubmissionDecision decision) throws Exception {
+        String jobId = submit.getJobId();
+        JobResultMessage pending = jobCompletions.pendingResponse(jobId);
+        if (pending != null) {
+            sendRequestedJobResult(requesterNodeId, pending);
+            return;
+        }
+
+        EmbarrassinglyParallelJob<?, ?> activeJob = state.activeJob(jobId);
+        if (activeJob != null) {
+            sendRequestedJobResult(requesterNodeId, runningJobResponse(jobId, activeJob.getTaskType()));
+            return;
+        }
+
+        JobStateStore store = persistence.store();
+        if (store != null) {
+            Optional<JobStateStore.CompletedJobResultState> completedResult = store.loadCompletedJobResult(jobId);
+            if (completedResult.isPresent()) {
+                JobStateStore.CompletedJobResultState completed = completedResult.get();
+                sendRequestedJobResult(requesterNodeId, new JobResultMessage(
+                        "COORDINATOR",
+                        clock.now().toString(),
+                        completed.jobId(),
+                        completed.taskType(),
+                        true,
+                        completed.resultPayload(),
+                        completed.resultsByTaskId()
+                ));
+                return;
+            }
+        }
+
+        String status = value(decision.status());
+        String taskType = hasText(decision.taskType()) ? decision.taskType() : safeTaskType(submit.getTaskType());
+        if ("RUNNING".equals(status) || "FINALIZING".equals(status)) {
+            sendRequestedJobResult(requesterNodeId, runningJobResponse(jobId, taskType));
+            return;
+        }
+        sendRequestedJobResult(requesterNodeId, new JobResultMessage(
+                "COORDINATOR",
+                clock.now().toString(),
+                jobId,
+                taskType,
+                false,
+                List.of(),
+                "Job is terminal with status " + (status.isBlank() ? "UNKNOWN" : status) + "."
+        ));
+    }
+
+    private JobResultMessage runningJobResponse(String jobId, String taskType) {
+        return new JobResultMessage(
+                "COORDINATOR",
+                clock.now().toString(),
+                jobId,
+                taskType,
+                false,
+                List.of(),
+                "Job is still running."
+        );
     }
 
     private void handleJobResultRequest(MessageEnvelope envelope,
@@ -465,6 +672,21 @@ final class SchedulerMessageService {
             throw new IllegalArgumentException("Requester identity signature is invalid.");
         }
         return submit.getRequesterPublicKey();
+    }
+
+    private static boolean secureEquals(String left, String right) {
+        return MessageDigest.isEqual(
+                value(left).getBytes(StandardCharsets.UTF_8),
+                value(right).getBytes(StandardCharsets.UTF_8)
+        );
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private static String value(String value) {
+        return value == null ? "" : value;
     }
 
     private static int taskIndex(String taskId) {

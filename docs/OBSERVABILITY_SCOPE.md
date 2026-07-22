@@ -40,6 +40,12 @@ Job lifecycle:
 
 - `job_started` records accepted scheduler jobs with `job_id`, `task_type`,
   requester, and task count.
+- `job_submission_replayed` records an exact owner/request-hash replay with job
+  ID, type, requester route, and durable job status. It does not imply another
+  job/task creation transition.
+- `job_submission_conflict` distinguishes `REQUEST_CONFLICT`,
+  `OWNER_CONFLICT`, and `LEGACY_CONFLICT` without logging the requester token or
+  canonical request hash.
 - `job_completed` records terminal scheduler completion with success and result
   count.
 - `job_failed` records terminal scheduler failure reasons.

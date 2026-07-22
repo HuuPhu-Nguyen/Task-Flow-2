@@ -48,9 +48,23 @@ nodes may enable the requester role, executor role, or both.
 - Protocol parsing validates required framework fields, safe peer/job/task
   identifiers, safe task-type names, task-count limits, inline job-payload
   size, and result-payload size through the shared `MessageValidator`.
-- The scheduler rejects duplicate submitted job IDs that are already active.
-  When persistence is enabled, it also rejects IDs already present in persisted
-  job history.
+- A submitted `jobId` is an idempotency key scoped to the requester owner tuple:
+  the per-job token hash plus the verified public key when signed identity is
+  present. The transport route/node ID is not the durable owner, but the outer
+  route must match the submitted message node ID so a replay response cannot be
+  redirected by changing only the envelope.
+- SQLite atomically persists a versioned canonical request hash with the job
+  and complete initial task set. The hash covers the owner tuple, normalized
+  task type, null-to-empty parameter, and ordered per-payload canonical JSON
+  digests; it excludes `jobId`, time, route, and signature.
+- Same owner + same `jobId` + same hash creates no tasks and returns the current
+  running status or persisted terminal result through the existing
+  `JOB_RESULT` response path. A same-owner hash mismatch is an idempotency
+  conflict. A different owner is rejected before request-hash comparison.
+- Pre-schema-v12 rows have a blank request hash and are rejected as
+  unverifiable legacy collisions. Task snapshots are not used to guess the
+  original submission because plugins may transform submitted payloads while
+  creating tasks.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid Base64 file data, and invalid conversion payload-reference shapes.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns executor work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
@@ -294,6 +308,10 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - Job submissions carry a per-job requester token.
 - Job submissions may also carry a requester public key and Ed25519 signature. The JavaFX submitter and command-line submit paths sign submissions.
 - The coordinator persists only the token hash and requester public key, not the raw token or private key.
+- Submission replay compares both stored ownership fields. A reconnect may use
+  a different routing peer ID, but it must reuse the original per-job token and
+  optional signing key. The JavaFX token store issues a token once per job ID
+  and retains it after an uncertain send or publish-confirm failure.
 - `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends a durably terminal in-memory pending result, reports an active or terminal-write-deferred job as still running, or reconstructs a completed persisted result.
 - Jobs submitted with a requester public key are identity-bound: result requests must include the same public key and a valid signature over the request fields.
 - Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
@@ -328,6 +346,10 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
   a version-10 `RUNNING` job only when its positive expected count exactly
   matches a fully `COMPLETED`, result-bearing task set; other legacy rows remain
   subject to normal recovery validation.
+- Schema version 12 adds the non-null `jobs.request_hash` column. New scheduler
+  submissions store a `v1:` SHA-256 fingerprint in the same transaction as the
+  job/tasks. Migrated rows retain the empty default and therefore cannot claim
+  exact-submission replay.
 - Coordinator startup rebuilds resumable `RUNNING` and `FINALIZING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks only when their complete persisted identity has an unexpired lease, releases expired assignments with a `lease_expired` attempt reason, and releases incomplete legacy assignments with an inspectable restart reason. Recovered task results are supplied to plugins in canonical task order for deterministic aggregation.
 - Legacy or otherwise non-resumable `RUNNING` or `FINALIZING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.

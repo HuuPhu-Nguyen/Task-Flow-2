@@ -37,8 +37,10 @@ direction and the gates before TCP can be removed.
    classpath.
 2. The selected client plugin validates local options, reads local inputs, and
    builds JSON-serializable job payloads.
-3. The participant sends `JOB_SUBMIT` with a peer-scoped compatibility job id, requester token, and
-   requester identity signature when supported by that path.
+3. The participant sends `JOB_SUBMIT` with a peer-scoped compatibility job ID,
+   requester token, and requester identity signature when supported by that
+   path. The job ID plus owner tuple is the idempotency key; an explicit retry
+   must reuse the original token/key and canonical request.
 4. Participants use the explicit peer ID compatibility contract in `docs/PEER_IDENTITY.md`; set
    `TASKFLOW_PEER_ID` for stable identity across restarts.
 5. Executor-enabled participants advertise supported task types through heartbeat
@@ -67,8 +69,11 @@ The JavaFX GUI path is implemented through GUI-facing services:
   `TASK_ASSIGN` and `JOB_RESULT` queues, publishes `TASK_RESULT`, and forwards
   live `JOB_RESULT` messages to the same GUI listener.
 - `TcpJobSubmissionClient` and `RabbitMqJobSubmissionClient` both create signed
-  `JOB_SUBMIT` messages with the GUI requester-token store. TCP still supports
-  `JOB_RESULT_REQUEST`; RabbitMQ GUI result-request replay is not implemented.
+  `JOB_SUBMIT` messages with the GUI requester-token store. The store returns
+  the existing token for a repeated job ID and retains it after uncertain send
+  or publish-confirm failure. TCP still supports `JOB_RESULT_REQUEST`; RabbitMQ
+  GUI result-request replay is not implemented, although exact duplicate
+  submission replay uses the normal job-submit ingress.
 - `GuiJobResultRouter` ignores results for untracked job ids and routes active
   failed or successful results.
 - `GuiResultSaveService` handles successful final results with the matching
@@ -121,7 +126,7 @@ Current focused coverage includes:
 - `GuiResultSaverTest` and `GuiResultSaveServiceTest` for GUI final-result handling
   through `ClientJobPlugin`.
 - `RabbitMqJobSubmissionClientTest` for RabbitMQ GUI publish-confirm behavior,
-  requester-token cleanup, and signed job submission.
+  requester-token retention, and signed job submission.
 - `RabbitMqCoordinatorConnectionTest` for RabbitMQ GUI heartbeat startup,
   peer-route subscription, task assignment execution, task-result publish
   acknowledgement/requeue behavior, job-result routing, malformed-result

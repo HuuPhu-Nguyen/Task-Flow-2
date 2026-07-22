@@ -6,6 +6,41 @@ import java.util.Optional;
 
 public interface JobStateStore {
     /**
+     * Typed disposition for a client-supplied job idempotency key.
+     */
+    enum JobSubmissionOutcome {
+        NEW_SUBMISSION,
+        COMMITTED,
+        REPLAY,
+        REQUEST_CONFLICT,
+        OWNER_CONFLICT,
+        LEGACY_CONFLICT,
+        STORAGE_FAILURE
+    }
+
+    record JobSubmissionDecision(JobSubmissionOutcome outcome,
+                                 String status,
+                                 String taskType) {
+        public JobSubmissionDecision {
+            outcome = outcome == null ? JobSubmissionOutcome.STORAGE_FAILURE : outcome;
+            status = status == null ? "" : status;
+            taskType = taskType == null ? "" : taskType;
+        }
+
+        public static JobSubmissionDecision newSubmission() {
+            return new JobSubmissionDecision(JobSubmissionOutcome.NEW_SUBMISSION, "", "");
+        }
+
+        public static JobSubmissionDecision committed(String taskType) {
+            return new JobSubmissionDecision(JobSubmissionOutcome.COMMITTED, "RUNNING", taskType);
+        }
+
+        public static JobSubmissionDecision storageFailure() {
+            return new JobSubmissionDecision(JobSubmissionOutcome.STORAGE_FAILURE, "", "");
+        }
+    }
+
+    /**
      * Typed disposition for correctness-relevant durable transitions other
      * than the specialized successful-result fence below.
      */
@@ -261,6 +296,43 @@ public interface JobStateStore {
                 tasks.size(),
                 tasks.stream().map(TaskStartupState::taskId).toList()
         );
+    }
+
+    /**
+     * Classifies an existing idempotency key without mutating durable state.
+     * Persistent implementations compare the complete requester-owner tuple
+     * before comparing the canonical request hash.
+     */
+    default JobSubmissionDecision inspectJobSubmission(String jobId,
+                                                        String requesterTokenHash,
+                                                        String requesterIdentityKey,
+                                                        String requestHash) {
+        return hasJob(jobId)
+                ? new JobSubmissionDecision(JobSubmissionOutcome.LEGACY_CONFLICT, "", "")
+                : JobSubmissionDecision.newSubmission();
+    }
+
+    /**
+     * Atomically creates a job and all initial tasks or returns the typed
+     * disposition of the already-committed idempotency key.
+     */
+    default JobSubmissionDecision commitJobSubmission(String jobId,
+                                                       String taskType,
+                                                       String requesterId,
+                                                       String requesterTokenHash,
+                                                       String requesterIdentityKey,
+                                                       String requestHash,
+                                                       String parameter,
+                                                       Collection<TaskStartupState> tasks) {
+        return insertJobWithTasks(
+                jobId,
+                taskType,
+                requesterId,
+                requesterTokenHash,
+                requesterIdentityKey,
+                parameter,
+                tasks
+        ) ? JobSubmissionDecision.committed(taskType) : JobSubmissionDecision.storageFailure();
     }
 
     boolean insertJob(String jobId, String taskType, String requesterId, int fileCount);

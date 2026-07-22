@@ -19,10 +19,11 @@ record.
 - [0010: Use at-least-once execution with generation-fenced result commitment](0010-at-least-once-generation-fenced-results.md)
 - [0011: Use object storage for large payloads](0011-object-storage-large-payloads.md)
 - [0012: Use simple weighted-capacity scheduling](0012-simple-weighted-capacity-scheduling.md)
+- [0013: Use requester-scoped job-submission idempotency](0013-requester-scoped-job-submission-idempotency.md)
 
 ## Format
 
-Frozen-scope ADRs 0007–0012 use:
+ADRs 0007–0013 use:
 
 - Status
 - Context

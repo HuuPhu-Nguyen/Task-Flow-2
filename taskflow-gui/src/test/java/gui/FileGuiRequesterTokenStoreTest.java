@@ -30,6 +30,18 @@ class FileGuiRequesterTokenStoreTest {
     }
 
     @Test
+    void repeatedCreationForSameJobReturnsOriginalIdempotencyOwnerToken() {
+        Path storePath = tempDir.resolve("requester-tokens.properties");
+        FileGuiRequesterTokenStore firstStore = new FileGuiRequesterTokenStore(storePath);
+        String original = firstStore.createTokenForJob("job-1");
+
+        FileGuiRequesterTokenStore restartedStore = new FileGuiRequesterTokenStore(storePath);
+
+        assertEquals(original, restartedStore.createTokenForJob("job-1"));
+        assertEquals(original, restartedStore.tokenForJob("job-1").orElseThrow());
+    }
+
+    @Test
     void persistsRequesterIdentityAcrossStoreInstances() {
         Path storePath = tempDir.resolve("requester-tokens.properties");
         FileGuiRequesterTokenStore firstStore = new FileGuiRequesterTokenStore(storePath);

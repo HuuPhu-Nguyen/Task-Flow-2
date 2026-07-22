@@ -61,7 +61,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-job-unsupported"
             );
-            mailbox.put(new MessageEnvelope(unsupportedJob, "requester-1"));
+            mailbox.put(new MessageEnvelope(unsupportedJob, "client-1"));
 
             assertTrue(output.awaitResult());
             JobResultMessage result = output.result();
@@ -100,7 +100,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-job-empty"
             );
-            mailbox.put(new MessageEnvelope(emptyJob, "requester-1"));
+            mailbox.put(new MessageEnvelope(emptyJob, "client-1"));
 
             assertTrue(output.awaitResult());
             JobResultMessage result = output.result();
@@ -138,7 +138,7 @@ class TaskSchedulerFailureTest {
                     "INVALID_PARAMETER",
                     "token-job-invalid-submit"
             );
-            mailbox.put(new MessageEnvelope(invalidJob, "requester-1"));
+            mailbox.put(new MessageEnvelope(invalidJob, "client-1"));
 
             assertTrue(output.awaitResult());
             JobResultMessage result = output.result();
@@ -178,7 +178,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-job-ack"
             );
-            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+            mailbox.put(new MessageEnvelope(emptyJob, "client-1", acknowledgement));
 
             assertTrue(output.awaitResult());
             assertTrue(acknowledgement.awaitAck());
@@ -216,7 +216,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-invalid-job"
             );
-            mailbox.put(new MessageEnvelope(invalidJob, "requester-1", acknowledgement));
+            mailbox.put(new MessageEnvelope(invalidJob, "client-1", acknowledgement));
 
             assertTrue(output.awaitResult());
             assertTrue(acknowledgement.awaitAck());
@@ -383,7 +383,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-job-start-result-send-failure"
             );
-            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+            mailbox.put(new MessageEnvelope(emptyJob, "client-1", acknowledgement));
 
             assertTrue(output.awaitAttempt());
             assertTrue(acknowledgement.awaitRequeue());
@@ -421,7 +421,7 @@ class TaskSchedulerFailureTest {
                     "",
                     "token-job-start-result-unrouted"
             );
-            mailbox.put(new MessageEnvelope(emptyJob, "requester-1", acknowledgement));
+            mailbox.put(new MessageEnvelope(emptyJob, "client-1", acknowledgement));
 
             assertTrue(output.awaitAttempt());
             assertTrue(acknowledgement.awaitRequeue());
@@ -435,7 +435,7 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
-    void duplicateActiveJobIdReturnsFailureWithoutReplacingOriginalJob() throws Exception {
+    void activeJobIdWithDifferentRequestReturnsIdempotencyConflictWithoutReplacingOriginalJob() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         TaskCapturingOutput output = new TaskCapturingOutput();
@@ -458,7 +458,7 @@ class TaskSchedulerFailureTest {
             assertNotNull(duplicateResult);
             assertEquals("job-duplicate", duplicateResult.getJobId());
             assertFalse(duplicateResult.isSuccessful());
-            assertTrue(duplicateResult.getErrorMessage().contains("already active"));
+            assertTrue(duplicateResult.getErrorMessage().contains("Idempotency conflict"));
 
             registry.register("peer-1", new PeerInfo(
                     "peer-1",
@@ -468,6 +468,123 @@ class TaskSchedulerFailureTest {
 
             assertTrue(output.awaitTask());
             assertEquals("first-payload", output.task().getPayload());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void exactActiveSubmissionReplaysRunningStatusWithoutCreatingAnotherTaskSet() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-idempotent-replay-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage original = testJob("job-idempotent-replay", List.of("payload"));
+            mailbox.put(new MessageEnvelope(original, "requester-1"));
+            mailbox.put(new MessageEnvelope(
+                    new JobSubmitMessage(
+                            "requester-route-2",
+                            "2026-06-10T00:00:01Z",
+                            "job-idempotent-replay",
+                            "TEST_TASK",
+                            List.of("payload"),
+                            "",
+                            "token-job-idempotent-replay"
+                    ),
+                    "requester-route-2"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertEquals("Job is still running.", output.result().getErrorMessage());
+
+            registry.register("peer-1", new PeerInfo(
+                    "peer-1",
+                    SchedulerConfig.defaults(),
+                    List.of("TEST_TASK")
+            ));
+            assertTrue(output.awaitTask());
+            assertEquals("payload", output.task().getPayload());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void sameJobIdWithDifferentRequesterTokenIsRejected() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-owner-conflict-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-owner-conflict", List.of("payload")),
+                    "requester-1"
+            ));
+            mailbox.put(new MessageEnvelope(
+                    new JobSubmitMessage(
+                            "requester-route-2",
+                            "2026-06-10T00:00:01Z",
+                            "job-owner-conflict",
+                            "TEST_TASK",
+                            List.of("payload"),
+                            "",
+                            "different-owner-token"
+                    ),
+                    "requester-route-2"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertEquals("Job id is owned by a different requester.", output.result().getErrorMessage());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void submissionReplayCannotRedirectResponseByChangingOnlyEnvelopeRoute() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                null,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-replay-route-binding-test");
+        schedulerThread.start();
+
+        try {
+            JobSubmitMessage submission = testJob("job-route-binding", List.of("payload"));
+            mailbox.put(new MessageEnvelope(submission, "requester-1"));
+            mailbox.put(new MessageEnvelope(submission, "different-route"));
+
+            assertTrue(output.awaitResult());
+            assertEquals(
+                    "Requester route does not match job submission node id.",
+                    output.result().getErrorMessage()
+            );
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);

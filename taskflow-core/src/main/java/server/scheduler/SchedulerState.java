@@ -19,6 +19,7 @@ final class SchedulerState {
     private final Map<String, EmbarrassinglyParallelJob<?, ?>> activeJobs = new LinkedHashMap<>();
     private final Map<String, String> requesterTokenHashes = new LinkedHashMap<>();
     private final Map<String, String> requesterIdentityKeys = new LinkedHashMap<>();
+    private final Map<String, String> requestHashes = new LinkedHashMap<>();
 
     boolean hasActiveJob(String jobId) {
         return activeJobs.containsKey(jobId);
@@ -43,6 +44,13 @@ final class SchedulerState {
     void addActiveJob(EmbarrassinglyParallelJob<?, ?> job,
                       String requesterTokenHash,
                       String requesterIdentityKey) {
+        addActiveJob(job, requesterTokenHash, requesterIdentityKey, "");
+    }
+
+    void addActiveJob(EmbarrassinglyParallelJob<?, ?> job,
+                      String requesterTokenHash,
+                      String requesterIdentityKey,
+                      String requestHash) {
         activeJobs.put(job.getJobId(), job);
         if (RequesterTokens.hasTokenHash(requesterTokenHash)) {
             requesterTokenHashes.put(job.getJobId(), requesterTokenHash);
@@ -50,12 +58,16 @@ final class SchedulerState {
         if (hasText(requesterIdentityKey)) {
             requesterIdentityKeys.put(job.getJobId(), requesterIdentityKey);
         }
+        if (hasText(requestHash)) {
+            requestHashes.put(job.getJobId(), requestHash);
+        }
     }
 
     void removeJob(String jobId) {
         activeJobs.remove(jobId);
         requesterTokenHashes.remove(jobId);
         requesterIdentityKeys.remove(jobId);
+        requestHashes.remove(jobId);
     }
 
     String requesterTokenHash(String jobId) {
@@ -64,6 +76,10 @@ final class SchedulerState {
 
     String requesterIdentityKey(String jobId) {
         return requesterIdentityKeys.get(jobId);
+    }
+
+    String requestHash(String jobId) {
+        return requestHashes.get(jobId);
     }
 
     private static boolean hasText(String value) {

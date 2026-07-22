@@ -63,7 +63,7 @@ class RabbitMqJobSubmissionClientTest {
     }
 
     @Test
-    void publishFailureRemovesRequesterToken() {
+    void uncertainPublishFailureRetainsRequesterTokenForIdempotentReplay() {
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         transport.publishResult = false;
         RecordingRequesterTokenStore tokenStore = new RecordingRequesterTokenStore();
@@ -76,7 +76,7 @@ class RabbitMqJobSubmissionClientTest {
                 "summary",
                 new FakeRabbitMqConnection("peer-1", transport)));
 
-        assertTrue(tokenStore.tokenForJob("job-1").isEmpty());
+        assertEquals(Optional.of("token-job-1"), tokenStore.tokenForJob("job-1"));
     }
 
     @Test

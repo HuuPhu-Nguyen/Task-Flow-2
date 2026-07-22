@@ -73,7 +73,7 @@ class TcpJobSubmissionClientTest {
     }
 
     @Test
-    void submitFailureRemovesPersistedToken() {
+    void uncertainSubmitFailureRetainsPersistedTokenForIdempotentReplay() {
         Path storePath = tempDir.resolve("requester-tokens.properties");
         TcpJobSubmissionClient client = new TcpJobSubmissionClient(
                 "CLIENT",
@@ -89,7 +89,7 @@ class TcpJobSubmissionClientTest {
         ));
 
         FileGuiRequesterTokenStore reloaded = new FileGuiRequesterTokenStore(storePath);
-        assertTrue(reloaded.tokenForJob("job-send-failure").isEmpty());
+        assertTrue(reloaded.tokenForJob("job-send-failure").isPresent());
     }
 
     private static String requesterToken(String json) {

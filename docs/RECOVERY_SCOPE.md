@@ -21,7 +21,11 @@ SQLite schema version 7, task leases exist in SQLite schema version 8,
 coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9, and
 current assignment generation plus audit identity/lease fields exist in schema
 version 10. Schema version 11 adds the `FINALIZING` state used to replay
-semantic aggregation after the last successful task transaction.
+semantic aggregation after the last successful task transaction. Schema
+version 12 adds the canonical job-submission request hash used to classify an
+exact requester-scoped replay after coordinator restart. Migrated rows retain
+an empty hash and remain non-replayable as original submissions because task
+snapshots may be plugin-transformed rather than the original submitted values.
 PostgreSQL/Flyway is not implemented.
 
 ## Decision
@@ -120,6 +124,10 @@ Covered behavior:
   then commit atomically. Direct output commits terminal state before send.
 - Schema-v10 `RUNNING` jobs with an exact fully completed, result-bearing task
   set migrate to `FINALIZING`; incomplete legacy snapshots do not.
+- A schema-v12 submission replay is classified from the stored token hash,
+  optional public key, and canonical request hash without rerunning plugin task
+  creation. Exact replay can return running status or a completed persisted
+  result; conflicts do not mutate the recovered job/task set.
 - Non-resumable jobs are still failed explicitly with an inspectable reason.
 - Active scheduler lease expiry closes the current attempt with
   `lease_expired` and schedules retry or terminal failure according to the

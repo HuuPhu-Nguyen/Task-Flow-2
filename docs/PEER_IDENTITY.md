@@ -52,7 +52,9 @@ participant.
 
 RabbitMQ participants publish heartbeats and peer-routed messages with the same
 explicit peer ID. The coordinator rejects heartbeats whose broker envelope
-sender and protocol `nodeId` disagree.
+sender and protocol `nodeId` disagree; scheduler job submissions also require
+the outer sender and inner `nodeId` to match before any replay response can be
+routed.
 
 Current RabbitMQ routing uses peer-specific queues keyed by peer ID. Two active
 RabbitMQ participants configured with the same peer ID are an invalid deployment
@@ -88,9 +90,12 @@ The generated shape is safe for logs, SQLite keys, task IDs, and output folder
 names. The peer ID segment makes submitted jobs traceable to the submitting
 participant, while the full UUID suffix avoids relying on a short random fragment.
 
-The scheduler rejects a `JOB_SUBMIT` when its job ID is already active. When
-persistence is enabled, it also rejects a submitted job ID that already exists
-in persisted job history.
+The scheduler treats the submitted job ID as an idempotency key scoped to the
+requester token hash and optional verified public key. The peer-ID segment is a
+routing/traceability aid, not ownership: the same owner can replay an exact
+request after reconnect under a different valid route, while a changed owner or
+request is rejected. SQLite schema-v12 request hashes preserve that decision
+across coordinator restart.
 
 ## Deferred Work
 

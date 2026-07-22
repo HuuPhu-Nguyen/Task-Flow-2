@@ -49,8 +49,10 @@ operational gaps are closed.
   connection objects and broker consumers remain in memory only.
 - GUI and command-line submitters generate peer-scoped, collision-resistant job
   IDs with the sanitized peer ID, a timestamp, and a full UUID. The scheduler
-  rejects duplicate job IDs that are already active or present in persisted job
-  history when persistence is enabled.
+  treats `jobId` as a requester-scoped idempotency key: an exact owner/request
+  replay returns current status or the terminal result without creating work,
+  while request-hash, owner, and unverifiable-legacy collisions are rejected.
+  SQLite schema v12 keeps this decision stable across coordinator restart.
 - RabbitMQ command-line participants can register with peer IDs, send heartbeats,
   execute assigned work in the executor role, submit jobs in the requester role,
   receive `JOB_RESULT`, and handle successful final results through

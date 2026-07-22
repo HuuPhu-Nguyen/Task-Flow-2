@@ -67,6 +67,10 @@ final class FileGuiRequesterTokenStore implements GuiRequesterTokenStore {
     public synchronized String createTokenForJob(String jobId) {
         String normalizedJobId = requireJobId(jobId);
         Properties tokens = load();
+        String existingToken = tokens.getProperty(normalizedJobId);
+        if (RequesterTokens.hasToken(existingToken)) {
+            return existingToken;
+        }
         String token = RequesterTokens.newToken();
         tokens.setProperty(normalizedJobId, token);
         save(tokens);

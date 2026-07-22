@@ -37,6 +37,30 @@ rows before upgrading. A version-1 coordinator rejects version-2 messages as
 future, while a version-2 coordinator rejects identity-less version-0/1 task
 results.
 
+## Job-Submission Idempotency Compatibility
+
+Requester-scoped submission idempotency adds no wire field and does not require
+a protocol-version bump. The coordinator derives a versioned `v1:` SHA-256
+request hash from existing validated `JOB_SUBMIT` fields: the requester token
+hash and optional verified public key, normalized task type, null-to-empty
+parameter, and the ordered canonical JSON payload digests. `jobId` remains the
+separate idempotency key; message time, signature, and routing node are excluded
+from the hash.
+
+An exact duplicate therefore may carry a new time and a re-signed node ID after
+reconnect while still resolving to the original running status or terminal
+result. The RabbitMQ envelope `fromNodeId` or TCP registered peer ID must match
+the inner submission's `nodeId`, preventing a captured submission from routing
+the replay response elsewhere. The durable owner remains the token hash plus
+optional public key, not the routing ID.
+
+SQLite schema v12 persists the derived hash atomically with new job/task rows.
+Rows migrated from older schemas have no derivable original-submission hash and
+are rejected as legacy collisions instead of being guessed from possibly
+plugin-transformed task snapshots. Version-0/1/2 `JOB_SUBMIT` messages remain
+wire-readable; only jobs first accepted by schema-v12 code gain durable exact
+submission replay.
+
 ## Version 2 Task Fields
 
 `TASK_ASSIGN` requires:
