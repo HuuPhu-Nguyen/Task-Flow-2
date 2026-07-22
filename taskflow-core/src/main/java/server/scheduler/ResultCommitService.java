@@ -121,6 +121,26 @@ final class ResultCommitService {
                 result.getErrorMessage(),
                 failedAt
         );
+        if (!failure.handled()) {
+            if (failure.storageFailed()) {
+                jobCompletions.failJob(
+                        job,
+                        persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
+                );
+            } else {
+                metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT);
+                events.info("task_result_stale_rejected", events.assignmentTraceFields(
+                        job.getJobId(),
+                        task.getTaskId(),
+                        result.getAttemptNumber(),
+                        result.getAssignmentId(),
+                        envelope.fromNodeId(),
+                        "commit_outcome", failure.durableOutcome(),
+                        "successful", false
+                ));
+            }
+            return;
+        }
         events.error("task_failed", events.fields(
                 "job_id", job.getJobId(),
                 "task_id", task.getTaskId(),
@@ -130,12 +150,7 @@ final class ResultCommitService {
                 "error", result.getErrorMessage()
         ));
 
-        if (!failure.persisted()) {
-            jobCompletions.failJob(
-                    job,
-                    persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
-            );
-        } else if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+        if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
             jobCompletions.failJob(job, "Task " + task.getTaskId() + " reached max retries.");
         }
     }

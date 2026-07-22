@@ -107,6 +107,7 @@ public class TaskScheduler implements Runnable {
         TaskTransitionDecisions transitions = new TaskTransitionDecisions(new TaskStateMachine());
         JobCompletionService jobCompletions = new JobCompletionService(
                 state,
+                checkedRegistry,
                 persistence,
                 checkedOutput,
                 effectiveConfig,

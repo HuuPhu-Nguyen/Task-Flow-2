@@ -253,6 +253,28 @@ public abstract class TaskUnit<T> {
         return FailureOutcome.RETRY_SCHEDULED;
     }
 
+    /**
+     * Projects a job-level durable failure into this task. Callers must invoke
+     * this only after the containing job failure has committed. The returned
+     * peer ID, when present, owns one participant-capacity slot to release.
+     */
+    public synchronized Optional<String> projectCommittedJobFailure() {
+        if (this.status == TaskStatus.COMPLETED || this.status == TaskStatus.FAILED) {
+            return Optional.empty();
+        }
+        String priorAssignedPeerId = this.assignedPeerId;
+        this.assignedPeerId = null;
+        this.startTime = 0L;
+        this.leaseOwnerId = "";
+        this.leaseExpiresAtMillis = 0L;
+        this.assignmentIdentity = null;
+        this.pendingSinceMillis = -1L;
+        this.status = TaskStatus.FAILED;
+        return priorAssignedPeerId == null || priorAssignedPeerId.isBlank()
+                ? Optional.empty()
+                : Optional.of(priorAssignedPeerId);
+    }
+
     public synchronized TaskStatus getStatus() {
         return status;
     }

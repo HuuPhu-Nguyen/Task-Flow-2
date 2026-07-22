@@ -105,6 +105,87 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void taskAssignmentStorageFaultPreservesPendingStateAndReplayIsTyped() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-assignment-storage-fault.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-assignment-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-assignment-storage", "job-assignment-storage");
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_task_assignment_commit
+                        BEFORE UPDATE OF status ON tasks
+                        WHEN NEW.status='ASSIGNED'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected assignment commit');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                    db.commitTaskAssignment(
+                            "task-assignment-storage",
+                            "peer-1",
+                            100L,
+                            "coordinator-lease",
+                            900L,
+                            1,
+                            ASSIGNMENT_ID
+                    )
+            );
+            DatabaseManager.TaskRecord pending = db.getTasksForJob("job-assignment-storage").getFirst();
+            assertEquals("PENDING", pending.status());
+            assertEquals(0, pending.attemptNumber());
+            assertNull(pending.assignmentId());
+            assertTrue(db.loadTaskAttempts("job-assignment-storage").isEmpty());
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_task_assignment_commit");
+            }
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitTaskAssignment(
+                            "task-assignment-storage",
+                            "peer-1",
+                            100L,
+                            "coordinator-lease",
+                            900L,
+                            1,
+                            ASSIGNMENT_ID
+                    )
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    db.commitTaskAssignment(
+                            "task-assignment-storage",
+                            "peer-1",
+                            100L,
+                            "coordinator-lease",
+                            900L,
+                            1,
+                            ASSIGNMENT_ID
+                    )
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STALE_STATE,
+                    db.commitTaskAssignment(
+                            "task-assignment-storage",
+                            "peer-1",
+                            101L,
+                            "different-lease",
+                            901L,
+                            1,
+                            ASSIGNMENT_ID
+                    )
+            );
+            assertEquals("ASSIGNED", db.getTasksForJob("job-assignment-storage").getFirst().status());
+            assertEquals(1, db.loadTaskAttempts("job-assignment-storage").size());
+        }
+    }
+
+    @Test
     void matchingAssignmentCommitsExactlyOnceAndDuplicateIsTyped() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-result-commit-once.db");
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
@@ -329,6 +410,234 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void assignedFailureCommitIsGenerationFencedAndReplayIsTyped() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-assigned-failure-fence.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failure-fence", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-failure-fence", "job-failure-fence");
+            assertTrue(db.markTaskAssigned(
+                    "task-failure-fence", "peer-1", 100L, "lease", 900L, 1, ASSIGNMENT_ID));
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STALE_STATE,
+                    db.commitAssignedTaskFailure(
+                            "task-failure-fence",
+                            1,
+                            OTHER_ASSIGNMENT_ID,
+                            "peer-1",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            "stale failure",
+                            200L
+                    )
+            );
+            assertEquals("ASSIGNED", db.getTasksForJob("job-failure-fence").getFirst().status());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-failure-fence").getFirst().outcome()
+            );
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitAssignedTaskFailure(
+                            "task-failure-fence",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            "processor failed",
+                            200L
+                    )
+            );
+            DatabaseManager.TaskRecord retried = db.getTasksForJob("job-failure-fence").getFirst();
+            assertEquals("PENDING", retried.status());
+            assertEquals(1, retried.retryCount());
+            assertNull(retried.assignmentId());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    db.loadTaskAttempts("job-failure-fence").getFirst().outcome()
+            );
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    db.commitAssignedTaskFailure(
+                            "task-failure-fence",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            "processor failed",
+                            200L
+                    )
+            );
+        }
+    }
+
+    @Test
+    void dispatchFailureReplayCannotAliasANewerGenerationWithSameRetryCount() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-dispatch-failure-aba.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-dispatch-failure-aba", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-dispatch-failure-aba", "job-dispatch-failure-aba");
+            assertTrue(db.markTaskAssigned(
+                    "task-dispatch-failure-aba", "peer-1", 100L, "lease-1", 900L, 1, ASSIGNMENT_ID));
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitAssignedTaskFailure(
+                            "task-dispatch-failure-aba",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            0,
+                            JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
+                            "send failed",
+                            110L
+                    )
+            );
+            assertTrue(db.markTaskAssigned(
+                    "task-dispatch-failure-aba",
+                    "peer-1",
+                    200L,
+                    "lease-2",
+                    1_000L,
+                    2,
+                    SECOND_ASSIGNMENT_ID
+            ));
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitAssignedTaskFailure(
+                            "task-dispatch-failure-aba",
+                            2,
+                            SECOND_ASSIGNMENT_ID,
+                            "peer-1",
+                            0,
+                            JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
+                            "send failed again",
+                            210L
+                    )
+            );
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STALE_STATE,
+                    db.commitAssignedTaskFailure(
+                            "task-dispatch-failure-aba",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            0,
+                            JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
+                            "send failed",
+                            110L
+                    )
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    db.commitAssignedTaskFailure(
+                            "task-dispatch-failure-aba",
+                            2,
+                            SECOND_ASSIGNMENT_ID,
+                            "peer-1",
+                            0,
+                            JobStateStore.TaskAttemptOutcome.DISPATCH_FAILED,
+                            "send failed again",
+                            210L
+                    )
+            );
+            assertEquals(2, db.getTasksForJob("job-dispatch-failure-aba").getFirst().attemptNumber());
+            assertEquals(2, db.loadTaskAttempts("job-dispatch-failure-aba").size());
+        }
+    }
+
+    @Test
+    void assignedFailureStorageFaultRollsBackTaskAndAttempt() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-assigned-failure-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failure-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-failure-storage", "job-failure-storage");
+            assertTrue(db.markTaskAssigned(
+                    "task-failure-storage", "peer-1", 100L, "lease", 900L, 1, ASSIGNMENT_ID));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_assigned_failure_commit
+                        BEFORE UPDATE OF status ON tasks
+                        WHEN NEW.status='PENDING'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected assigned failure commit');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                    db.commitAssignedTaskFailure(
+                            "task-failure-storage",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            "processor failed",
+                            200L
+                    )
+            );
+            DatabaseManager.TaskRecord assigned = db.getTasksForJob("job-failure-storage").getFirst();
+            assertEquals("ASSIGNED", assigned.status());
+            assertEquals(0, assigned.retryCount());
+            assertEquals(ASSIGNMENT_ID, assigned.assignmentId());
+            JobStateStore.TaskAttemptRecord attempt = db.loadTaskAttempts("job-failure-storage").getFirst();
+            assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempt.outcome());
+            assertEquals(0L, attempt.finishedAt());
+        }
+    }
+
+    @Test
+    void assignedTerminalFailureStorageFaultRollsBackTaskAndAttempt() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-assigned-terminal-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-terminal-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-terminal-storage", "job-terminal-storage");
+            assertTrue(db.markTaskAssigned(
+                    "task-terminal-storage", "peer-1", 100L, "lease", 900L, 1, ASSIGNMENT_ID));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_assigned_terminal_commit
+                        BEFORE UPDATE OF status ON tasks
+                        WHEN NEW.status='FAILED'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected assigned terminal commit');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                    db.commitAssignedTaskFailure(
+                            "task-terminal-storage",
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE,
+                            "retry exhausted",
+                            200L
+                    )
+            );
+            DatabaseManager.TaskRecord assigned = db.getTasksForJob("job-terminal-storage").getFirst();
+            assertEquals("ASSIGNED", assigned.status());
+            assertEquals(0, assigned.retryCount());
+            assertEquals(ASSIGNMENT_ID, assigned.assignmentId());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-terminal-storage").getFirst().outcome()
+            );
+        }
+    }
+
+    @Test
     void assignmentCommitBeforePublishLeavesOneDurableIdentityAndPendingOutbox() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-task-outbox-test.db");
         BrokerOutboxStore.CommittedTaskAssignment committed;
@@ -395,6 +704,51 @@ class DatabaseManagerTest {
 
             assertTrue(reopened.markBrokerOutboxPublished(committed.outboxRecord().outboxId(), 789L));
             assertEquals(List.of(), reopened.loadPendingBrokerOutbox(10));
+        }
+    }
+
+    @Test
+    void repeatedTypedAssignmentCommitReturnsExactDurableProjectionAndOutbox() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-task-outbox-typed-replay.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-outbox-typed-replay", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-outbox-typed-replay-0", "job-outbox-typed-replay");
+            BrokerOutboxStore.OutboxMessage template = taskAssignmentOutboxTemplate(
+                    "peer-1",
+                    "task-outbox-typed-replay-0",
+                    "job-outbox-typed-replay"
+            );
+
+            BrokerOutboxStore.TaskAssignmentCommit committed =
+                    db.commitTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-typed-replay-0",
+                            "peer-1",
+                            123L,
+                            "coordinator-lease",
+                            456L,
+                            ASSIGNMENT_ID,
+                            template
+                    );
+            BrokerOutboxStore.TaskAssignmentCommit replayed =
+                    db.commitTaskAssignmentAndEnqueueBrokerOutbox(
+                            "task-outbox-typed-replay-0",
+                            "peer-1",
+                            123L,
+                            "coordinator-lease",
+                            456L,
+                            ASSIGNMENT_ID,
+                            template
+                    );
+
+            assertEquals(JobStateStore.DurableTransitionOutcome.COMMITTED, committed.outcome());
+            assertEquals(JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED, replayed.outcome());
+            assertEquals(committed.assignment().identity(), replayed.assignment().identity());
+            assertEquals(
+                    committed.assignment().outboxRecord().outboxId(),
+                    replayed.assignment().outboxRecord().outboxId()
+            );
+            assertEquals(1, db.loadTaskAttempts("job-outbox-typed-replay").size());
+            assertEquals(1, db.loadPendingBrokerOutbox(10).size());
         }
     }
 
@@ -597,6 +951,323 @@ class DatabaseManagerTest {
 
             assertEquals(1, db.getTasksForJob("job-outbox-concurrent").getFirst().attemptNumber());
             assertEquals(1, db.loadTaskAttempts("job-outbox-concurrent").size());
+            assertEquals(1, db.loadPendingBrokerOutbox(10).size());
+        }
+    }
+
+    @Test
+    void jobCompletionStorageFaultPreservesRunningStateAndReplayIsTyped() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-job-completion-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-completion-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-completion-storage", "job-completion-storage");
+            assertTrue(db.markTaskAssigned("task-completion-storage", "peer-1", 100L));
+            assertTrue(db.markTaskCompleted("task-completion-storage", 200L, 100L, "result"));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_job_completion_commit
+                        BEFORE UPDATE OF status ON jobs
+                        WHEN NEW.status='COMPLETED'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected job completion commit');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                    db.commitJobCompleted("job-completion-storage", Map.of("result", "value"), 300L)
+            );
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_job_completion_commit");
+            }
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitJobCompleted("job-completion-storage", Map.of("result", "value"), 300L)
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    db.commitJobCompleted("job-completion-storage", Map.of("result", "value"), 300L)
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STALE_STATE,
+                    db.commitJobCompleted("job-completion-storage", Map.of("result", "different"), 300L)
+            );
+        }
+    }
+
+    @Test
+    void jobFailureStorageFaultRollsBackTaskJobAndAttemptTogether() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-job-failure-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failure-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-job-failure-storage", "job-failure-storage");
+            assertTrue(db.markTaskAssigned(
+                    "task-job-failure-storage", "peer-1", 100L, "lease", 900L, 1, ASSIGNMENT_ID));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_job_failure_commit
+                        BEFORE UPDATE OF status ON jobs
+                        WHEN NEW.status='FAILED'
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected job failure commit');
+                        END
+                        """);
+            }
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                    db.commitJobFailed(
+                            "job-failure-storage",
+                            List.of(new JobStateStore.TaskFailureUpdate(
+                                    "task-job-failure-storage",
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    "job failed",
+                                    200L
+                            )),
+                            200L
+                    )
+            );
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            DatabaseManager.TaskRecord task = db.getTasksForJob("job-failure-storage").getFirst();
+            assertEquals("ASSIGNED", task.status());
+            assertEquals(ASSIGNMENT_ID, task.assignmentId());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-failure-storage").getFirst().outcome()
+            );
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_job_failure_commit");
+            }
+            List<JobStateStore.TaskFailureUpdate> failures = List.of(
+                    new JobStateStore.TaskFailureUpdate(
+                            "task-job-failure-storage",
+                            JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                            "job failed",
+                            200L
+                    )
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitJobFailed("job-failure-storage", failures, 200L)
+            );
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    db.commitJobFailed("job-failure-storage", failures, 200L)
+            );
+        }
+    }
+
+    @Test
+    void jobFailureReplayRequiresEveryRequestedTaskFailureToBeDurable() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-job-failure-replay-classification.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failure-replay", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-job-failure-replay", "job-failure-replay");
+            assertTrue(db.markJobFailed("job-failure-replay"));
+
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.STALE_STATE,
+                    db.commitJobFailed(
+                            "job-failure-replay",
+                            List.of(new JobStateStore.TaskFailureUpdate(
+                                    "task-job-failure-replay",
+                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                                    "job failed",
+                                    200L
+                            )),
+                            200L
+                    )
+            );
+            assertEquals("PENDING", db.getTasksForJob("job-failure-replay").getFirst().status());
+        }
+    }
+
+    @Test
+    void finalResultOutboxInsertFaultRollsBackTerminalJobState() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-final-outbox-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-final-outbox-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-final-outbox-storage", "job-final-outbox-storage");
+            assertTrue(db.markTaskAssigned("task-final-outbox-storage", "peer-1", 100L));
+            assertTrue(db.markTaskCompleted("task-final-outbox-storage", 200L, 100L, "result"));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_final_outbox_insert
+                        BEFORE INSERT ON broker_outbox
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected final outbox insert');
+                        END
+                        """);
+            }
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-22T00:00:00Z",
+                    "job-final-outbox-storage",
+                    "TEST_TASK",
+                    true,
+                    Map.of("result", "value"),
+                    List.of("result")
+            );
+
+            BrokerOutboxStore.OutboxCommit commit = db.commitJobCompletedAndEnqueueBrokerOutbox(
+                    "job-final-outbox-storage",
+                    result.getResultPayload(),
+                    jobResultOutboxMessage("requester-1", result)
+            );
+            assertEquals(JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE, commit.outcome());
+            assertNull(commit.outboxRecord());
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertTrue(db.loadPendingBrokerOutbox(10).isEmpty());
+        }
+    }
+
+    @Test
+    void failedFinalResultOutboxFaultRollsBackTasksJobAndAttemptBeforeRetry() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-failed-final-outbox-storage.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-failed-final-outbox-storage", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-failed-final-outbox-storage", "job-failed-final-outbox-storage");
+            assertTrue(db.markTaskAssigned(
+                    "task-failed-final-outbox-storage",
+                    "peer-1",
+                    100L,
+                    "coordinator-lease",
+                    900L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_failed_final_outbox_insert
+                        BEFORE INSERT ON broker_outbox
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected failed final outbox insert');
+                        END
+                        """);
+            }
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-22T00:00:00Z",
+                    "job-failed-final-outbox-storage",
+                    "TEST_TASK",
+                    false,
+                    null,
+                    List.of(),
+                    "job failed"
+            );
+            List<BrokerOutboxStore.TaskFailureUpdate> failures = List.of(
+                    new BrokerOutboxStore.TaskFailureUpdate(
+                            "task-failed-final-outbox-storage",
+                            JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                            "job failed",
+                            200L
+                    )
+            );
+
+            BrokerOutboxStore.OutboxCommit failed = db.commitJobFailedAndEnqueueBrokerOutbox(
+                    "job-failed-final-outbox-storage",
+                    failures,
+                    jobResultOutboxMessage("requester-1", result)
+            );
+            assertEquals(JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE, failed.outcome());
+            assertNull(failed.outboxRecord());
+            assertEquals("RUNNING", db.getJobHistory().getFirst().status());
+            assertEquals(
+                    "ASSIGNED",
+                    db.getTasksForJob("job-failed-final-outbox-storage").getFirst().status()
+            );
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.RUNNING,
+                    db.loadTaskAttempts("job-failed-final-outbox-storage").getFirst().outcome()
+            );
+            assertTrue(db.loadPendingBrokerOutbox(10).isEmpty());
+
+            try (Connection triggerConnection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = triggerConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_failed_final_outbox_insert");
+            }
+            BrokerOutboxStore.OutboxCommit committed = db.commitJobFailedAndEnqueueBrokerOutbox(
+                    "job-failed-final-outbox-storage",
+                    failures,
+                    jobResultOutboxMessage("requester-1", result)
+            );
+            BrokerOutboxStore.OutboxCommit replayed = db.commitJobFailedAndEnqueueBrokerOutbox(
+                    "job-failed-final-outbox-storage",
+                    failures,
+                    jobResultOutboxMessage("requester-1", result)
+            );
+            assertEquals(JobStateStore.DurableTransitionOutcome.COMMITTED, committed.outcome());
+            assertNotNull(committed.outboxRecord());
+            assertEquals(JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED, replayed.outcome());
+            assertEquals(committed.outboxRecord().outboxId(), replayed.outboxRecord().outboxId());
+            assertEquals("FAILED", db.getJobHistory().getFirst().status());
+            assertEquals(
+                    "FAILED",
+                    db.getTasksForJob("job-failed-final-outbox-storage").getFirst().status()
+            );
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
+                    db.loadTaskAttempts("job-failed-final-outbox-storage").getFirst().outcome()
+            );
+            assertEquals(1, db.loadPendingBrokerOutbox(10).size());
+        }
+    }
+
+    @Test
+    void repeatedTypedFinalOutboxCommitsReturnExactDurableRecord() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-final-outbox-typed-replay.db");
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob("job-final-outbox-typed-replay", "TEST_TASK", "requester-1", 1);
+            db.insertTask("task-final-outbox-typed-replay", "job-final-outbox-typed-replay");
+            assertTrue(db.markTaskAssigned("task-final-outbox-typed-replay", "peer-1", 100L));
+            assertTrue(db.markTaskCompleted(
+                    "task-final-outbox-typed-replay",
+                    200L,
+                    100L,
+                    "result"
+            ));
+            JobResultMessage result = new JobResultMessage(
+                    "COORDINATOR",
+                    "2026-07-22T00:00:00Z",
+                    "job-final-outbox-typed-replay",
+                    "TEST_TASK",
+                    true,
+                    Map.of("result", "value"),
+                    List.of("result")
+            );
+            BrokerOutboxStore.OutboxMessage message = jobResultOutboxMessage("requester-1", result);
+
+            BrokerOutboxStore.OutboxCommit committed = db.commitJobCompletedAndEnqueueBrokerOutbox(
+                    "job-final-outbox-typed-replay",
+                    result.getResultPayload(),
+                    message
+            );
+            BrokerOutboxStore.OutboxCommit replayed = db.commitJobCompletedAndEnqueueBrokerOutbox(
+                    "job-final-outbox-typed-replay",
+                    result.getResultPayload(),
+                    message
+            );
+            BrokerOutboxStore.OutboxCommit conflicting = db.commitJobCompletedAndEnqueueBrokerOutbox(
+                    "job-final-outbox-typed-replay",
+                    Map.of("result", "different"),
+                    message
+            );
+
+            assertEquals(JobStateStore.DurableTransitionOutcome.COMMITTED, committed.outcome());
+            assertEquals(JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED, replayed.outcome());
+            assertEquals(committed.outboxRecord().outboxId(), replayed.outboxRecord().outboxId());
+            assertEquals(JobStateStore.DurableTransitionOutcome.STALE_STATE, conflicting.outcome());
+            assertNull(conflicting.outboxRecord());
             assertEquals(1, db.loadPendingBrokerOutbox(10).size());
         }
     }

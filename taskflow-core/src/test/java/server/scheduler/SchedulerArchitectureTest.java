@@ -63,7 +63,7 @@ class SchedulerArchitectureTest {
         }
 
         assertTrue(read(schedulerRoot, "AssignmentService.java")
-                .contains("createTaskAssignmentAndEnqueueBrokerOutbox("));
+                .contains("commitTaskAssignmentAndEnqueueBrokerOutbox("));
         assertTrue(read(schedulerRoot, "ResultCommitService.java").contains("commitTaskResult("));
         assertTrue(read(schedulerRoot, "LeaseService.java").contains("leaseExpired("));
         assertTrue(read(schedulerRoot, "JobCompletionService.java").contains("aggregateResultPayload("));
@@ -110,8 +110,72 @@ class SchedulerArchitectureTest {
         }
     }
 
+    @Test
+    void correctnessEffectsCommitBeforeProjectionOrDelivery() throws IOException {
+        Path schedulerRoot = schedulerSourceRoot();
+        String assignment = read(schedulerRoot, "AssignmentService.java");
+        assertOrdered(
+                assignment,
+                "store.commitTaskAssignment(",
+                "task.markAssigned(assignmentIdentity"
+        );
+        assertOrdered(
+                assignment,
+                "store.commitAssignedTaskFailure(",
+                "task.resetToPending()"
+        );
+        assertOrdered(
+                assignment,
+                "outboxStore.commitTaskAssignmentAndEnqueueBrokerOutbox(",
+                "task.markAssigned(committed.identity()"
+        );
+
+        String attempt = read(schedulerRoot, "AttemptService.java");
+        assertOrdered(attempt, "persistTaskFailure(", "task.failAttemptBy(");
+
+        String result = read(schedulerRoot, "ResultCommitService.java");
+        assertOrdered(result, "store.commitTaskResult(", "job.applyCommittedResult(");
+
+        String completion = read(schedulerRoot, "JobCompletionService.java");
+        assertOrdered(
+                completion,
+                "persistTerminalState(completion, now)",
+                "output.sendJobResult("
+        );
+        assertOrdered(
+                completion,
+                "persistTerminalState(completion, now)",
+                "projectTerminalState(completion)"
+        );
+        String outboxCompletion = between(
+                completion,
+                "private void tryDeliverJobResultThroughOutbox",
+                "private BrokerOutboxStore.OutboxCommit persistJobCompletionOutbox"
+        );
+        assertOrdered(
+                outboxCompletion,
+                "persistJobCompletionOutbox(completion)",
+                "projectTerminalState(completion)"
+        );
+    }
+
     private static String read(Path schedulerRoot, String file) throws IOException {
         return Files.readString(schedulerRoot.resolve(file));
+    }
+
+    private static String between(String source, String start, String end) {
+        int startIndex = source.indexOf(start);
+        int endIndex = source.indexOf(end, startIndex + start.length());
+        assertTrue(startIndex >= 0, "Missing source marker: " + start);
+        assertTrue(endIndex > startIndex, "Missing source marker after " + start + ": " + end);
+        return source.substring(startIndex, endIndex);
+    }
+
+    private static void assertOrdered(String source, String before, String after) {
+        int beforeIndex = source.indexOf(before);
+        int afterIndex = source.indexOf(after);
+        assertTrue(beforeIndex >= 0, "Missing source marker: " + before);
+        assertTrue(afterIndex > beforeIndex, after + " must occur after " + before);
     }
 
     private static Path schedulerSourceRoot() {

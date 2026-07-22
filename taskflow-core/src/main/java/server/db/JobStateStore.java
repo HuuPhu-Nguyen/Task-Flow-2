@@ -5,6 +5,22 @@ import java.util.Collection;
 import java.util.Optional;
 
 public interface JobStateStore {
+    /**
+     * Typed disposition for correctness-relevant durable transitions other
+     * than the specialized successful-result fence below.
+     */
+    enum DurableTransitionOutcome {
+        COMMITTED,
+        ALREADY_APPLIED,
+        STALE_STATE,
+        UNKNOWN_ENTITY,
+        STORAGE_FAILURE;
+
+        public boolean projectionAllowed() {
+            return this == COMMITTED || this == ALREADY_APPLIED;
+        }
+    }
+
     enum TaskAttemptOutcome {
         RUNNING,
         SUCCEEDED,
@@ -26,6 +42,20 @@ public interface JobStateStore {
     }
 
     record TaskStartupState(String taskId, Object payload) {
+    }
+
+    record TaskFailureUpdate(String taskId,
+                             TaskAttemptOutcome outcome,
+                             String failureReason,
+                             long finishedAt) {
+        public TaskFailureUpdate {
+            if (taskId == null || taskId.isBlank()) {
+                throw new IllegalArgumentException("taskId is required");
+            }
+            outcome = outcome == null ? TaskAttemptOutcome.JOB_FAILED : outcome;
+            failureReason = failureReason == null ? "" : failureReason;
+            finishedAt = Math.max(0L, finishedAt);
+        }
     }
 
     record TaskAttemptRecord(String jobId,
@@ -214,6 +244,24 @@ public interface JobStateStore {
         return markTaskAssigned(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt);
     }
 
+    default DurableTransitionOutcome commitTaskAssignment(String taskId,
+                                                           String peerId,
+                                                           long startedAt,
+                                                           String leaseOwnerId,
+                                                           long leaseExpiresAt,
+                                                           int attemptNumber,
+                                                           String assignmentId) {
+        return markTaskAssigned(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                attemptNumber,
+                assignmentId
+        ) ? DurableTransitionOutcome.COMMITTED : DurableTransitionOutcome.STORAGE_FAILURE;
+    }
+
     boolean markTaskCompleted(String taskId, long completedAt, long durationMs);
 
     default boolean markTaskCompleted(String taskId,
@@ -259,6 +307,27 @@ public interface JobStateStore {
         return markTaskFailed(taskId);
     }
 
+    /**
+     * Conditionally closes one exact running assignment as retryable or
+     * terminal. Implementations with durable assignment identity must fence
+     * the write by the complete generation tuple.
+     */
+    default DurableTransitionOutcome commitAssignedTaskFailure(String taskId,
+                                                                int attemptNumber,
+                                                                String assignmentId,
+                                                                String assignedPeerId,
+                                                                int retryCount,
+                                                                TaskAttemptOutcome outcome,
+                                                                String failureReason,
+                                                                long finishedAt) {
+        boolean committed = outcome == TaskAttemptOutcome.TERMINAL_FAILURE
+                ? markTaskFailed(taskId, outcome, failureReason, finishedAt)
+                : markTaskRetried(taskId, retryCount, outcome, failureReason, finishedAt);
+        return committed
+                ? DurableTransitionOutcome.COMMITTED
+                : DurableTransitionOutcome.STORAGE_FAILURE;
+    }
+
     boolean markJobCompleted(String jobId);
 
     default boolean markJobCompleted(String jobId, Object resultPayload) {
@@ -266,6 +335,33 @@ public interface JobStateStore {
     }
 
     boolean markJobFailed(String jobId);
+
+    default DurableTransitionOutcome commitJobCompleted(String jobId,
+                                                         Object resultPayload,
+                                                         long completedAt) {
+        return markJobCompleted(jobId, resultPayload)
+                ? DurableTransitionOutcome.COMMITTED
+                : DurableTransitionOutcome.STORAGE_FAILURE;
+    }
+
+    default DurableTransitionOutcome commitJobFailed(String jobId,
+                                                      Collection<TaskFailureUpdate> taskFailures,
+                                                      long completedAt) {
+        Collection<TaskFailureUpdate> failures = taskFailures == null ? List.of() : taskFailures;
+        for (TaskFailureUpdate failure : failures) {
+            if (!markTaskFailed(
+                    failure.taskId(),
+                    failure.outcome(),
+                    failure.failureReason(),
+                    failure.finishedAt()
+            )) {
+                return DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+        }
+        return markJobFailed(jobId)
+                ? DurableTransitionOutcome.COMMITTED
+                : DurableTransitionOutcome.STORAGE_FAILURE;
+    }
 
     int markRunningJobsFailedOnStartup(long completedAt);
 

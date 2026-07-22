@@ -100,8 +100,9 @@ Final result delivery and abandoned states:
   attempt.
 - `job_result_delivery_abandoned` records final-result delivery exhaustion with
   attempt count, requester, success flag, and reason.
-- `job_terminal_persistence_degraded` records terminal history writes that
-  failed after result delivery or abandonment.
+- `job_terminal_persistence_deferred` records a direct-output terminal write
+  that did not commit; final-result delivery is suppressed and the active
+  pending-completion projection remains available for retry.
 - `job_result_requester_missing` and `job_result_request_send_failed` record
   failed `JOB_RESULT_REQUEST` responses.
 - With RabbitMQ coordinator outbox enabled, `job_completed` includes
@@ -120,6 +121,11 @@ Persistence and recovery:
   silent history drift.
 - `scheduler_persistence_failed` records post-start persistence writes that
   fail during scheduler state transitions.
+- `scheduler_durable_transition_replayed` records an exact
+  `ALREADY_APPLIED` durable transition whose matching projection may be
+  installed idempotently.
+- `scheduler_durable_transition_rejected` records a `STALE_STATE` conditional
+  transition that preserves the current projection.
 
 RabbitMQ publish, acknowledgement, and DLQ routing:
 

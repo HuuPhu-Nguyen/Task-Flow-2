@@ -210,4 +210,21 @@ class TaskUnitLifecycleTest {
         assertEquals(5, task.getAssignmentIdentity().orElseThrow().attemptNumber());
         assertEquals(1, task.getRetryCount());
     }
+
+    @Test
+    void committedJobFailureProjectionReleasesAssignmentExactlyOnce() {
+        DummyTask task = new DummyTask("t-job-failure", "job-1", "payload");
+        assertTrue(task.markAssigned("peer-a", 100L, "coordinator-1", 500L));
+
+        assertEquals("peer-a", task.projectCommittedJobFailure().orElseThrow());
+        assertEquals(TaskUnit.TaskStatus.FAILED, task.getStatus());
+        assertEquals(0, task.getRetryCount());
+        assertTrue(task.getAssignmentIdentity().isEmpty());
+        assertEquals(0L, task.getStartTime());
+        assertEquals("", task.getLeaseOwnerId());
+        assertEquals(0L, task.getLeaseExpiresAtMillis());
+
+        assertTrue(task.projectCommittedJobFailure().isEmpty());
+        assertEquals(TaskUnit.TaskStatus.FAILED, task.getStatus());
+    }
 }

@@ -78,6 +78,19 @@ not new business-state edges.
    generation or repeats a terminal job transition.
 7. In-memory restoration from a committed snapshot is hydration, not evidence
    that a new domain transition occurred.
+8. A correctness-relevant live transition follows one order: decide; attempt
+   its conditional transaction; project only `COMMITTED` or exact
+   `ALREADY_APPLIED`; preserve the projection and classify `STALE_STATE`; and
+   suppress the requested projection/outbound effect on `UNKNOWN_ENTITY` or
+   `STORAGE_FAILURE`.
+
+The general SQLite transition result is
+`COMMITTED | ALREADY_APPLIED | STALE_STATE | UNKNOWN_ENTITY | STORAGE_FAILURE`.
+Successful task results retain their more specific equivalent result-commit
+enum. `ALREADY_APPLIED` means the requested durable state is already present,
+so installing the matching projection is safe. It is not permission to project
+a merely similar state. Every non-committing outcome is logged with its
+operation, job, task, and classification.
 
 ## Executable Decision Table
 
@@ -165,8 +178,8 @@ when durable state and memory disagree.
   `AssignmentIdGenerator`; SQLite still owns the conditional next-attempt
   number and atomically validates/persists that UUID with the task, audit, and
   outbox row. Direct-output mode creates the identity through the same injected
-  generator in `TaskUnit`, persists that exact tuple, then sends. Participant
-  active-work capacity increments once.
+  generator, commits that exact tuple, installs it in `TaskUnit`, increments
+  participant capacity, and only then sends.
 - **Idempotent replay:** the SQLite predicate accepts only `PENDING`. Repeating
   assignment creation for an already assigned task changes nothing. Replaying
   the committed outbox row republishes the same attempt and UUID.
@@ -241,10 +254,12 @@ its live identity is removed, and any later dispatch must use generation N+1.
 - **Emitted outbox messages:** none. Any already committed assignment outbox
   row remains historical delivery intent; the next T1 creates a new row and
   generation.
-- **In-memory projection:** current participant/identity/start/lease fields are
-  cleared, pending time is refreshed, participant capacity is released, and
-  the task re-enters scheduler selection. The direct path also uses this edge
-  to roll back its projection if preparation, persistence, or send fails.
+- **In-memory projection:** only after the exact T3 write commits are current
+  participant/identity/start/lease fields cleared, pending time refreshed,
+  participant capacity released, and the task returned to scheduler selection.
+  Preparation or T1 persistence failure creates no assignment projection. A
+  direct send failure retains the assigned projection until its fenced
+  `DISPATCH_FAILED` T3 write commits.
 - **Idempotent replay:** the runtime SQLite predicate accepts only `ASSIGNED`,
   so a repeated failure/release cannot close the attempt or increment retry
   twice. Re-running recovery sees `PENDING` and performs only R1 normalization.
@@ -268,17 +283,16 @@ of an assigned task because J2 makes further execution irrelevant.
   requires the containing `RUNNING` job to be crossing J2.
 - **Durable writes:** the running attempt closes as `TERMINAL_FAILURE` for T4a
   or `JOB_FAILED` for T4b, with finish time, duration, and reason. The task
-  becomes `FAILED`, gets a terminal timestamp, and clears lease fields. The
-  current T4a implementation does not copy the just-incremented in-memory retry
-  count into the task row; the terminal attempt audit proves the final attempt.
+  becomes `FAILED`, gets a terminal timestamp, clears lease fields, and stores
+  the retry count produced by the accepted retry-policy decision.
 - **Emitted outbox messages:** none directly. T4a triggers J2; T4b participates
   in J2's cascade. RabbitMQ J2 stores the failed final `JOB_RESULT` with the
   job terminal transaction.
-- **In-memory projection:** T4a makes `TaskUnit` `FAILED`, clears its live
-  assignment/lease identity, releases participant capacity, and makes
-  `hasTerminalFailure()` true. T4b persists the cascade and then discards the
-  containing active job projection rather than rewriting every remaining
-  `TaskUnit`.
+- **In-memory projection:** after the durable write, T4a makes `TaskUnit`
+  `FAILED`, clears its live assignment/lease identity, releases participant
+  capacity, and makes `hasTerminalFailure()` true. After the atomic J2 cascade,
+  T4b projects each remaining task as failed, releases any assigned participant
+  capacity exactly once, and then removes the containing active job.
 - **Idempotent replay:** the task failure predicate excludes `FAILED` and
   `COMPLETED`; repeating the failure does not create another terminal edge.
 - **Metrics/events:** T4a increments failure and terminal-failure counters once;
@@ -296,8 +310,9 @@ nonterminal task that will never run because its containing job is becoming
 terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
 `JOB_FAILED`, not T4a's `TERMINAL_FAILURE`.
 
-- **Trigger:** J2 finalization, exhausted non-outbox final-result delivery, or
-  startup reconciliation of a non-resumable/abandoned running job.
+- **Trigger:** J2 finalization or startup reconciliation of a
+  non-resumable/abandoned running job. Exhausted delivery occurs only after J2
+  is durable and is not another task transition.
 - **Preconditions:** task belongs to the failing `RUNNING` job and is neither
   `COMPLETED` nor already `FAILED`.
 - **Durable writes:** task becomes `FAILED`, receives the job failure time, and
@@ -306,10 +321,10 @@ terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
 - **Emitted outbox messages:** in RabbitMQ runtime finalization, all T5 writes,
   J2, and the failed `JOB_RESULT` outbox row share one transaction. Startup
   reconciliation emits no final-result outbox row.
-- **In-memory projection:** ordinary job finalization does not rewrite each
-  remaining `TaskUnit`; it discards the entire active job projection after the
-  durable job decision. Startup recovery constructs no active projection for
-  a job it terminalizes.
+- **In-memory projection:** ordinary job finalization projects each remaining
+  `TaskUnit` as failed after the durable job decision, releases capacity for
+  assigned tasks exactly once, and then discards the active job projection.
+  Startup recovery constructs no active projection for a job it terminalizes.
 - **Idempotent replay:** terminal task predicates exclude `COMPLETED` and
   `FAILED`. Repeating J2 cannot repeat T5.
 - **Metrics/events:** no executor-attempt metric is invented for a task that
@@ -349,15 +364,16 @@ job-plus-task operation.
   available; no task is failed; a terminal completion has not already won.
 - **Durable writes:** job becomes `COMPLETED`, receives completion time and the
   semantic final payload. RabbitMQ mode performs this write atomically with the
-  final outbox insert. The last T2 transaction is currently separate. If the
-  post-delivery direct-output write fails, J1 did not durably occur; the
-  scheduler removes the projection and emits `job_terminal_persistence_degraded`.
+  final outbox insert. Direct-output mode commits J1 before delivery. The last
+  T2 transaction is currently separate; TF-0206 owns that remaining boundary.
 - **Emitted outbox messages:** RabbitMQ mode inserts one exact successful
-  `JOB_RESULT`. Direct-output mode sends the response first and persists J1
-  afterward, with no durable outbox.
+  `JOB_RESULT`. Direct-output mode has no durable outbox and sends the response
+  only after J1 commits.
 - **In-memory projection:** the job first enters `pendingJobCompletions` while
-  delivery/finalization is attempted, then leaves `activeJobs` and requester
-  indexes after the terminal path finishes.
+  durable finalization and delivery are attempted. A write failure preserves
+  that active projection and suppresses delivery. After commit, successful
+  delivery or bounded delivery exhaustion removes the job from `activeJobs`
+  and requester indexes without changing its terminal status.
 - **Idempotent replay:** SQLite accepts only `RUNNING`; a repeated J1 changes
   nothing. A pending outbox row republishes the same final response. Recovery
   may derive J1 again from completed task rows only while the job is still
@@ -370,23 +386,24 @@ job-plus-task operation.
 
 ### J2 — Finish unsuccessfully: `ACCEPTED/RUNNING -> FAILED`
 
-- **Trigger:** T4, unrecoverable transition persistence/preparation failure,
-  exhausted final-result delivery, or startup determination that a running job
-  cannot be resumed safely.
+- **Trigger:** T4, unrecoverable transition persistence/preparation failure, or
+  startup determination that a running job cannot be resumed safely. Final
+  delivery exhaustion occurs after J2 and is not another J2 edge.
 - **Preconditions:** persisted job is `RUNNING`; no prior terminal job edge has
   committed. Runtime finalization has a failure reason and failed final result.
 - **Durable writes:** job becomes `FAILED` with completion time. Remaining
   nonterminal tasks cross T5 or T4b for assigned work. RabbitMQ
   mode couples those task writes, J2, and the final outbox insert in one
   transaction. Startup reconciliation couples task/audit cleanup and J2 but
-  creates no outbox row. Direct-output mode performs task and job writes after
-  final-result delivery and records degraded history if a write fails.
+  creates no outbox row. Direct-output mode also commits the remaining task
+  failures and J2 atomically before final-result delivery.
 - **Emitted outbox messages:** RabbitMQ runtime finalization inserts one exact
   failed `JOB_RESULT`; non-outbox compatibility mode sends directly; startup
   reconciliation emits none.
-- **In-memory projection:** the job enters pending finalization, then leaves
-  active/requester indexes. An abandoned non-outbox delivery also removes it so
-  it cannot remain active forever.
+- **In-memory projection:** the job enters pending finalization. A write failure
+  preserves its current task/capacity state and suppresses delivery. After J2
+  commits, remaining task failures and capacity releases are projected; the
+  job leaves active/requester indexes after delivery or bounded abandonment.
 - **Idempotent replay:** job predicate accepts only `RUNNING`; terminal replay
   changes nothing. Final-result outbox replay republishes the stored response.
 - **Metrics/events:** active-job gauge decrements. Normal runtime failure emits
@@ -450,10 +467,11 @@ different transition IDs.
 | `TaskUnit.markAssigned(...)` / `applyAssignment(...)` | T1 |
 | `TaskUnit.markCompletedBy(peer, attempt, assignment, time)` | T2 projection |
 | `TaskUnit.markCompletedBy(peer)` compatibility overload | T2 projection helper only; not an authoritative scheduler edge |
-| `TaskUnit.resetToPending()` when currently assigned | T3 |
+| `TaskUnit.resetToPending()` after `commitAssignedTaskFailure(...)` | T3 projection |
 | `TaskUnit.resetToPending()` when already pending | R1 |
-| `TaskUnit.failAttemptBy(...)` retry branch | T3 |
-| `TaskUnit.failAttemptBy(...)` terminal branch | T4a |
+| `TaskUnit.failAttemptBy(...)` retry branch after durable acceptance | T3 projection |
+| `TaskUnit.failAttemptBy(...)` terminal branch after durable acceptance | T4a projection |
+| `TaskUnit.projectCommittedJobFailure()` | T4b/T5 projection and capacity-release identity |
 | `TaskUnit.restore*ForResume(...)` methods | H1 |
 | [`EmbarrassinglyParallelJob.applyCommittedResult(...)`](../taskflow-spi/src/main/java/server/job/EmbarrassinglyParallelJob.java) | T2 projection |
 | `EmbarrassinglyParallelJob.recordResult(...)` compatibility helper | T2 projection helper only; not an authoritative scheduler edge |
@@ -461,7 +479,7 @@ different transition IDs.
 | [`SchedulerMessageService.handleJobSubmit(...)`](../taskflow-core/src/main/java/server/scheduler/SchedulerMessageService.java) active insertion after startup persistence | J0/T0 projection |
 | [`RecoveryService.restoreJobs(...)`](../taskflow-core/src/main/java/server/scheduler/RecoveryService.java) active-job insertion | H1 job projection |
 | [`AssignmentService.assign(...)`](../taskflow-core/src/main/java/server/scheduler/AssignmentService.java) successful direct-output branch | T1 |
-| `AssignmentService.assign(...)` guarded preparation/persistence/send rollback branch | T3 projection |
+| `AssignmentService.assign(...)` guarded send-failure release after `commitAssignedTaskFailure(...)` | T3 |
 | `AssignmentService.assignWithBrokerOutbox(...)` | T1 |
 | [`ResultCommitService.handleSuccessfulResult(...)`](../taskflow-core/src/main/java/server/scheduler/ResultCommitService.java) committed branch | T2 |
 | `ResultCommitService.handleFailedResult(...)` retry branch | T3 |
@@ -472,33 +490,31 @@ different transition IDs.
 | `LeaseService.handlePeerUnavailable(...)` terminal branch | T4a |
 | `LeaseService.expireTaskLeaseIfNeeded(...)` retry branch | T3 |
 | `LeaseService.expireTaskLeaseIfNeeded(...)` terminal branch | T4a |
-| [`AttemptService.closeFailedAttempt(...)`](../taskflow-core/src/main/java/server/scheduler/AttemptService.java) retry projection / persistence | T3 |
-| `AttemptService.closeFailedAttempt(...)` terminal projection / persistence | T4a |
+| [`AttemptService.closeFailedAttempt(...)`](../taskflow-core/src/main/java/server/scheduler/AttemptService.java) retry commit then projection | T3 |
+| `AttemptService.closeFailedAttempt(...)` terminal commit then projection | T4a |
 | [`JobCompletionService.taskFailureUpdatesForJobFailure(...)`](../taskflow-core/src/main/java/server/scheduler/JobCompletionService.java) for pending tasks | T5 |
 | `JobCompletionService.taskFailureUpdatesForJobFailure(...)` for assigned tasks | T4b |
-| `JobCompletionService.finalizeJobCompletion*` success/removal branches | J1 projection |
-| `JobCompletionService.finalizeJobCompletion*` failure/removal branches | J2 projection |
+| `JobCompletionService.persistTerminalState(...)` / `projectTerminalState(...)` / success removal | J1 commit then projection |
+| `JobCompletionService.persistTerminalState(...)` / `projectTerminalState(...)` / failure removal | T4b/T5/J2 commit then projection |
 | `RecoveryService.restoreJobs(...)` all-completed branch | J1 orchestration |
 | `RecoveryService.restoreJobs(...)` terminal-failure branch | J2 orchestration |
-| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` assigned-task branch | T4b |
-| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` pending-task branch | T5 |
-| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` job/removal branch | J2 |
+| `JobCompletionService.abandonIfResultDeliveryExhausted(...)` | delivery-state cleanup after already committed J1/J2; no lifecycle edge |
 | [`DatabaseManager.insertJobWithTasks(...)`](../taskflow-persistence-sqlite/src/main/java/server/db/DatabaseManager.java) job row | J0 |
 | `DatabaseManager.insertJob(...)` low-level job-row bootstrap | J0 storage state; not runtime acceptance by itself |
 | `DatabaseManager.insertJobWithTasks(...)` / `insertTask(...)` task rows | T0 |
-| `DatabaseManager.markTaskAssigned(...)` / `markTaskAssignedInCurrentTransaction(...)` | T1 |
-| `DatabaseManager.createTaskAssignmentAndEnqueueBrokerOutbox(...)` | T1 |
+| `DatabaseManager.commitTaskAssignment(...)` / compatibility `markTaskAssigned(...)` / `markTaskAssignedInCurrentTransaction(...)` | T1 |
+| `DatabaseManager.commitTaskAssignmentAndEnqueueBrokerOutbox(...)` / compatibility `createTaskAssignmentAndEnqueueBrokerOutbox(...)` | T1 plus assignment outbox intent |
 | `DatabaseManager.markTaskCompleted(...)` / `commitTaskResult(...)` | T2 |
-| `DatabaseManager.markTaskRetried(...)` | T3 |
-| `DatabaseManager.markTaskFailedInCurrentTransaction(...)` from assigned with `TERMINAL_FAILURE` | T4a |
+| `DatabaseManager.commitAssignedTaskFailure(...)` retry/dispatch branch / compatibility `markTaskRetried(...)` | T3 |
+| `DatabaseManager.commitAssignedTaskFailure(...)` terminal branch / compatibility `markTaskFailed(...)` | T4a |
 | `DatabaseManager.markTaskFailedInCurrentTransaction(...)` from assigned with `JOB_FAILED` | T4b |
 | `DatabaseManager.markTaskFailedInCurrentTransaction(...)` from pending | T5 |
-| `DatabaseManager.markJobCompleted(...)` / `markJobCompletedInCurrentTransaction(...)` | J1 |
-| `DatabaseManager.markJobCompletedAndEnqueueBrokerOutbox(...)` | J1 |
-| `DatabaseManager.markJobFailed(...)` / `markJobFailedInCurrentTransaction(...)` | J2 |
-| `DatabaseManager.markJobFailedAndEnqueueBrokerOutbox(...)` assigned-task branch | T4b |
-| `DatabaseManager.markJobFailedAndEnqueueBrokerOutbox(...)` pending-task branch | T5 |
-| `DatabaseManager.markJobFailedAndEnqueueBrokerOutbox(...)` job branch | J2 |
+| `DatabaseManager.commitJobCompleted(...)` / compatibility `markJobCompleted(...)` / `markJobCompletedInCurrentTransaction(...)` | J1 |
+| `DatabaseManager.commitJobCompletedAndEnqueueBrokerOutbox(...)` / compatibility `markJobCompletedAndEnqueueBrokerOutbox(...)` | J1 plus final-result outbox intent |
+| `DatabaseManager.commitJobFailed(...)` task branches | T4b/T5 atomically with J2 |
+| `DatabaseManager.commitJobFailed(...)` / compatibility `markJobFailed(...)` job branch | J2 |
+| `DatabaseManager.commitJobFailedAndEnqueueBrokerOutbox(...)` / compatibility `markJobFailedAndEnqueueBrokerOutbox(...)` task branches | T4b/T5 atomically with J2 and outbox intent |
+| `DatabaseManager.commitJobFailedAndEnqueueBrokerOutbox(...)` / compatibility `markJobFailedAndEnqueueBrokerOutbox(...)` job branch | J2 plus final-result outbox intent |
 | `DatabaseManager.markRunningJobsFailedOnStartup(...)` assigned-task branch | T4b |
 | `DatabaseManager.markRunningJobsFailedOnStartup(...)` pending-task branch | T5 |
 | `DatabaseManager.markRunningJobsFailedOnStartup(...)` job branch | J2 |
@@ -553,9 +569,11 @@ never one ambiguous edge.
   the mandatory scheduler events. `TaskTransitionDecisions` adapts live
   projections into that model, and the focused services above own distinct
   effect boundaries. `TaskScheduler` is a composition facade and
-  `SchedulerLoop` is orchestration-only. SQLite and `TaskUnit` still execute
-  the durable and compatibility-projection primitives respectively; TF-0205
-  owns the remaining durable-first ordering audit rather than this refactor.
+  `SchedulerLoop` is orchestration-only. SQLite executes conditional durable
+  primitives; `TaskUnit`, scheduler indexes, participant capacity, and metrics
+  are post-commit projections. Typed store outcomes make stale, duplicate,
+  unknown-entity, and storage-failure paths explicit instead of treating a
+  boolean write as permission to mutate memory.
 - The SQLite T5 primitive guards the task pre-state but cannot by itself prove
   that its containing job is simultaneously failing; current scheduler call
   sites own that context. Likewise, the J1 SQL predicate checks `RUNNING` while
@@ -568,12 +586,9 @@ never one ambiguous edge.
   The supported scheduler result path uses `commitTaskResult(...)` followed by
   the exact `markCompletedBy(peer, attempt, assignment, time)` overload; the
   compatibility helpers are not authoritative commit entry points.
-- T4's terminal SQLite write currently leaves the task row's retry count at
-  its pre-attempt value while the attempt audit records the terminal attempt.
-  This document does not claim those two counters are identical.
-- Direct-output compatibility finalization delivers `JOB_RESULT` before J1/J2
-  persistence and has no durable outbox. RabbitMQ is the path that couples a
-  terminal job decision to outbound intent.
+- Direct-output compatibility finalization has no durable outbox, but J1/J2
+  commits before `JOB_RESULT` delivery. RabbitMQ additionally couples the
+  terminal job decision to durable outbound intent.
 - T2 for the last task and RabbitMQ J1 are separate transactions. Recovery can
   finish a still-running job whose tasks are already complete, but TF-0206 owns
   the stronger atomic finalization design and crash proof.
@@ -595,10 +610,26 @@ never one ambiguous edge.
 - [`SchedulerLoopTest#oneCycleDelegatesEnvelopeAndMaintenanceInStableOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
   proves the loop using an in-memory mailbox and fake work boundary, while
   [`SchedulerArchitectureTest#schedulerFacadeAndLoopCannotOwnTransitionEffects`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
-  enforces the dependency and responsibility split.
+  enforces the dependency and responsibility split and
+  [`SchedulerArchitectureTest#correctnessEffectsCommitBeforeProjectionOrDelivery`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
+  locks the durable-before-projection/delivery call order at each focused
+  service boundary.
 - [`TaskSchedulerFailureTest#samePeerStaleFailureCannotCloseNewerAssignmentGeneration`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java)
   proves that the runtime reducer guard applies the complete assignment tuple
   to unsuccessful results as well as successful result commitment.
+- [`TaskSchedulerPersistenceTest#assignmentPersistenceFailureReturnsFailureWithoutDispatchingTask`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  [`TaskSchedulerPersistenceTest#dispatchReleaseWriteFailurePreservesAssignmentUntilJobFailureCommits`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  [`TaskSchedulerPersistenceTest#taskCompletionStorageFailureRequeuesWithoutMutatingMemoryOrMetrics`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  and
+  [`TaskSchedulerPersistenceTest#terminalTaskWriteFailurePreservesAssignedProjectionAndCapacity`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
+  inject assignment, release, successful-result, and terminal-failure write
+  failures and prove the requested projections do not occur.
+- [`TaskSchedulerPersistenceTest#finalResultOutboxWriteFailureKeepsProjectionUntilRetryCommits`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  [`TaskSchedulerPersistenceTest#failedFinalOutboxWriteFailurePreservesRemainingAssignmentUntilRetryCommits`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  [`TaskSchedulerPersistenceTest#oneShotJobCompletionWriteFailureProjectsOnlyAfterRetryCommits`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java),
+  and
+  [`TaskSchedulerPersistenceTest#oneShotJobFailureWriteFailureProjectsOnlyAfterRetryCommits`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
+  cover successful/failed final outbox and direct J1/J2 one-shot faults.
 
 - [`TaskUnitLifecycleTest#exactCompletionRequiresAttemptAssignmentAndPeerWithoutPartialMutation`](../taskflow-spi/src/test/java/server/job/TaskUnitLifecycleTest.java)
   covers T1/T2 guards and no partial stale mutation.
@@ -610,7 +641,12 @@ never one ambiguous edge.
   cover persisted terminal guards, including the current T5 administrative
   edge.
 - [`DatabaseManagerTest#assignmentCommitBeforePublishLeavesOneDurableIdentityAndPendingOutbox`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
-  covers atomic RabbitMQ T1 plus outbound intent.
+  and
+  [`DatabaseManagerTest#taskAssignmentStorageFaultPreservesPendingStateAndReplayIsTyped`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java),
+  plus
+  [`DatabaseManagerTest#repeatedTypedAssignmentCommitReturnsExactDurableProjectionAndOutbox`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  cover atomic RabbitMQ/direct T1, rollback, replay classification, exact
+  replay projection data, and outbound intent.
 - [`DatabaseManagerTest#matchingAssignmentCommitsExactlyOnceAndDuplicateIsTyped`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
   covers authoritative T2 and duplicate replay.
 - [`DatabaseManagerTest#retriedTaskRowsClearPreviousAssignmentState`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
@@ -620,11 +656,18 @@ never one ambiguous edge.
 - [`DatabaseManagerTest#completedJobOutboxCommitsTerminalStateAndResultMessage`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
   and
   [`DatabaseManagerTest#failedJobOutboxCommitsTaskFailuresAndResultMessage`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
-  cover RabbitMQ J1/J2, T5, and final-result intent.
+  cover RabbitMQ J1/J2, T5, and final-result intent;
+  [`DatabaseManagerTest#repeatedTypedFinalOutboxCommitsReturnExactDurableRecord`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  proves exact final-outbox replay data, while
+  [`DatabaseManagerTest#failedFinalResultOutboxFaultRollsBackTasksJobAndAttemptBeforeRetry`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
+  proves the failed-result transaction has no partial projection source.
 - [`CoordinatorStartupRecoveryTest#preservesAssignedTasksWithUnexpiredLeasesOnResume`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java)
   and
   [`CoordinatorStartupRecoveryTest#releasesExpiredAssignedLeasesOnResume`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java)
-  distinguish H1 assignment preservation from recovery T3.
+  distinguish H1 assignment preservation from recovery T3, while
+  [`CoordinatorStartupRecoveryTest#sqliteRestartRecoveryReconstructsCommittedRetryProjectionAndGeneration`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java)
+  proves SQLite reconstructs retry count, pending status, cleared assignment and
+  lease state, and the monotonic generation.
 - [`TaskSchedulerPersistenceTest#successfulJobPersistsLifecycleTransitions`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
   and
   [`TaskSchedulerPersistenceTest#terminalTaskFailurePersistsFailedTaskAndJob`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)

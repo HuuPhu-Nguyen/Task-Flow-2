@@ -80,6 +80,36 @@ public interface BrokerOutboxStore {
         }
     }
 
+    record TaskAssignmentCommit(JobStateStore.DurableTransitionOutcome outcome,
+                                CommittedTaskAssignment assignment) {
+        public TaskAssignmentCommit {
+            if (outcome == null) {
+                outcome = JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            if (outcome.projectionAllowed() && assignment == null) {
+                throw new IllegalArgumentException("Projectable assignment result requires assignment data");
+            }
+            if (!outcome.projectionAllowed() && assignment != null) {
+                throw new IllegalArgumentException("Rejected assignment result cannot carry projection data");
+            }
+        }
+    }
+
+    record OutboxCommit(JobStateStore.DurableTransitionOutcome outcome,
+                        OutboxRecord outboxRecord) {
+        public OutboxCommit {
+            if (outcome == null) {
+                outcome = JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            if (outcome.projectionAllowed() && outboxRecord == null) {
+                throw new IllegalArgumentException("Projectable outbox result requires an outbox record");
+            }
+            if (!outcome.projectionAllowed() && outboxRecord != null) {
+                throw new IllegalArgumentException("Rejected outbox result cannot carry projection data");
+            }
+        }
+    }
+
     record TaskFailureUpdate(String taskId,
                              JobStateStore.TaskAttemptOutcome outcome,
                              String failureReason,
@@ -135,6 +165,34 @@ public interface BrokerOutboxStore {
             String assignmentId,
             OutboxMessage messageTemplate);
 
+    default TaskAssignmentCommit commitTaskAssignmentAndEnqueueBrokerOutbox(
+            String taskId,
+            String peerId,
+            long startedAt,
+            String leaseOwnerId,
+            long leaseExpiresAt,
+            String assignmentId,
+            OutboxMessage messageTemplate) {
+        Optional<CommittedTaskAssignment> committed = createTaskAssignmentAndEnqueueBrokerOutbox(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                assignmentId,
+                messageTemplate
+        );
+        return committed
+                .map(value -> new TaskAssignmentCommit(
+                        JobStateStore.DurableTransitionOutcome.COMMITTED,
+                        value
+                ))
+                .orElseGet(() -> new TaskAssignmentCommit(
+                        JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                        null
+                ));
+    }
+
     Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
                                                                   Object resultPayload,
                                                                   OutboxMessage message);
@@ -142,6 +200,29 @@ public interface BrokerOutboxStore {
     Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
                                                                Collection<TaskFailureUpdate> taskFailures,
                                                                OutboxMessage message);
+
+    default OutboxCommit commitJobCompletedAndEnqueueBrokerOutbox(String jobId,
+                                                                   Object resultPayload,
+                                                                   OutboxMessage message) {
+        return markJobCompletedAndEnqueueBrokerOutbox(jobId, resultPayload, message)
+                .map(record -> new OutboxCommit(JobStateStore.DurableTransitionOutcome.COMMITTED, record))
+                .orElseGet(() -> new OutboxCommit(
+                        JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                        null
+                ));
+    }
+
+    default OutboxCommit commitJobFailedAndEnqueueBrokerOutbox(
+            String jobId,
+            Collection<TaskFailureUpdate> taskFailures,
+            OutboxMessage message) {
+        return markJobFailedAndEnqueueBrokerOutbox(jobId, taskFailures, message)
+                .map(record -> new OutboxCommit(JobStateStore.DurableTransitionOutcome.COMMITTED, record))
+                .orElseGet(() -> new OutboxCommit(
+                        JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                        null
+                ));
+    }
 
     List<OutboxRecord> loadPendingBrokerOutbox(int limit);
 

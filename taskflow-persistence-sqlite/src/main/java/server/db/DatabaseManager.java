@@ -691,7 +691,14 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                                  long startedAt,
                                                  String leaseOwnerId,
                                                  long leaseExpiresAt) {
-        return persistTaskAssignment(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt, null);
+        return persistTaskAssignment(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                null
+        ) == DurableTransitionOutcome.COMMITTED;
     }
 
     @Override
@@ -716,15 +723,54 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     taskId, e.getMessage());
             return false;
         }
-        return persistTaskAssignment(taskId, peerId, startedAt, leaseOwnerId, leaseExpiresAt, identity);
+        return persistTaskAssignment(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                identity
+        ) == DurableTransitionOutcome.COMMITTED;
     }
 
-    private boolean persistTaskAssignment(String taskId,
-                                          String peerId,
-                                          long startedAt,
-                                          String leaseOwnerId,
-                                          long leaseExpiresAt,
-                                          AssignmentIdentity suppliedIdentity) {
+    @Override
+    public synchronized DurableTransitionOutcome commitTaskAssignment(String taskId,
+                                                                       String peerId,
+                                                                       long startedAt,
+                                                                       String leaseOwnerId,
+                                                                       long leaseExpiresAt,
+                                                                       int attemptNumber,
+                                                                       String assignmentId) {
+        AssignmentIdentity identity;
+        try {
+            identity = new AssignmentIdentity(
+                    taskId,
+                    attemptNumber,
+                    assignmentId,
+                    peerId,
+                    leaseExpiresAt
+            );
+        } catch (IllegalArgumentException e) {
+            LOGGER.warn("event=task_assignment_persistence_rejected task_id={} reason=invalid_assignment_identity error={}",
+                    taskId, e.getMessage());
+            return DurableTransitionOutcome.STALE_STATE;
+        }
+        return persistTaskAssignment(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                identity
+        );
+    }
+
+    private DurableTransitionOutcome persistTaskAssignment(String taskId,
+                                                            String peerId,
+                                                            long startedAt,
+                                                            String leaseOwnerId,
+                                                            long leaseExpiresAt,
+                                                            AssignmentIdentity suppliedIdentity) {
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
@@ -739,11 +785,14 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                         leaseOwnerId,
                         identity
                 )) {
+                    DurableTransitionOutcome outcome = identity == null
+                            ? classifyMissingAssignmentTarget(taskId)
+                            : classifyTaskAssignment(identity, startedAt, leaseOwnerId);
                     conn.rollback();
-                    return false;
+                    return outcome;
                 }
                 conn.commit();
-                return true;
+                return DurableTransitionOutcome.COMMITTED;
             } catch (SQLException e) {
                 conn.rollback();
                 throw e;
@@ -752,8 +801,34 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             }
         } catch (SQLException e) {
             logSqlFailure("markTaskAssigned", e);
-            return false;
+            return DurableTransitionOutcome.STORAGE_FAILURE;
         }
+    }
+
+    private DurableTransitionOutcome classifyMissingAssignmentTarget(String taskId) throws SQLException {
+        return loadPersistedTaskIdentity(taskId).isEmpty()
+                ? DurableTransitionOutcome.UNKNOWN_ENTITY
+                : DurableTransitionOutcome.STALE_STATE;
+    }
+
+    private DurableTransitionOutcome classifyTaskAssignment(AssignmentIdentity requested,
+                                                              long startedAt,
+                                                              String leaseOwnerId) throws SQLException {
+        Optional<PersistedTaskIdentity> stored = loadPersistedTaskIdentity(requested.taskId());
+        if (stored.isEmpty()) {
+            return DurableTransitionOutcome.UNKNOWN_ENTITY;
+        }
+        PersistedTaskIdentity identity = stored.get();
+        boolean exactAssignment = "ASSIGNED".equals(identity.status())
+                && identity.attemptNumber() == requested.attemptNumber()
+                && Objects.equals(identity.assignmentId(), requested.assignmentId())
+                && Objects.equals(identity.assignedPeerId(), requested.workerId())
+                && identity.startedAt() == startedAt
+                && Objects.equals(identity.leaseOwnerId(), leaseOwnerId == null ? "" : leaseOwnerId)
+                && identity.leaseExpiresAt() == requested.leaseExpiresAtEpochMillis();
+        return exactAssignment
+                ? DurableTransitionOutcome.ALREADY_APPLIED
+                : DurableTransitionOutcome.STALE_STATE;
     }
 
     private AssignmentIdentity nextAssignmentIdentity(String taskId,
@@ -1017,8 +1092,8 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     @Override
     public synchronized boolean markTaskFailed(String taskId,
-                                              TaskAttemptOutcome outcome,
-                                              String failureReason,
+                                               TaskAttemptOutcome outcome,
+                                               String failureReason,
                                               long finishedAt) {
         boolean originalAutoCommit;
         try {
@@ -1041,6 +1116,156 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             logSqlFailure("markTaskFailed", e);
             return false;
         }
+    }
+
+    @Override
+    public synchronized DurableTransitionOutcome commitAssignedTaskFailure(String taskId,
+                                                                            int attemptNumber,
+                                                                            String assignmentId,
+                                                                            String assignedPeerId,
+                                                                            int retryCount,
+                                                                            TaskAttemptOutcome outcome,
+                                                                            String failureReason,
+                                                                            long finishedAt) {
+        TaskAttemptOutcome normalizedOutcome = normalizeAssignedFailureOutcome(outcome);
+        if (normalizedOutcome == null || retryCount < 0) {
+            return DurableTransitionOutcome.STALE_STATE;
+        }
+        boolean terminal = normalizedOutcome == TaskAttemptOutcome.TERMINAL_FAILURE;
+        String updateTaskSql = terminal
+                ? """
+                  UPDATE tasks
+                  SET status='FAILED',
+                      completed_at=?,
+                      lease_owner_id='',
+                      lease_expires_at=0,
+                      retry_count=?
+                  WHERE task_id=?
+                    AND status='ASSIGNED'
+                    AND attempt_number=?
+                    AND assignment_id=?
+                    AND assigned_peer_id=?
+                  """
+                : """
+                  UPDATE tasks
+                  SET status='PENDING',
+                      assigned_peer_id=NULL,
+                      assignment_id=NULL,
+                      started_at=NULL,
+                      completed_at=NULL,
+                      duration_ms=NULL,
+                      lease_owner_id='',
+                      lease_expires_at=0,
+                      retry_count=?
+                  WHERE task_id=?
+                    AND status='ASSIGNED'
+                    AND attempt_number=?
+                    AND assignment_id=?
+                    AND assigned_peer_id=?
+                  """;
+
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement(updateTaskSql)) {
+                int parameter = 1;
+                if (terminal) {
+                    ps.setLong(parameter++, finishedAt);
+                }
+                ps.setInt(parameter++, retryCount);
+                ps.setString(parameter++, taskId);
+                ps.setInt(parameter++, attemptNumber);
+                ps.setString(parameter++, assignmentId);
+                ps.setString(parameter, assignedPeerId);
+                if (ps.executeUpdate() == 0) {
+                    DurableTransitionOutcome classified = classifyAssignedTaskFailure(
+                            taskId,
+                            attemptNumber,
+                            assignmentId,
+                            assignedPeerId,
+                            retryCount,
+                            normalizedOutcome
+                    );
+                    conn.rollback();
+                    return classified;
+                }
+                if (!finishExactRunningAttempt(
+                        taskId,
+                        attemptNumber,
+                        assignmentId,
+                        assignedPeerId,
+                        finishedAt,
+                        exactAttemptDuration(
+                                taskId,
+                                attemptNumber,
+                                assignmentId,
+                                assignedPeerId,
+                                finishedAt
+                        ),
+                        normalizedOutcome,
+                        failureReason
+                )) {
+                    conn.rollback();
+                    return DurableTransitionOutcome.STORAGE_FAILURE;
+                }
+                conn.commit();
+                return DurableTransitionOutcome.COMMITTED;
+            } catch (SQLException | RuntimeException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException | RuntimeException e) {
+            if (e instanceof SQLException sqlException) {
+                logSqlFailure("commitAssignedTaskFailure", sqlException);
+            } else {
+                LOGGER.warn(
+                        "event=database_operation_failed operation=commitAssignedTaskFailure error_type={} error={}",
+                        e.getClass().getSimpleName(),
+                        e.getMessage()
+                );
+            }
+            return DurableTransitionOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    private DurableTransitionOutcome classifyAssignedTaskFailure(String taskId,
+                                                                  int attemptNumber,
+                                                                  String assignmentId,
+                                                                  String assignedPeerId,
+                                                                  int retryCount,
+                                                                  TaskAttemptOutcome outcome) throws SQLException {
+        Optional<PersistedTaskIdentity> stored = loadPersistedTaskIdentity(taskId);
+        if (stored.isEmpty()) {
+            return DurableTransitionOutcome.UNKNOWN_ENTITY;
+        }
+        PersistedTaskIdentity identity = stored.get();
+        boolean expectedTaskState = outcome == TaskAttemptOutcome.TERMINAL_FAILURE
+                ? "FAILED".equals(identity.status()) && identity.retryCount() == retryCount
+                : "PENDING".equals(identity.status()) && identity.retryCount() == retryCount;
+        if (expectedTaskState
+                && identity.attemptNumber() == attemptNumber
+                && exactAttemptHasOutcome(
+                taskId,
+                attemptNumber,
+                assignmentId,
+                assignedPeerId,
+                outcome
+        )) {
+            return DurableTransitionOutcome.ALREADY_APPLIED;
+        }
+        return DurableTransitionOutcome.STALE_STATE;
+    }
+
+    private static TaskAttemptOutcome normalizeAssignedFailureOutcome(TaskAttemptOutcome outcome) {
+        if (outcome == TaskAttemptOutcome.RETRY_SCHEDULED
+                || outcome == TaskAttemptOutcome.DISPATCH_FAILED
+                || outcome == TaskAttemptOutcome.TERMINAL_FAILURE) {
+            return outcome;
+        }
+        return null;
     }
 
     private boolean markTaskFailedInCurrentTransaction(String taskId,
@@ -1092,6 +1317,167 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         } catch (SQLException e) {
             logSqlFailure("markJobFailed", e);
             return false;
+        }
+    }
+
+    @Override
+    public synchronized DurableTransitionOutcome commitJobCompleted(String jobId,
+                                                                    Object resultPayload,
+                                                                    long completedAt) {
+        try {
+            if (markJobCompletedInCurrentTransaction(jobId, resultPayload, completedAt)) {
+                return DurableTransitionOutcome.COMMITTED;
+            }
+            return classifyJobCompletion(jobId, resultPayload);
+        } catch (SQLException | RuntimeException e) {
+            if (e instanceof SQLException sqlException) {
+                logSqlFailure("commitJobCompleted", sqlException);
+            } else {
+                LOGGER.warn(
+                        "event=database_operation_failed operation=commitJobCompleted error_type={} error={}",
+                        e.getClass().getSimpleName(),
+                        e.getMessage()
+                );
+            }
+            return DurableTransitionOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    @Override
+    public synchronized DurableTransitionOutcome commitJobFailed(
+            String jobId,
+            Collection<JobStateStore.TaskFailureUpdate> taskFailures,
+            long completedAt) {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            conn.setAutoCommit(false);
+            try {
+                Collection<JobStateStore.TaskFailureUpdate> failures = taskFailures == null
+                        ? List.of()
+                        : taskFailures;
+                DurableTransitionOutcome current = classifyRunningJob(jobId);
+                if (current != DurableTransitionOutcome.COMMITTED) {
+                    if (current == DurableTransitionOutcome.ALREADY_APPLIED) {
+                        current = classifyCommittedJobFailure(jobId, failures);
+                    }
+                    conn.rollback();
+                    return current;
+                }
+                for (JobStateStore.TaskFailureUpdate failure : failures) {
+                    if (!markTaskFailedInCurrentTransaction(
+                            failure.taskId(),
+                            failure.outcome(),
+                            failure.failureReason(),
+                            failure.finishedAt()
+                    )) {
+                        String status = taskStatus(failure.taskId());
+                        if ("FAILED".equals(status)) {
+                            continue;
+                        }
+                        conn.rollback();
+                        return status.isEmpty()
+                                ? DurableTransitionOutcome.UNKNOWN_ENTITY
+                                : DurableTransitionOutcome.STALE_STATE;
+                    }
+                }
+                if (!markJobFailedInCurrentTransaction(jobId, completedAt)) {
+                    DurableTransitionOutcome classified = classifyJobTransition(jobId, "FAILED");
+                    conn.rollback();
+                    return classified;
+                }
+                conn.commit();
+                return DurableTransitionOutcome.COMMITTED;
+            } catch (SQLException | RuntimeException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException | RuntimeException e) {
+            if (e instanceof SQLException sqlException) {
+                logSqlFailure("commitJobFailed", sqlException);
+            } else {
+                LOGGER.warn(
+                        "event=database_operation_failed operation=commitJobFailed error_type={} error={}",
+                        e.getClass().getSimpleName(),
+                        e.getMessage()
+                );
+            }
+            return DurableTransitionOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    private DurableTransitionOutcome classifyCommittedJobFailure(
+            String jobId,
+            Collection<JobStateStore.TaskFailureUpdate> failures) throws SQLException {
+        String sql = "SELECT status FROM tasks WHERE task_id=? AND job_id=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            for (JobStateStore.TaskFailureUpdate failure : failures) {
+                ps.setString(1, failure.taskId());
+                ps.setString(2, jobId);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) {
+                        return DurableTransitionOutcome.UNKNOWN_ENTITY;
+                    }
+                    if (!"FAILED".equals(rs.getString("status"))) {
+                        return DurableTransitionOutcome.STALE_STATE;
+                    }
+                }
+            }
+        }
+        return DurableTransitionOutcome.ALREADY_APPLIED;
+    }
+
+    private DurableTransitionOutcome classifyRunningJob(String jobId) throws SQLException {
+        String status = jobStatus(jobId);
+        if (status.isEmpty()) {
+            return DurableTransitionOutcome.UNKNOWN_ENTITY;
+        }
+        if ("RUNNING".equals(status)) {
+            return DurableTransitionOutcome.COMMITTED;
+        }
+        return "FAILED".equals(status)
+                ? DurableTransitionOutcome.ALREADY_APPLIED
+                : DurableTransitionOutcome.STALE_STATE;
+    }
+
+    private DurableTransitionOutcome classifyJobTransition(String jobId,
+                                                            String expectedStatus) throws SQLException {
+        String status = jobStatus(jobId);
+        if (status.isEmpty()) {
+            return DurableTransitionOutcome.UNKNOWN_ENTITY;
+        }
+        return expectedStatus.equals(status)
+                ? DurableTransitionOutcome.ALREADY_APPLIED
+                : DurableTransitionOutcome.STALE_STATE;
+    }
+
+    private DurableTransitionOutcome classifyJobCompletion(String jobId,
+                                                             Object resultPayload) throws SQLException {
+        String sql = "SELECT status, result_payload_json FROM jobs WHERE job_id=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return DurableTransitionOutcome.UNKNOWN_ENTITY;
+                }
+                boolean exactCompletion = "COMPLETED".equals(rs.getString("status"))
+                        && Objects.equals(rs.getString("result_payload_json"), toJson(resultPayload));
+                return exactCompletion
+                        ? DurableTransitionOutcome.ALREADY_APPLIED
+                        : DurableTransitionOutcome.STALE_STATE;
+            }
+        }
+    }
+
+    private String jobStatus(String jobId) throws SQLException {
+        String sql = "SELECT status FROM jobs WHERE job_id=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, jobId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString("status") : "";
+            }
         }
     }
 
@@ -1201,6 +1587,67 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         }
     }
 
+    @Override
+    public synchronized TaskAssignmentCommit commitTaskAssignmentAndEnqueueBrokerOutbox(
+            String taskId,
+            String peerId,
+            long startedAt,
+            String leaseOwnerId,
+            long leaseExpiresAt,
+            String assignmentId,
+            OutboxMessage messageTemplate) {
+        Optional<CommittedTaskAssignment> committed = createTaskAssignmentAndEnqueueBrokerOutbox(
+                taskId,
+                peerId,
+                startedAt,
+                leaseOwnerId,
+                leaseExpiresAt,
+                assignmentId,
+                messageTemplate
+        );
+        if (committed.isPresent()) {
+            return new TaskAssignmentCommit(DurableTransitionOutcome.COMMITTED, committed.get());
+        }
+        try {
+            Optional<PersistedTaskIdentity> stored = loadPersistedTaskIdentity(taskId);
+            if (stored.isEmpty()) {
+                return new TaskAssignmentCommit(DurableTransitionOutcome.UNKNOWN_ENTITY, null);
+            }
+            PersistedTaskIdentity identity = stored.get();
+            if ("PENDING".equals(identity.status())) {
+                return new TaskAssignmentCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            boolean exactCommittedIdentity = "ASSIGNED".equals(identity.status())
+                    && Objects.equals(identity.assignmentId(), assignmentId)
+                    && Objects.equals(identity.assignedPeerId(), peerId)
+                    && identity.startedAt() == startedAt
+                    && Objects.equals(identity.leaseOwnerId(), leaseOwnerId == null ? "" : leaseOwnerId)
+                    && identity.leaseExpiresAt() == leaseExpiresAt;
+            if (!exactCommittedIdentity) {
+                return new TaskAssignmentCommit(DurableTransitionOutcome.STALE_STATE, null);
+            }
+            AssignmentIdentity committedIdentity = new AssignmentIdentity(
+                    taskId,
+                    identity.attemptNumber(),
+                    assignmentId,
+                    peerId,
+                    leaseExpiresAt
+            );
+            OutboxMessage committedMessage = assignmentOutboxMessage(messageTemplate, committedIdentity);
+            Optional<OutboxRecord> existingOutbox = findExactBrokerOutbox(committedMessage);
+            if (existingOutbox.isEmpty()) {
+                return new TaskAssignmentCommit(DurableTransitionOutcome.STALE_STATE, null);
+            }
+            return new TaskAssignmentCommit(
+                    DurableTransitionOutcome.ALREADY_APPLIED,
+                    new CommittedTaskAssignment(committedIdentity, existingOutbox.get())
+            );
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("classifyTaskAssignmentAndOutbox", asSqlException(e));
+            return new TaskAssignmentCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+        }
+    }
+
     private static boolean outboxTemplateMatchesTask(OutboxMessage message,
                                                      String taskId,
                                                      String peerId) {
@@ -1244,29 +1691,49 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
                 conn.commit();
                 return Optional.of(record);
-            } catch (SQLException e) {
+            } catch (SQLException | RuntimeException e) {
                 conn.rollback();
                 throw e;
             } finally {
                 conn.setAutoCommit(originalAutoCommit);
             }
-        } catch (SQLException e) {
-            logSqlFailure("markJobCompletedAndEnqueueBrokerOutbox", e);
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("markJobCompletedAndEnqueueBrokerOutbox", asSqlException(e));
             return Optional.empty();
         }
     }
 
     @Override
+    public synchronized OutboxCommit commitJobCompletedAndEnqueueBrokerOutbox(String jobId,
+                                                                              Object resultPayload,
+                                                                              OutboxMessage message) {
+        Optional<OutboxRecord> committed = markJobCompletedAndEnqueueBrokerOutbox(
+                jobId,
+                resultPayload,
+                message
+        );
+        return committed
+                .map(record -> new OutboxCommit(DurableTransitionOutcome.COMMITTED, record))
+                .orElseGet(() -> classifyCompletedJobOutboxReplay(
+                        jobId,
+                        resultPayload,
+                        message
+                ));
+    }
+
+    @Override
     public synchronized Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
-                                                                                  Collection<TaskFailureUpdate> taskFailures,
+                                                                                  Collection<BrokerOutboxStore.TaskFailureUpdate> taskFailures,
                                                                                   OutboxMessage message) {
         boolean originalAutoCommit;
         try {
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try {
-                Collection<TaskFailureUpdate> failures = taskFailures == null ? List.of() : taskFailures;
-                for (TaskFailureUpdate failure : failures) {
+                Collection<BrokerOutboxStore.TaskFailureUpdate> failures = taskFailures == null
+                        ? List.of()
+                        : taskFailures;
+                for (BrokerOutboxStore.TaskFailureUpdate failure : failures) {
                     if (!markTaskFailedInCurrentTransaction(
                             failure.taskId(),
                             failure.outcome(),
@@ -1284,16 +1751,93 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 OutboxRecord record = insertBrokerOutboxInCurrentTransaction(message, System.currentTimeMillis());
                 conn.commit();
                 return Optional.of(record);
-            } catch (SQLException e) {
+            } catch (SQLException | RuntimeException e) {
                 conn.rollback();
                 throw e;
             } finally {
                 conn.setAutoCommit(originalAutoCommit);
             }
-        } catch (SQLException e) {
-            logSqlFailure("markJobFailedAndEnqueueBrokerOutbox", e);
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("markJobFailedAndEnqueueBrokerOutbox", asSqlException(e));
             return Optional.empty();
         }
+    }
+
+    @Override
+    public synchronized OutboxCommit commitJobFailedAndEnqueueBrokerOutbox(
+            String jobId,
+            Collection<BrokerOutboxStore.TaskFailureUpdate> taskFailures,
+            OutboxMessage message) {
+        Optional<OutboxRecord> committed = markJobFailedAndEnqueueBrokerOutbox(
+                jobId,
+                taskFailures,
+                message
+        );
+        return committed
+                .map(record -> new OutboxCommit(DurableTransitionOutcome.COMMITTED, record))
+                .orElseGet(() -> classifyFailedJobOutboxReplay(
+                        jobId,
+                        taskFailures,
+                        message
+                ));
+    }
+
+    private OutboxCommit classifyCompletedJobOutboxReplay(String jobId,
+                                                           Object resultPayload,
+                                                           OutboxMessage message) {
+        try {
+            if ("RUNNING".equals(jobStatus(jobId))) {
+                return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            return classifyExistingJobOutbox(
+                    classifyJobCompletion(jobId, resultPayload),
+                    message
+            );
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("classifyCompletedJobOutbox", asSqlException(e));
+            return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+        }
+    }
+
+    private OutboxCommit classifyFailedJobOutboxReplay(
+            String jobId,
+            Collection<BrokerOutboxStore.TaskFailureUpdate> taskFailures,
+            OutboxMessage message) {
+        try {
+            DurableTransitionOutcome stateOutcome = classifyRunningJob(jobId);
+            if (stateOutcome == DurableTransitionOutcome.COMMITTED) {
+                return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            if (stateOutcome == DurableTransitionOutcome.ALREADY_APPLIED) {
+                Collection<BrokerOutboxStore.TaskFailureUpdate> failures = taskFailures == null
+                        ? List.of()
+                        : taskFailures;
+                List<JobStateStore.TaskFailureUpdate> durableFailures = failures.stream()
+                        .map(failure -> new JobStateStore.TaskFailureUpdate(
+                                failure.taskId(),
+                                failure.outcome(),
+                                failure.failureReason(),
+                                failure.finishedAt()
+                        ))
+                        .toList();
+                stateOutcome = classifyCommittedJobFailure(jobId, durableFailures);
+            }
+            return classifyExistingJobOutbox(stateOutcome, message);
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("classifyFailedJobOutbox", asSqlException(e));
+            return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+        }
+    }
+
+    private OutboxCommit classifyExistingJobOutbox(DurableTransitionOutcome stateOutcome,
+                                                     OutboxMessage message) throws SQLException {
+        if (stateOutcome != DurableTransitionOutcome.ALREADY_APPLIED) {
+            return new OutboxCommit(stateOutcome, null);
+        }
+        Optional<OutboxRecord> existingOutbox = findExactBrokerOutbox(message);
+        return existingOutbox
+                .map(record -> new OutboxCommit(DurableTransitionOutcome.ALREADY_APPLIED, record))
+                .orElseGet(() -> new OutboxCommit(DurableTransitionOutcome.STALE_STATE, null));
     }
 
     @Override
@@ -1425,6 +1969,45 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 rs.getLong("last_attempt_at"),
                 rs.getString("last_error")
         );
+    }
+
+    private Optional<OutboxRecord> findExactBrokerOutbox(OutboxMessage message) throws SQLException {
+        if (message == null) {
+            return Optional.empty();
+        }
+        String sql = """
+                SELECT
+                    outbox_id,
+                    route,
+                    peer_node_id,
+                    from_node_id,
+                    message_type,
+                    message_json,
+                    created_at,
+                    attempt_count,
+                    last_attempt_at,
+                    last_error
+                FROM broker_outbox
+                WHERE route=?
+                  AND peer_node_id=?
+                  AND from_node_id=?
+                  AND message_type=?
+                  AND message_json=?
+                ORDER BY outbox_id DESC
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, message.route().name());
+            ps.setString(2, message.peerNodeId());
+            ps.setString(3, message.fromNodeId());
+            ps.setString(4, message.message().getType());
+            ps.setString(5, GSON.toJson(message.message()));
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next()
+                        ? Optional.of(outboxRecordFromResultSet(rs))
+                        : Optional.empty();
+            }
+        }
     }
 
     public synchronized int markRunningJobsFailedOnStartup(long completedAt) {
@@ -1906,7 +2489,14 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
 
     private Optional<PersistedTaskIdentity> loadPersistedTaskIdentity(String taskId) throws SQLException {
         String sql = """
-                SELECT status, attempt_number, assignment_id, assigned_peer_id
+                SELECT status,
+                       attempt_number,
+                       assignment_id,
+                       assigned_peer_id,
+                       retry_count,
+                       started_at,
+                       lease_owner_id,
+                       lease_expires_at
                 FROM tasks
                 WHERE task_id=?
                 """;
@@ -1920,7 +2510,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                         rs.getString("status"),
                         rs.getInt("attempt_number"),
                         rs.getString("assignment_id"),
-                        rs.getString("assigned_peer_id")
+                        rs.getString("assigned_peer_id"),
+                        rs.getInt("retry_count"),
+                        rs.getLong("started_at"),
+                        rs.getString("lease_owner_id"),
+                        rs.getLong("lease_expires_at")
                 ));
             }
         }
@@ -1932,12 +2526,32 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                                               String assignedPeerId,
                                               long finishedAt,
                                               long durationMs) throws SQLException {
+        return finishExactRunningAttempt(
+                taskId,
+                attemptNumber,
+                assignmentId,
+                assignedPeerId,
+                finishedAt,
+                durationMs,
+                TaskAttemptOutcome.SUCCEEDED,
+                ""
+        );
+    }
+
+    private boolean finishExactRunningAttempt(String taskId,
+                                              int attemptNumber,
+                                              String assignmentId,
+                                              String assignedPeerId,
+                                              long finishedAt,
+                                              long durationMs,
+                                              TaskAttemptOutcome outcome,
+                                              String failureReason) throws SQLException {
         String sql = """
                 UPDATE task_attempts
-                SET outcome='SUCCEEDED',
+                SET outcome=?,
                     finished_at=?,
                     duration_ms=?,
-                    failure_reason=''
+                    failure_reason=?
                 WHERE task_id=?
                   AND attempt_number=?
                   AND assignment_id=?
@@ -1945,13 +2559,67 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                   AND outcome='RUNNING'
                 """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setLong(1, finishedAt);
-            ps.setLong(2, Math.max(0L, durationMs));
-            ps.setString(3, taskId);
-            ps.setInt(4, attemptNumber);
-            ps.setString(5, assignmentId);
-            ps.setString(6, assignedPeerId);
+            ps.setString(1, normalizeFinishedOutcome(outcome).name());
+            ps.setLong(2, finishedAt);
+            ps.setLong(3, Math.max(0L, durationMs));
+            ps.setString(4, failureReason == null ? "" : failureReason);
+            ps.setString(5, taskId);
+            ps.setInt(6, attemptNumber);
+            ps.setString(7, assignmentId);
+            ps.setString(8, assignedPeerId);
             return ps.executeUpdate() == 1;
+        }
+    }
+
+    private long exactAttemptDuration(String taskId,
+                                      int attemptNumber,
+                                      String assignmentId,
+                                      String assignedPeerId,
+                                      long finishedAt) throws SQLException {
+        String sql = """
+                SELECT started_at
+                FROM task_attempts
+                WHERE task_id=?
+                  AND attempt_number=?
+                  AND assignment_id=?
+                  AND peer_id=?
+                  AND outcome='RUNNING'
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            ps.setInt(2, attemptNumber);
+            ps.setString(3, assignmentId);
+            ps.setString(4, assignedPeerId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Math.max(0L, finishedAt - rs.getLong("started_at")) : 0L;
+            }
+        }
+    }
+
+    private boolean exactAttemptHasOutcome(String taskId,
+                                           int attemptNumber,
+                                           String assignmentId,
+                                           String assignedPeerId,
+                                           TaskAttemptOutcome outcome) throws SQLException {
+        String sql = """
+                SELECT 1
+                FROM task_attempts
+                WHERE task_id=?
+                  AND attempt_number=?
+                  AND assignment_id=?
+                  AND peer_id=?
+                  AND outcome=?
+                LIMIT 1
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, taskId);
+            ps.setInt(2, attemptNumber);
+            ps.setString(3, assignmentId);
+            ps.setString(4, assignedPeerId);
+            ps.setString(5, normalizeFinishedOutcome(outcome).name());
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
         }
     }
 
@@ -2296,7 +2964,11 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private record PersistedTaskIdentity(String status,
                                          int attemptNumber,
                                          String assignmentId,
-                                         String assignedPeerId) {
+                                         String assignedPeerId,
+                                         int retryCount,
+                                         long startedAt,
+                                         String leaseOwnerId,
+                                         long leaseExpiresAt) {
     }
 
     private static Object fromJson(String json) {

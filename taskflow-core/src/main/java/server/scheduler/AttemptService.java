@@ -1,6 +1,7 @@
 package server.scheduler;
 
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.TaskUnit;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
@@ -28,11 +29,33 @@ final class AttemptService {
                                      String failureReason,
                                      long finishedAt) {
         if (!decision.accepted()) {
-            return new FailureResult(TaskUnit.FailureOutcome.IGNORED, true, decision);
+            return new FailureResult(
+                    TaskUnit.FailureOutcome.IGNORED,
+                    JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED,
+                    decision,
+                    false
+            );
+        }
+
+        TaskUnit.FailureOutcome expected = expectedOutcome(decision);
+        AssignmentIdentity assignment = task.getAssignmentIdentity()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Accepted failed-attempt transition is missing assignment identity for "
+                                + task.getTaskId()
+                ));
+        JobStateStore.DurableTransitionOutcome durableOutcome = persistTaskFailure(
+                task,
+                assignment,
+                expected,
+                decision.resultingState().retryCount(),
+                failureReason,
+                finishedAt
+        );
+        if (!durableOutcome.projectionAllowed()) {
+            return new FailureResult(expected, durableOutcome, decision, false);
         }
 
         TaskUnit.FailureOutcome outcome = task.failAttemptBy(workerId, maxRetries);
-        TaskUnit.FailureOutcome expected = expectedOutcome(decision);
         if (outcome == TaskUnit.FailureOutcome.IGNORED || outcome != expected) {
             throw new IllegalStateException(
                     "Mutable task projection disagreed with accepted transition decision for "
@@ -44,8 +67,7 @@ final class AttemptService {
             metrics.recordRetry();
         }
         onAttemptFailure(workerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
-        boolean persisted = persistTaskFailure(task, outcome, failureReason, finishedAt);
-        return new FailureResult(outcome, persisted, decision);
+        return new FailureResult(outcome, durableOutcome, decision, true);
     }
 
     void onAttemptSuccess(String workerId, long durationMs) {
@@ -69,43 +91,40 @@ final class AttemptService {
         registry.updateMetricsSnapshot(workerId);
     }
 
-    private boolean persistTaskFailure(TaskUnit<?> task,
-                                       TaskUnit.FailureOutcome outcome,
-                                       String failureReason,
-                                       long finishedAt) {
+    private JobStateStore.DurableTransitionOutcome persistTaskFailure(
+            TaskUnit<?> task,
+            AssignmentIdentity assignment,
+            TaskUnit.FailureOutcome outcome,
+            int retryCount,
+            String failureReason,
+            long finishedAt) {
         JobStateStore store = persistence.store();
         if (store == null) {
-            return true;
+            return JobStateStore.DurableTransitionOutcome.COMMITTED;
         }
         String reason = failureReason == null || failureReason.isBlank() ? "task_failed" : failureReason;
-        if (outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
-            return persistence.record(
-                    "markTaskFailed",
-                    task.getJobId(),
-                    task.getTaskId(),
-                    store.markTaskFailed(
-                            task.getTaskId(),
-                            JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE,
-                            reason,
-                            finishedAt
-                    )
-            );
-        }
-        if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
-            return persistence.record(
-                    "markTaskRetried",
-                    task.getJobId(),
-                    task.getTaskId(),
-                    store.markTaskRetried(
-                            task.getTaskId(),
-                            task.getRetryCount(),
-                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
-                            reason,
-                            finishedAt
-                    )
-            );
-        }
-        return true;
+        String operation = outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE
+                ? "commitAssignedTaskFailure:terminal"
+                : "commitAssignedTaskFailure:retry";
+        JobStateStore.TaskAttemptOutcome durableAttemptOutcome =
+                outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE
+                        ? JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE
+                        : JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED;
+        return persistence.record(
+                operation,
+                task.getJobId(),
+                task.getTaskId(),
+                store.commitAssignedTaskFailure(
+                        task.getTaskId(),
+                        assignment.attemptNumber(),
+                        assignment.assignmentId(),
+                        assignment.workerId(),
+                        retryCount,
+                        durableAttemptOutcome,
+                        reason,
+                        finishedAt
+                )
+        );
     }
 
     private static TaskUnit.FailureOutcome expectedOutcome(TransitionDecision decision) {
@@ -115,10 +134,20 @@ final class AttemptService {
     }
 
     record FailureResult(TaskUnit.FailureOutcome outcome,
-                         boolean persisted,
-                         TransitionDecision decision) {
+                         JobStateStore.DurableTransitionOutcome durableOutcome,
+                         TransitionDecision decision,
+                         boolean projected) {
         boolean handled() {
-            return outcome != TaskUnit.FailureOutcome.IGNORED;
+            return projected;
+        }
+
+        boolean persisted() {
+            return durableOutcome.projectionAllowed();
+        }
+
+        boolean storageFailed() {
+            return durableOutcome == JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE
+                    || durableOutcome == JobStateStore.DurableTransitionOutcome.UNKNOWN_ENTITY;
         }
     }
 }

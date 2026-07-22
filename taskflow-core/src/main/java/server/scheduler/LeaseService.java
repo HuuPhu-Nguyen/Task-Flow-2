@@ -67,6 +67,10 @@ final class LeaseService {
                         "task_timeout",
                         now
                 );
+                if (!failure.handled()) {
+                    recordDurableFailure(job, failure, jobsToFail);
+                    continue;
+                }
                 events.error("task_timeout", events.fields(
                         "job_id", job.getJobId(),
                         "task_id", task.getTaskId(),
@@ -122,6 +126,13 @@ final class LeaseService {
                 "lease_expired",
                 now
         );
+        if (!failure.handled()) {
+            return LeaseExpiryResult.handled(
+                    failure.storageFailed()
+                            ? persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
+                            : null
+            );
+        }
         events.error("task_lease_expired", events.fields(
                 "job_id", job.getJobId(),
                 "task_id", task.getTaskId(),
@@ -131,11 +142,6 @@ final class LeaseService {
                 "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
         ));
 
-        if (!failure.persisted()) {
-            return LeaseExpiryResult.handled(
-                    persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
-            );
-        }
         if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
             return LeaseExpiryResult.handled(
                     "Task " + task.getTaskId() + " lease expired before completion."
@@ -177,6 +183,7 @@ final class LeaseService {
                         occurredAt
                 );
                 if (!failure.handled()) {
+                    recordDurableFailure(job, failure, jobsToFail);
                     continue;
                 }
                 if (failure.outcome() == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
@@ -214,15 +221,21 @@ final class LeaseService {
                                                     AttemptService.FailureResult failure,
                                                     Map<String, String> jobsToFail,
                                                     String terminalSuffix) {
-        if (!failure.persisted()) {
-            jobsToFail.putIfAbsent(
-                    job.getJobId(),
-                    persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
-            );
-        } else if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
+        if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
             jobsToFail.putIfAbsent(
                     job.getJobId(),
                     "Task " + task.getTaskId() + terminalSuffix
+            );
+        }
+    }
+
+    private void recordDurableFailure(EmbarrassinglyParallelJob<?, ?> job,
+                                      AttemptService.FailureResult failure,
+                                      Map<String, String> jobsToFail) {
+        if (failure.storageFailed()) {
+            jobsToFail.putIfAbsent(
+                    job.getJobId(),
+                    persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
             );
         }
     }

@@ -162,6 +162,36 @@ nodes may enable the requester role, executor role, or both.
   with attempt 2 / assignment Y, acknowledge X as stale without mutation, and
   prove that only Y commits.
 
+## Durable-First Transition Projection
+
+- Assignment creation, failed-attempt retry release, terminal task failure,
+  job completion/failure, and final-result outbox creation return a typed
+  `COMMITTED`, `ALREADY_APPLIED`, `STALE_STATE`, `UNKNOWN_ENTITY`, or
+  `STORAGE_FAILURE` disposition. Successful task results use their equivalent
+  specialized commit enum.
+- Each path decides its desired transition, attempts the conditional SQLite
+  transaction, and only then updates `TaskUnit`, active-job indexes,
+  participant capacity, metrics, or outbound delivery. Exact
+  `ALREADY_APPLIED` replay may install the matching projection; stale state is
+  classified and preserved.
+- Failed-attempt writes match task ID, `ASSIGNED`, attempt number, assignment
+  UUID, and participant ID and atomically close the exact `RUNNING` audit row.
+  A write failure leaves the task assigned and retains participant capacity.
+- Job failure atomically terminalizes every remaining task, closes running
+  attempts, and changes the job from `RUNNING` to `FAILED`. Projection then
+  releases every affected participant slot exactly once.
+- Direct-output J1/J2 commits before final-result delivery. A terminal write
+  failure retains the pending active job and suppresses delivery; after commit,
+  bounded delivery exhaustion removes only the already-terminal projection.
+- RabbitMQ J1/J2 additionally commits the final `JOB_RESULT` outbox row in the
+  terminal transaction. Outbox insertion failure rolls back task, attempt, and
+  job changes and leaves the active projection available for retry. An exact
+  `ALREADY_APPLIED` replay reloads the original durable assignment/final-result
+  outbox row instead of inventing a new envelope.
+- Restart recovery hydrates status, retry count, assignment generation and UUID,
+  participant, lease, and committed result payload from SQLite. It does not use
+  pre-crash scheduler memory as authority.
+
 ## Task State Machine
 
 The complete [task and job state machine](STATE_MACHINE.md) assigns a stable ID
@@ -233,10 +263,11 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 
 - A job is **successful** only when all tasks complete.
 - A job is **failed** when any task reaches terminal `FAILED`.
-- On job failure, non-terminal remaining tasks are persisted as failed in DB for consistent historical state.
+- On job failure, non-terminal remaining tasks and the job terminal edge commit
+  atomically before their in-memory failure/capacity projection.
 - For non-outbox outputs, final `JOB_RESULT` delivery is retried when the requester cannot be reached or the output transport reports failure.
 - Non-outbox final result delivery is bounded by `jobResultMaxDeliveryAttempts` / `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`.
-- If non-outbox final result delivery is exhausted, the scheduler removes the job from active memory, logs `job_result_delivery_abandoned`, and persists the job as failed so it does not remain pending forever.
+- If non-outbox final result delivery is exhausted, the scheduler removes the already-terminal job from active memory and logs `job_result_delivery_abandoned`; it does not rewrite a completed job as failed.
 - RabbitMQ with SQLite persistence commits the terminal job state and final `JOB_RESULT` outbox row together; failed publishes remain pending for replay instead of using the bounded non-outbox delivery counter.
 
 ## Result Ownership
@@ -244,7 +275,7 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - Job submissions carry a per-job requester token.
 - Job submissions may also carry a requester public key and Ed25519 signature. The JavaFX submitter and command-line submit paths sign submissions.
 - The coordinator persists only the token hash and requester public key, not the raw token or private key.
-- `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends an in-memory pending terminal result, reports an active job as still running, or reconstructs a completed persisted result.
+- `JOB_RESULT_REQUEST` must include the matching requester token before the coordinator resends a durably terminal in-memory pending result, reports an active or terminal-write-deferred job as still running, or reconstructs a completed persisted result.
 - Jobs submitted with a requester public key are identity-bound: result requests must include the same public key and a valid signature over the request fields.
 - Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
@@ -277,10 +308,10 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - Coordinator startup rebuilds resumable `RUNNING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks only when their complete persisted identity has an unexpired lease, releases expired assignments with a `lease_expired` attempt reason, and releases incomplete legacy assignments with an inspectable restart reason.
 - Legacy or otherwise non-resumable `RUNNING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
-- After startup, non-outbox assignment must be persisted before dispatching work to an executor participant. For RabbitMQ outbox assignment, the scheduler installs the identity returned by the committed SQLite transaction and publishes its returned outbox row; repeated or concurrent creation calls for a no-longer-`PENDING` task create neither a new generation nor a second outbox row.
-- If retry or task-failure persistence fails after the current legacy in-memory-first failure path changes state, the scheduler fails the job with a terminal `JOB_RESULT` and attempts to persist terminal task/job state. Successful completion is different: SQLite decides first, storage failure leaves the in-memory task assigned, and broker ingress requeues the result.
-- For non-outbox outputs, final job-status persistence happens after final result delivery. For RabbitMQ with SQLite persistence, terminal job status and the final `JOB_RESULT` outbox row are committed together before immediate publish/replay. If a non-outbox terminal write fails after delivery, the scheduler removes the job from active memory and logs `job_terminal_persistence_degraded` with the failed operation and policy.
-- `JOB_RESULT_REQUEST` can resend an in-memory pending terminal result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
+- After startup, non-outbox assignment commits before task/capacity projection and dispatch. For RabbitMQ outbox assignment, the scheduler installs the identity returned by the committed SQLite transaction and publishes its returned outbox row; repeated or concurrent creation calls for a no-longer-`PENDING` task create neither a new generation nor a second outbox row.
+- Retry release and terminal task failure commit the exact current assignment generation and its attempt-audit outcome before changing task state, participant capacity, retry/failure metrics, or redispatch eligibility. Storage failure preserves the assigned projection; an ensuing job-failure decision must itself commit before terminal projection.
+- For non-outbox outputs, terminal job state commits before final-result delivery. For RabbitMQ with SQLite persistence, terminal task/job state and the final `JOB_RESULT` outbox row commit together before immediate publish/replay. Any terminal/outbox write failure keeps the active pending-completion projection and sends no final result until retry commits.
+- `JOB_RESULT_REQUEST` can resend a durably terminal in-memory pending result or reconstruct a completed persisted `JOB_RESULT` when the requester token matches, any required requester identity signature is valid, and every task result snapshot exists. A pending completion whose terminal write has not committed is reported as still running. Reconstructed completed results include the schema-v6 semantic final payload when it was persisted, plus the compatibility ordered task-result list.
 - Failed jobs and completed jobs with missing result snapshots are not reconstructed as successful persisted results.
 - PostgreSQL/Flyway is not implemented. `docs/RECOVERY_SCOPE.md` records the SQLite lease behavior and keeps PostgreSQL/Flyway deferred until there is a concrete external database requirement.
 

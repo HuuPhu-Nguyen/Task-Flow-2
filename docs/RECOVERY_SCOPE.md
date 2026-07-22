@@ -12,7 +12,10 @@ Current startup recovery can rebuild resumable `RUNNING` jobs from persisted job
 and task snapshots, restore completed task results when result payload snapshots
 exist, preserve assigned tasks whose complete assignment identities have not
 expired, release expired or incomplete legacy assignments to `PENDING`, and mark
-otherwise non-resumable running jobs failed. Durable attempt rows exist in
+otherwise non-resumable running jobs failed. Hydration reconstructs task status,
+retry count, last assignment generation, current assignment UUID/participant,
+lease metadata, and committed result payload from SQLite rather than from any
+pre-crash scheduler object. Durable attempt rows exist in
 SQLite schema version 7, task leases exist in SQLite schema version 8,
 coordinator RabbitMQ broker outbox rows exist in SQLite schema version 9, and
 current assignment generation plus audit identity/lease fields exist in schema
@@ -64,9 +67,11 @@ Covered behavior:
 - Successful completion conditionally matches task ID, `ASSIGNED` state,
   attempt number, assignment ID, and participant ID, then closes only that
   exact running attempt in the same SQLite transaction before memory changes.
-- Timeout and peer-disconnect release close the current attempt and preserve
-  retry count.
-- Processor failure records a failed attempt.
+- Runtime retry release, timeout, peer disconnect, lease expiry, dispatch
+  failure, and terminal failure conditionally match the same complete
+  assignment tuple and close that exact attempt before task/capacity projection.
+  Retry-policy failures store the decided retry count; dispatch and startup
+  releases preserve it.
 - Stale or duplicate task results do not mutate a closed or superseded attempt.
 - Startup recovery preserves completed attempt rows and resumes retryable work
   without inventing false successes; assigned tasks with expired leases close

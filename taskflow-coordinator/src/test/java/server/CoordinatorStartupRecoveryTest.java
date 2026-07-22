@@ -355,7 +355,7 @@ class CoordinatorStartupRecoveryTest {
     }
 
     @Test
-    void sqliteRestartRecoveryDoesNotResetPersistedAssignmentGeneration() throws Exception {
+    void sqliteRestartRecoveryReconstructsCommittedRetryProjectionAndGeneration() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-generation-restart.db");
         String jobId = "job-generation-restart";
         String taskId = "task-job-generation-restart-0";
@@ -378,13 +378,19 @@ class CoordinatorStartupRecoveryTest {
                     7,
                     ASSIGNMENT_ID
             ));
-            assertTrue(db.markTaskRetried(
-                    taskId,
-                    1,
-                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
-                    "processor_failure",
-                    175L
-            ));
+            assertEquals(
+                    JobStateStore.DurableTransitionOutcome.COMMITTED,
+                    db.commitAssignedTaskFailure(
+                            taskId,
+                            7,
+                            ASSIGNMENT_ID,
+                            "peer-old",
+                            1,
+                            JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                            "processor_failure",
+                            175L
+                    )
+            );
         }
 
         AssignmentIdentity replacement;
@@ -393,13 +399,21 @@ class CoordinatorStartupRecoveryTest {
                     reopened.loadRunningJobsForResume().getFirst().tasks().getFirst();
             assertEquals("PENDING", persisted.status());
             assertEquals(7, persisted.attemptNumber());
+            assertEquals(1, persisted.retryCount());
             assertNull(persisted.assignmentId());
+            assertEquals("", persisted.leaseOwnerId());
+            assertEquals(0L, persisted.leaseExpiresAt());
 
             CoordinatorStartupRecovery.RecoveryResult recovered =
                     CoordinatorStartupRecovery.recoverPersistedJobs(reopened, 300L);
             assertTrue(recovered.successful());
             TaskUnit<?> task = recovered.resumedJobs().getFirst().getTasks().get(taskId);
+            assertEquals(TaskUnit.TaskStatus.PENDING, task.getStatus());
             assertEquals(7, task.getAttemptNumber());
+            assertEquals(1, task.getRetryCount());
+            assertTrue(task.getAssignmentIdentity().isEmpty());
+            assertEquals("", task.getLeaseOwnerId());
+            assertEquals(0L, task.getLeaseExpiresAtMillis());
 
             assertTrue(task.markAssigned("peer-new", 400L, "COORDINATOR_new", 900L));
             replacement = task.getAssignmentIdentity().orElseThrow();

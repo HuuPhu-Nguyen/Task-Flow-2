@@ -32,6 +32,44 @@ final class SchedulerPersistence {
         return false;
     }
 
+    JobStateStore.DurableTransitionOutcome record(
+            String operation,
+            String jobId,
+            String taskId,
+            JobStateStore.DurableTransitionOutcome outcome) {
+        JobStateStore.DurableTransitionOutcome normalized = outcome == null
+                ? JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE
+                : outcome;
+        if (normalized == JobStateStore.DurableTransitionOutcome.COMMITTED) {
+            return normalized;
+        }
+        if (normalized == JobStateStore.DurableTransitionOutcome.ALREADY_APPLIED) {
+            events.info("scheduler_durable_transition_replayed", events.fields(
+                    "operation", operation,
+                    "job_id", jobId,
+                    "task_id", taskId,
+                    "outcome", normalized
+            ));
+            return normalized;
+        }
+        if (normalized == JobStateStore.DurableTransitionOutcome.STALE_STATE) {
+            events.info("scheduler_durable_transition_rejected", events.fields(
+                    "operation", operation,
+                    "job_id", jobId,
+                    "task_id", taskId,
+                    "outcome", normalized
+            ));
+            return normalized;
+        }
+        events.error("scheduler_persistence_failed", events.fields(
+                "operation", operation,
+                "job_id", jobId,
+                "task_id", taskId,
+                "outcome", normalized
+        ));
+        return normalized;
+    }
+
     String failureReason(String operation) {
         return "Persistence write failed during " + operation + ".";
     }

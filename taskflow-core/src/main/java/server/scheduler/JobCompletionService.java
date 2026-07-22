@@ -5,19 +5,21 @@ import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
+import server.registry.PeerInfo;
+import server.registry.PeerRegistry;
 import server.runtime.TaskFlowClock;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 /** Owns J1/J2 aggregation, result delivery, terminal persistence, and cleanup. */
 final class JobCompletionService {
     private static final long RESULT_DELIVERY_RETRY_INTERVAL_MILLIS = 1_000L;
 
     private final SchedulerState state;
+    private final PeerRegistry registry;
     private final SchedulerPersistence persistence;
     private final SchedulerOutput output;
     private final SchedulerConfig config;
@@ -28,6 +30,7 @@ final class JobCompletionService {
     private final Map<String, PendingJobCompletion> pendingCompletions = new LinkedHashMap<>();
 
     JobCompletionService(SchedulerState state,
+                         PeerRegistry registry,
                          SchedulerPersistence persistence,
                          SchedulerOutput output,
                          SchedulerConfig config,
@@ -36,6 +39,7 @@ final class JobCompletionService {
                          SchedulerOutboxService outbox,
                          SchedulerEventLog events) {
         this.state = state;
+        this.registry = registry;
         this.persistence = persistence;
         this.output = output;
         this.config = config;
@@ -51,7 +55,9 @@ final class JobCompletionService {
 
     JobResultMessage pendingResponse(String jobId) {
         PendingJobCompletion completion = pendingCompletions.get(jobId);
-        return completion == null ? null : completion.response;
+        return completion == null || !completion.durableTerminal
+                ? null
+                : completion.response;
     }
 
     void failJob(EmbarrassinglyParallelJob<?, ?> job, String reason) {
@@ -91,12 +97,28 @@ final class JobCompletionService {
             return;
         }
         completion.lastAttemptAtMillis = now;
-        completion.attempts++;
 
         if (outbox.available()) {
+            completion.attempts++;
             tryDeliverJobResultThroughOutbox(completion);
             return;
         }
+
+        if (!completion.durableTerminal) {
+            JobStateStore.DurableTransitionOutcome outcome = persistTerminalState(completion, now);
+            if (!outcome.projectionAllowed()) {
+                events.error("job_terminal_persistence_deferred", events.fields(
+                        "job_id", completion.job.getJobId(),
+                        "success", completion.success,
+                        "outcome", outcome
+                ));
+                return;
+            }
+            completion.durableTerminal = true;
+            projectTerminalState(completion);
+        }
+
+        completion.attempts++;
 
         try {
             boolean sent = output.sendJobResult(completion.job.getRequesterNodeId(), completion.response);
@@ -125,28 +147,37 @@ final class JobCompletionService {
     }
 
     private void tryDeliverJobResultThroughOutbox(PendingJobCompletion completion) {
-        Optional<BrokerOutboxStore.OutboxRecord> outboxRecord = persistJobCompletionOutbox(completion);
-        if (outboxRecord.isEmpty()) {
+        BrokerOutboxStore.OutboxCommit outboxCommit = persistJobCompletionOutbox(completion);
+        JobStateStore.DurableTransitionOutcome durableOutcome = persistence.record(
+                completion.success
+                        ? "markJobCompletedAndEnqueueBrokerOutbox"
+                        : "markJobFailedAndEnqueueBrokerOutbox",
+                completion.job.getJobId(),
+                "",
+                outboxCommit.outcome()
+        );
+        if (!durableOutcome.projectionAllowed() || outboxCommit.outboxRecord() == null) {
             events.error("job_result_delivery_deferred", events.fields(
                     "job_id", completion.job.getJobId(),
                     "requester_id", completion.job.getRequesterNodeId(),
                     "attempt", completion.attempts,
-                    "reason", "broker_outbox_persistence_failed"
+                    "reason", "broker_outbox_persistence_failed",
+                    "outcome", durableOutcome
             ));
-            abandonIfResultDeliveryExhausted(completion, "broker_outbox_persistence_failed");
             return;
         }
 
-        boolean published = outbox.publish(outboxRecord.get());
-        finalizeJobCompletionAfterOutbox(completion, outboxRecord.get(), published);
+        projectTerminalState(completion);
+        boolean published = outbox.publish(outboxCommit.outboxRecord());
+        finalizeJobCompletionAfterOutbox(completion, outboxCommit.outboxRecord(), published);
     }
 
-    private Optional<BrokerOutboxStore.OutboxRecord> persistJobCompletionOutbox(
+    private BrokerOutboxStore.OutboxCommit persistJobCompletionOutbox(
             PendingJobCompletion completion) {
         BrokerOutboxStore outboxStore = outbox.store();
         BrokerOutboxPublisher outboxPublisher = outbox.publisher();
         if (outboxStore == null || outboxPublisher == null) {
-            return Optional.empty();
+            return failedOutboxCommit();
         }
 
         BrokerOutboxStore.OutboxMessage outboxMessage;
@@ -161,36 +192,60 @@ final class JobCompletionService {
                     "route", "JOB_RESULT",
                     "error", e.getMessage()
             ));
-            return Optional.empty();
+            return failedOutboxCommit();
         }
 
         if (completion.success) {
-            return outboxStore.markJobCompletedAndEnqueueBrokerOutbox(
+            return normalizeOutboxCommit(outboxStore.commitJobCompletedAndEnqueueBrokerOutbox(
                     completion.job.getJobId(),
                     completion.response.getResultPayload(),
                     outboxMessage
-            );
+            ));
         }
-        return outboxStore.markJobFailedAndEnqueueBrokerOutbox(
+        return normalizeOutboxCommit(outboxStore.commitJobFailedAndEnqueueBrokerOutbox(
                 completion.job.getJobId(),
-                taskFailureUpdatesForJobFailure(completion),
+                brokerTaskFailureUpdatesForJobFailure(completion),
                 outboxMessage
+        ));
+    }
+
+    private static BrokerOutboxStore.OutboxCommit normalizeOutboxCommit(
+            BrokerOutboxStore.OutboxCommit commit) {
+        return commit == null ? failedOutboxCommit() : commit;
+    }
+
+    private static BrokerOutboxStore.OutboxCommit failedOutboxCommit() {
+        return new BrokerOutboxStore.OutboxCommit(
+                JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE,
+                null
         );
     }
 
-    private List<BrokerOutboxStore.TaskFailureUpdate> taskFailureUpdatesForJobFailure(
+    private List<BrokerOutboxStore.TaskFailureUpdate> brokerTaskFailureUpdatesForJobFailure(
+            PendingJobCompletion completion) {
+        return taskFailureUpdatesForJobFailure(completion).stream()
+                .map(update -> new BrokerOutboxStore.TaskFailureUpdate(
+                        update.taskId(),
+                        update.outcome(),
+                        update.failureReason(),
+                        update.finishedAt()
+                ))
+                .toList();
+    }
+
+    private List<JobStateStore.TaskFailureUpdate> taskFailureUpdatesForJobFailure(
             PendingJobCompletion completion) {
         long failedAt = clock.nowEpochMillis();
         String reason = completion.reason == null || completion.reason.isBlank()
                 ? "job_failed"
                 : completion.reason;
-        List<BrokerOutboxStore.TaskFailureUpdate> updates = new ArrayList<>();
+        List<JobStateStore.TaskFailureUpdate> updates = new ArrayList<>();
         for (TaskUnit<?> task : completion.job.getTasks().values()) {
             if (task.getStatus() == TaskUnit.TaskStatus.COMPLETED
                     || task.getStatus() == TaskUnit.TaskStatus.FAILED) {
                 continue;
             }
-            updates.add(new BrokerOutboxStore.TaskFailureUpdate(
+            updates.add(new JobStateStore.TaskFailureUpdate(
                     task.getTaskId(),
                     JobStateStore.TaskAttemptOutcome.JOB_FAILED,
                     reason,
@@ -223,38 +278,7 @@ final class JobCompletionService {
         }
 
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
-        boolean persisted = true;
-        JobStateStore store = persistence.store();
-        if (store != null) {
-            long failedAt = clock.nowEpochMillis();
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
-                        && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
-                    persisted &= persistence.record(
-                            "markTaskFailed",
-                            job.getJobId(),
-                            task.getTaskId(),
-                            store.markTaskFailed(
-                                    task.getTaskId(),
-                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
-                                    "result_delivery_abandoned",
-                                    failedAt
-                            )
-                    );
-                }
-            }
-            persisted &= persistence.record(
-                    "markJobFailed",
-                    job.getJobId(),
-                    "",
-                    store.markJobFailed(job.getJobId())
-            );
-        }
-
         removeCompletion(job.getJobId());
-        if (!persisted) {
-            logTerminalPersistenceDegraded(job, "markJobFailed", "result_delivery_abandoned");
-        }
 
         events.error("job_result_delivery_abandoned", events.fields(
                 "job_id", job.getJobId(),
@@ -267,55 +291,7 @@ final class JobCompletionService {
 
     private void finalizeJobCompletion(PendingJobCompletion completion) {
         EmbarrassinglyParallelJob<?, ?> job = completion.job;
-        boolean persisted = true;
-        JobStateStore store = persistence.store();
-        if (!completion.success && store != null) {
-            long failedAt = clock.nowEpochMillis();
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                if (task.getStatus() != TaskUnit.TaskStatus.COMPLETED
-                        && task.getStatus() != TaskUnit.TaskStatus.FAILED) {
-                    persisted &= persistence.record(
-                            "markTaskFailed",
-                            job.getJobId(),
-                            task.getTaskId(),
-                            store.markTaskFailed(
-                                    task.getTaskId(),
-                                    JobStateStore.TaskAttemptOutcome.JOB_FAILED,
-                                    completion.reason == null || completion.reason.isBlank()
-                                            ? "job_failed"
-                                            : completion.reason,
-                                    failedAt
-                            )
-                    );
-                }
-            }
-        }
-
         removeCompletion(job.getJobId());
-        if (store != null) {
-            if (completion.success) {
-                persisted &= persistence.record(
-                        "markJobCompleted",
-                        job.getJobId(),
-                        "",
-                        store.markJobCompleted(job.getJobId(), completion.response.getResultPayload())
-                );
-            } else {
-                persisted &= persistence.record(
-                        "markJobFailed",
-                        job.getJobId(),
-                        "",
-                        store.markJobFailed(job.getJobId())
-                );
-            }
-        }
-        if (!persisted) {
-            logTerminalPersistenceDegraded(
-                    job,
-                    completion.success ? "markJobCompleted" : "markJobFailed",
-                    "result_delivered"
-            );
-        }
 
         events.info("job_completed", events.fields(
                 "job_id", job.getJobId(),
@@ -324,6 +300,46 @@ final class JobCompletionService {
                 "result_count", completion.response.getResultPayloadList().size()
         ));
         logFailureIfPresent(completion);
+    }
+
+    private JobStateStore.DurableTransitionOutcome persistTerminalState(
+            PendingJobCompletion completion,
+            long completedAt) {
+        JobStateStore store = persistence.store();
+        if (store == null) {
+            return JobStateStore.DurableTransitionOutcome.COMMITTED;
+        }
+        String operation = completion.success ? "commitJobCompleted" : "commitJobFailed";
+        JobStateStore.DurableTransitionOutcome outcome = completion.success
+                ? store.commitJobCompleted(
+                        completion.job.getJobId(),
+                        completion.response.getResultPayload(),
+                        completedAt
+                )
+                : store.commitJobFailed(
+                        completion.job.getJobId(),
+                        taskFailureUpdatesForJobFailure(completion),
+                        completedAt
+                );
+        return persistence.record(operation, completion.job.getJobId(), "", outcome);
+    }
+
+    private void projectTerminalState(PendingJobCompletion completion) {
+        if (completion.terminalProjectionApplied) {
+            return;
+        }
+        if (!completion.success) {
+            for (TaskUnit<?> task : completion.job.getTasks().values()) {
+                task.projectCommittedJobFailure().ifPresent(peerId -> {
+                    PeerInfo peer = registry.get(peerId);
+                    if (peer != null) {
+                        peer.decrementTasks();
+                        registry.updateMetricsSnapshot(peerId);
+                    }
+                });
+            }
+        }
+        completion.terminalProjectionApplied = true;
     }
 
     private void removeCompletion(String jobId) {
@@ -342,16 +358,6 @@ final class JobCompletionService {
         }
     }
 
-    private void logTerminalPersistenceDegraded(EmbarrassinglyParallelJob<?, ?> job,
-                                                String operation,
-                                                String policy) {
-        events.error("job_terminal_persistence_degraded", events.fields(
-                "operation", operation,
-                "job_id", job.getJobId(),
-                "policy", policy
-        ));
-    }
-
     private static List<Object> compatibilityResults(EmbarrassinglyParallelJob<?, ?> job,
                                                      Object finalPayload) {
         if (finalPayload instanceof List<?> list) {
@@ -367,6 +373,8 @@ final class JobCompletionService {
         private final String reason;
         private long lastAttemptAtMillis;
         private int attempts;
+        private boolean durableTerminal;
+        private boolean terminalProjectionApplied;
 
         private PendingJobCompletion(EmbarrassinglyParallelJob<?, ?> job,
                                      JobResultMessage response,

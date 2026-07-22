@@ -41,6 +41,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import transport.TransportRoute;
 import transport.TransportAcknowledgement;
 
@@ -444,6 +445,8 @@ class TaskSchedulerPersistenceTest {
             assertEquals("Persistence write failed during markTaskAssigned.", result.getErrorMessage());
             assertNull(output.task());
             assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(0, scheduler.getMetricsSnapshot().assignmentGenerationsTotal());
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
             assertEquals(List.of(
                     "insertJobWithTasks:job-assignment-persistence-failure:TEST_TASK:requester-1:1:"
                             + "task-job-assignment-persistence-failure-0",
@@ -451,6 +454,98 @@ class TaskSchedulerPersistenceTest {
                     "markTaskFailed:task-job-assignment-persistence-failure-0",
                     "markJobFailed:job-assignment-persistence-failure"
             ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void dispatchReleaseWriteFailurePreservesAssignmentUntilJobFailureCommits() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(5_000L);
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.failNextTransition("commitAssignedTaskFailure");
+        store.failNextTransition("commitJobFailed");
+        DispatchFailingOutput output = new DispatchFailingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults(),
+                clock,
+                () -> "00000000-0000-0000-0000-000000000201",
+                "COORDINATOR_test"
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-dispatch-release-write-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-dispatch-release-write-failure", List.of("payload")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitDispatchAttempt());
+            assertTrue(awaitTransitionAttempts(store, "commitJobFailed", 1));
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, scheduler.getMetricsSnapshot().assignmentGenerationsTotal());
+            assertEquals(0, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(1, registry.get("peer-1").getActiveTasks());
+            assertEquals(1, store.transitionAttempts("commitAssignedTaskFailure"));
+
+            clock.advanceMillis(1_000L);
+
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
+            assertEquals(2, store.transitionAttempts("commitJobFailed"));
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void brokerAssignmentOutboxWriteFailureDoesNotProjectAssignment() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(5_000L);
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.failNextAssignmentOutbox();
+        OutboxCapturingOutput output = new OutboxCapturingOutput(true);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults(),
+                clock,
+                () -> "00000000-0000-0000-0000-000000000202",
+                "COORDINATOR_test"
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-assignment-outbox-write-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-assignment-outbox-write-failure", List.of("payload")),
+                    "requester-1"
+            ));
+
+            assertTrue(awaitAssignmentOutboxAttempts(store, 1));
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(1, store.assignmentOutboxAttempts());
+            assertEquals(0, scheduler.getMetricsSnapshot().assignmentGenerationsTotal());
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
+            assertNull(output.awaitTaskAssignmentOutbox(300));
+            List<BrokerOutboxStore.OutboxRecord> records = store.allOutboxRecords();
+            assertEquals(1, records.size());
+            assertEquals(TransportRoute.JOB_RESULT, records.getFirst().message().route());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -512,6 +607,110 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
+    void finalResultOutboxWriteFailureKeepsProjectionUntilRetryCommits() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(5_000L);
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.failNextFinalOutbox();
+        OutboxCapturingOutput output = new OutboxCapturingOutput(true);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                SchedulerConfig.defaults(),
+                clock,
+                () -> "00000000-0000-0000-0000-000000000401",
+                "COORDINATOR_test"
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-final-outbox-write-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-final-outbox-write-failure", List.of("payload")),
+                    "requester-1"
+            ));
+            TaskAssignMessage assignment = output.awaitTaskAssignmentOutbox();
+            assertNotNull(assignment);
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+
+            assertTrue(awaitFinalOutboxAttempts(store, 1));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, store.allOutboxRecords().size());
+
+            clock.advanceMillis(1_000L);
+
+            assertTrue(awaitFinalOutboxAttempts(store, 2));
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            List<BrokerOutboxStore.OutboxRecord> records = store.allOutboxRecords();
+            assertEquals(2, records.size());
+            assertEquals(TransportRoute.TASK_ASSIGN, records.get(0).message().route());
+            assertEquals(TransportRoute.JOB_RESULT, records.get(1).message().route());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void failedFinalOutboxWriteFailurePreservesRemainingAssignmentUntilRetryCommits() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        MutableClock clock = new MutableClock(5_000L);
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.failNextFinalOutbox();
+        OutboxCapturingOutput output = new OutboxCapturingOutput(true);
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
+        AtomicInteger assignmentSequence = new AtomicInteger(500);
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                registry,
+                store,
+                output,
+                config,
+                clock,
+                () -> "00000000-0000-0000-0000-000000000" + assignmentSequence.incrementAndGet(),
+                "COORDINATOR_test"
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-failed-final-outbox-write-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-failed-final-outbox-write", List.of("first", "second")),
+                    "requester-1"
+            ));
+            TaskAssignMessage first = output.awaitTaskAssignmentOutbox();
+            TaskAssignMessage second = output.awaitTaskAssignmentOutbox();
+            assertNotNull(first);
+            assertNotNull(second);
+            assertEquals(2, registry.get("peer-1").getActiveTasks());
+
+            mailbox.put(new MessageEnvelope(failedResult(first, "processor failed"), "peer-1"));
+
+            assertTrue(awaitFinalOutboxAttempts(store, 1));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, registry.get("peer-1").getActiveTasks());
+            assertEquals(2, store.allOutboxRecords().size());
+
+            clock.advanceMillis(1_000L);
+
+            assertTrue(awaitFinalOutboxAttempts(store, 2));
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
+            List<BrokerOutboxStore.OutboxRecord> records = store.allOutboxRecords();
+            assertEquals(3, records.size());
+            assertEquals(TransportRoute.JOB_RESULT, records.getLast().message().route());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void retryPersistenceFailureReturnsFailureInsteadOfRedispatching() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
@@ -538,6 +737,9 @@ class TaskSchedulerPersistenceTest {
             assertFalse(result.isSuccessful());
             assertEquals("Persistence write failed during markTaskRetried.", result.getErrorMessage());
             assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(0, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(0, scheduler.getMetricsSnapshot().failureCount());
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
             assertEquals(List.of(
                     "insertJobWithTasks:job-retry-persistence-failure:TEST_TASK:requester-1:1:"
                             + "task-job-retry-persistence-failure-0",
@@ -546,6 +748,42 @@ class TaskSchedulerPersistenceTest {
                     "markTaskFailed:task-job-retry-persistence-failure-0",
                     "markJobFailed:job-retry-persistence-failure"
             ), store.events());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void terminalTaskWriteFailurePreservesAssignedProjectionAndCapacity() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskFailed");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-terminal-task-write-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-terminal-task-write-failure", List.of("payload")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+
+            mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
+
+            assertTrue(store.awaitEvent("markTaskFailed:task-job-terminal-task-write-failure-0"));
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(0, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(0, scheduler.getMetricsSnapshot().failureCount());
+            assertEquals(0, scheduler.getMetricsSnapshot().terminalFailureCount());
+            assertEquals(1, registry.get("peer-1").getActiveTasks());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -730,7 +968,7 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
-    void finalJobCompletionPersistenceFailureDoesNotKeepJobActiveAfterResultDelivery() throws Exception {
+    void finalJobCompletionPersistenceFailureKeepsProjectionActiveAndSuppressesResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore(true, "markJobCompleted");
@@ -749,12 +987,21 @@ class TaskSchedulerPersistenceTest {
 
             mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
 
-            assertTrue(output.awaitResult());
-            JobResultMessage result = output.result();
-            assertTrue(result.isSuccessful());
-            assertEquals("job-final-persistence-failure", result.getJobId());
             assertTrue(store.awaitEvent("markJobCompleted:job-final-persistence-failure"));
-            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            mailbox.put(new MessageEnvelope(
+                    new JobResultRequestMessage(
+                            "requester-1",
+                            "2026-07-22T00:00:00Z",
+                            "job-final-persistence-failure",
+                            "token-job-final-persistence-failure"
+                    ),
+                    "requester-1"
+            ));
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertEquals("Job is still running.", output.result().getErrorMessage());
             assertEquals(List.of(
                     "insertJobWithTasks:job-final-persistence-failure:TEST_TASK:requester-1:1:"
                             + "task-job-final-persistence-failure-0",
@@ -769,7 +1016,7 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
-    void finalJobFailurePersistenceFailureDoesNotKeepJobActiveAfterResultDelivery() throws Exception {
+    void finalJobFailurePersistenceFailureKeepsProjectionActiveAndSuppressesResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore(true, "markJobFailed");
@@ -789,12 +1036,9 @@ class TaskSchedulerPersistenceTest {
 
             mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
 
-            assertTrue(output.awaitResult());
-            JobResultMessage result = output.result();
-            assertFalse(result.isSuccessful());
-            assertEquals("job-final-failure-persistence-failure", result.getJobId());
             assertTrue(store.awaitEvent("markJobFailed:job-final-failure-persistence-failure"));
-            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
             assertEquals(List.of(
                     "insertJobWithTasks:job-final-failure-persistence-failure:TEST_TASK:requester-1:1:"
                             + "task-job-final-failure-persistence-failure-0",
@@ -809,7 +1053,79 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
-    void undeliverableFinalJobResultIsAbandonedAndPersistedFailed() throws Exception {
+    void oneShotJobCompletionWriteFailureProjectsOnlyAfterRetryCommits() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.failNextTransition("commitJobCompleted");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Thread schedulerThread = new Thread(scheduler, "scheduler-one-shot-completion-write-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-one-shot-completion", List.of("payload")),
+                    "requester-1"
+            ));
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+
+            mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
+
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, store.transitionAttempts("commitJobCompleted"));
+
+            assertTrue(output.awaitResult());
+            assertTrue(output.result().isSuccessful());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(2, store.transitionAttempts("commitJobCompleted"));
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void oneShotJobFailureWriteFailureProjectsOnlyAfterRetryCommits() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        store.failNextTransition("commitJobFailed");
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-one-shot-failure-write-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-one-shot-failure", List.of("payload")),
+                    "requester-1"
+            ));
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+
+            mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
+
+            assertFalse(output.awaitResult(300));
+            assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, store.transitionAttempts("commitJobFailed"));
+
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertTrue(awaitActiveJobs(scheduler, 0));
+            assertEquals(2, store.transitionAttempts("commitJobFailed"));
+            assertEquals(0, registry.get("peer-1").getActiveTasks());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void undeliverableFinalJobResultIsAbandonedAfterDurableCompletion() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore();
@@ -831,14 +1147,14 @@ class TaskSchedulerPersistenceTest {
             mailbox.put(new MessageEnvelope(successResult(assignment, "result"), "peer-1"));
 
             assertTrue(output.awaitResultAttempt());
-            assertTrue(store.awaitJobFailed());
+            assertTrue(store.awaitJobCompleted());
             assertEquals(1, output.resultAttempts());
             assertTrue(awaitActiveJobs(scheduler, 0));
             assertEquals(List.of(
                     "insertJobWithTasks:job-result-abandoned:TEST_TASK:requester-1:1:task-job-result-abandoned-0",
                     "markTaskAssigned:task-job-result-abandoned-0:peer-1",
                     "markTaskCompleted:task-job-result-abandoned-0",
-                    "markJobFailed:job-result-abandoned"
+                    "markJobCompleted:job-result-abandoned"
             ), store.events());
         } finally {
             schedulerThread.interrupt();
@@ -1476,6 +1792,12 @@ class TaskSchedulerPersistenceTest {
         return scheduler.getMetricsSnapshot().activeJobs() == expected;
     }
 
+    private static boolean awaitTransitionAttempts(RecordingJobStateStore store,
+                                                   String operation,
+                                                   int expected) throws InterruptedException {
+        return awaitMonitor(store, () -> store.transitionAttempts(operation) >= expected);
+    }
+
     private static boolean awaitFailedOutboxIds(OutboxRecordingJobStateStore store,
                                                 List<Long> expected) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
@@ -1486,6 +1808,31 @@ class TaskSchedulerPersistenceTest {
             Thread.sleep(10);
         }
         return store.failedOutboxIds().equals(expected);
+    }
+
+    private static boolean awaitFinalOutboxAttempts(OutboxRecordingJobStateStore store,
+                                                     int expected) throws InterruptedException {
+        return awaitMonitor(store, () -> store.finalOutboxAttempts() == expected);
+    }
+
+    private static boolean awaitAssignmentOutboxAttempts(OutboxRecordingJobStateStore store,
+                                                          int expected) throws InterruptedException {
+        return awaitMonitor(store, () -> store.assignmentOutboxAttempts() == expected);
+    }
+
+    private static boolean awaitMonitor(Object monitor,
+                                        BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        synchronized (monitor) {
+            while (!condition.getAsBoolean()) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0L) {
+                    return false;
+                }
+                TimeUnit.NANOSECONDS.timedWait(monitor, remaining);
+            }
+            return true;
+        }
     }
 
     private static class TaskCapturingOutput implements SchedulerOutput {
@@ -1525,6 +1872,20 @@ class TaskSchedulerPersistenceTest {
 
         JobResultMessage result() {
             return result.get();
+        }
+    }
+
+    private static final class DispatchFailingOutput extends TaskCapturingOutput {
+        private final CountDownLatch dispatchAttempted = new CountDownLatch(1);
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) {
+            dispatchAttempted.countDown();
+            throw new IllegalStateException("injected dispatch failure");
+        }
+
+        private boolean awaitDispatchAttempt() throws InterruptedException {
+            return dispatchAttempted.await(2, TimeUnit.SECONDS);
         }
     }
 
@@ -1711,6 +2072,10 @@ class TaskSchedulerPersistenceTest {
         TaskAssignMessage awaitTaskAssignmentOutbox() throws InterruptedException {
             return taskAssignments.poll(2, TimeUnit.SECONDS);
         }
+
+        TaskAssignMessage awaitTaskAssignmentOutbox(long timeoutMillis) throws InterruptedException {
+            return taskAssignments.poll(timeoutMillis, TimeUnit.MILLISECONDS);
+        }
     }
 
     private static class RecordingJobStateStore implements JobStateStore {
@@ -1721,6 +2086,8 @@ class TaskSchedulerPersistenceTest {
         private final CountDownLatch jobCompleted = new CountDownLatch(1);
         private final CountDownLatch jobFailed = new CountDownLatch(1);
         private final java.util.Set<String> existingJobIds = new java.util.LinkedHashSet<>();
+        private final java.util.Set<String> failOnceTransitions = new java.util.LinkedHashSet<>();
+        private final Map<String, Integer> transitionAttempts = new LinkedHashMap<>();
         private final boolean jobStartupPersists;
         private final String failingOperation;
         private JobStateStore.CompletedJobResultState completedResult;
@@ -1874,6 +2241,28 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized DurableTransitionOutcome commitTaskAssignment(String taskId,
+                                                                           String peerId,
+                                                                           long startedAt,
+                                                                           String leaseOwnerId,
+                                                                           long leaseExpiresAt,
+                                                                           int attemptNumber,
+                                                                           String assignmentId) {
+            if (failTransitionOnce("commitTaskAssignment")) {
+                return DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            return JobStateStore.super.commitTaskAssignment(
+                    taskId,
+                    peerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    attemptNumber,
+                    assignmentId
+            );
+        }
+
+        @Override
         public synchronized boolean markTaskCompleted(String taskId, long completedAt, long durationMs) {
             events.add("markTaskCompleted:" + taskId);
             if (succeeds("markTaskCompleted")) {
@@ -1985,6 +2374,31 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized DurableTransitionOutcome commitAssignedTaskFailure(
+                String taskId,
+                int attemptNumber,
+                String assignmentId,
+                String assignedPeerId,
+                int retryCount,
+                TaskAttemptOutcome outcome,
+                String failureReason,
+                long finishedAt) {
+            if (failTransitionOnce("commitAssignedTaskFailure")) {
+                return DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            return JobStateStore.super.commitAssignedTaskFailure(
+                    taskId,
+                    attemptNumber,
+                    assignmentId,
+                    assignedPeerId,
+                    retryCount,
+                    outcome,
+                    failureReason,
+                    finishedAt
+            );
+        }
+
+        @Override
         public synchronized boolean markJobCompleted(String jobId) {
             events.add("markJobCompleted:" + jobId);
             if (succeeds("markJobCompleted")) {
@@ -2008,6 +2422,27 @@ class TaskSchedulerPersistenceTest {
                 return true;
             }
             return false;
+        }
+
+        @Override
+        public synchronized DurableTransitionOutcome commitJobCompleted(String jobId,
+                                                                         Object resultPayload,
+                                                                         long completedAt) {
+            if (failTransitionOnce("commitJobCompleted")) {
+                return DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            return JobStateStore.super.commitJobCompleted(jobId, resultPayload, completedAt);
+        }
+
+        @Override
+        public synchronized DurableTransitionOutcome commitJobFailed(
+                String jobId,
+                Collection<JobStateStore.TaskFailureUpdate> taskFailures,
+                long completedAt) {
+            if (failTransitionOnce("commitJobFailed")) {
+                return DurableTransitionOutcome.STORAGE_FAILURE;
+            }
+            return JobStateStore.super.commitJobFailed(jobId, taskFailures, completedAt);
         }
 
         @Override
@@ -2067,6 +2502,20 @@ class TaskSchedulerPersistenceTest {
 
         synchronized void addExistingJobId(String jobId) {
             existingJobIds.add(jobId);
+        }
+
+        synchronized void failNextTransition(String operation) {
+            failOnceTransitions.add(operation);
+        }
+
+        synchronized int transitionAttempts(String operation) {
+            return transitionAttempts.getOrDefault(operation, 0);
+        }
+
+        private boolean failTransitionOnce(String operation) {
+            transitionAttempts.merge(operation, 1, Integer::sum);
+            notifyAll();
+            return failOnceTransitions.remove(operation);
         }
 
         private boolean succeeds(String operation) {
@@ -2189,6 +2638,10 @@ class TaskSchedulerPersistenceTest {
         private final List<Long> failedOutboxIds = new ArrayList<>();
         private final List<Long> publishedOutboxIds = new ArrayList<>();
         private long nextOutboxId = 1L;
+        private boolean failNextAssignmentOutbox;
+        private int assignmentOutboxAttempts;
+        private boolean failNextFinalOutbox;
+        private int finalOutboxAttempts;
 
         @Override
         public synchronized Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message) {
@@ -2256,6 +2709,32 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized TaskAssignmentCommit commitTaskAssignmentAndEnqueueBrokerOutbox(
+                String taskId,
+                String peerId,
+                long startedAt,
+                String leaseOwnerId,
+                long leaseExpiresAt,
+                String assignmentId,
+            OutboxMessage messageTemplate) {
+            assignmentOutboxAttempts++;
+            notifyAll();
+            if (failNextAssignmentOutbox) {
+                failNextAssignmentOutbox = false;
+                return new TaskAssignmentCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            return BrokerOutboxStore.super.commitTaskAssignmentAndEnqueueBrokerOutbox(
+                    taskId,
+                    peerId,
+                    startedAt,
+                    leaseOwnerId,
+                    leaseExpiresAt,
+                    assignmentId,
+                    messageTemplate
+            );
+        }
+
+        @Override
         public synchronized Optional<OutboxRecord> markJobCompletedAndEnqueueBrokerOutbox(String jobId,
                                                                                          Object resultPayload,
                                                                                          OutboxMessage message) {
@@ -2267,10 +2746,12 @@ class TaskSchedulerPersistenceTest {
 
         @Override
         public synchronized Optional<OutboxRecord> markJobFailedAndEnqueueBrokerOutbox(String jobId,
-                                                                                      Collection<TaskFailureUpdate> taskFailures,
+                                                                                      Collection<BrokerOutboxStore.TaskFailureUpdate> taskFailures,
                                                                                       OutboxMessage message) {
-            Collection<TaskFailureUpdate> updates = taskFailures == null ? List.of() : taskFailures;
-            for (TaskFailureUpdate update : updates) {
+            Collection<BrokerOutboxStore.TaskFailureUpdate> updates = taskFailures == null
+                    ? List.of()
+                    : taskFailures;
+            for (BrokerOutboxStore.TaskFailureUpdate update : updates) {
                 if (!markTaskFailed(update.taskId(), update.outcome(), update.failureReason(), update.finishedAt())) {
                     return Optional.empty();
                 }
@@ -2279,6 +2760,42 @@ class TaskSchedulerPersistenceTest {
                 return Optional.empty();
             }
             return enqueueBrokerOutbox(message);
+        }
+
+        @Override
+        public synchronized OutboxCommit commitJobCompletedAndEnqueueBrokerOutbox(
+                String jobId,
+                Object resultPayload,
+                OutboxMessage message) {
+            finalOutboxAttempts++;
+            notifyAll();
+            if (failNextFinalOutbox) {
+                failNextFinalOutbox = false;
+                return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            return BrokerOutboxStore.super.commitJobCompletedAndEnqueueBrokerOutbox(
+                    jobId,
+                    resultPayload,
+                    message
+            );
+        }
+
+        @Override
+        public synchronized OutboxCommit commitJobFailedAndEnqueueBrokerOutbox(
+                String jobId,
+                Collection<BrokerOutboxStore.TaskFailureUpdate> taskFailures,
+                OutboxMessage message) {
+            finalOutboxAttempts++;
+            notifyAll();
+            if (failNextFinalOutbox) {
+                failNextFinalOutbox = false;
+                return new OutboxCommit(DurableTransitionOutcome.STORAGE_FAILURE, null);
+            }
+            return BrokerOutboxStore.super.commitJobFailedAndEnqueueBrokerOutbox(
+                    jobId,
+                    taskFailures,
+                    message
+            );
         }
 
         @Override
@@ -2311,6 +2828,22 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<Long> publishedOutboxIds() {
             return List.copyOf(publishedOutboxIds);
+        }
+
+        synchronized void failNextFinalOutbox() {
+            failNextFinalOutbox = true;
+        }
+
+        synchronized void failNextAssignmentOutbox() {
+            failNextAssignmentOutbox = true;
+        }
+
+        synchronized int assignmentOutboxAttempts() {
+            return assignmentOutboxAttempts;
+        }
+
+        synchronized int finalOutboxAttempts() {
+            return finalOutboxAttempts;
         }
     }
 
