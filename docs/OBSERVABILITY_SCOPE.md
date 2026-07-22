@@ -19,9 +19,14 @@ metrics.
 Queue pressure and scheduler health:
 
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`,
-  `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `success_count`,
-  `failure_count`, `duplicate_result_count`, `stale_result_count`,
-  `unknown_result_count`, and `result_storage_failure_count`.
+  `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `failure_count`,
+  `taskflow_task_results_committed_total`,
+  `taskflow_task_results_stale_total`,
+  `taskflow_task_results_duplicate_total`,
+  `taskflow_assignment_generations_total`, `unknown_result_count`, and
+  `result_storage_failure_count`. The four `taskflow_*_total` fields are
+  monotonic process-lifetime counters with stable names; they are log fields,
+  not an exported metrics-backend contract.
 - Coordinator `status summary`, `status jobs`, `status peers`, `status outbox`,
   `status queues`, and `status dlq` commands report persisted job/task state,
   retry and lease counts, last-known peers, pending coordinator outbox rows,
@@ -48,16 +53,26 @@ Job lifecycle:
 
 Task assignment, retry, and failure:
 
-- `task_assigned` records assignment ownership with `job_id`, `task_id`,
-  `peer_id`, and `dispatch_latency_ms`. RabbitMQ outbox assignments also include
-  the database-committed `assignment_attempt`, `assignment_id`, `outbox_id`, and
-  immediate `outbox_published` outcome.
-- `task_completed` records SQLite-committed successful task results with
-  `attempt_number`, `assignment_id`, `commit_outcome`, and `duration_ms`.
-- `task_result_not_committed` records duplicate, stale, unknown-task, and
-  storage-failure dispositions with the complete reported assignment identity.
-  Duplicate/stale/unknown broker results are acknowledged; storage failure is
-  requeued by the scheduler's processing-failure path.
+- `task_assignment_created` records each newly created assignment generation.
+  RabbitMQ outbox assignments also include `outbox_id` and the immediate
+  `outbox_published` outcome; direct assignments include the same committed
+  identity before the send attempt.
+- `task_result_committed` records the one authoritative successful result after
+  the SQLite commit decision has been applied to scheduler memory.
+- `task_result_stale_rejected` records an obsolete assignment generation that
+  the authoritative store rejected, including the same-participant ABA case.
+- `task_result_duplicate_ignored` records a repeated result for an assignment
+  whose authoritative result was already committed. It is intentionally
+  distinct from stale-assignment rejection.
+- Each of those four events carries the complete correlation tuple as
+  `job_id`, `task_id`, `attempt_number`, `assignment_id`, and `worker_id`.
+  These are the structured-log spellings of the protocol/domain fields
+  `jobId`, `taskId`, `attemptNumber`, `assignmentId`, and `workerId`; `workerId`
+  identifies the participant while it acts in the executor role.
+- `task_result_not_committed` is retained only for unknown-task and
+  storage-failure dispositions, also with the complete correlation tuple.
+  Duplicate, stale, and unknown broker results are acknowledged; storage
+  failure is requeued by the scheduler's processing-failure path.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
   attempts with `retry_count` and `terminal_failure`.
 - `task_lease_expired` records assigned work whose persisted lease expired
@@ -149,7 +164,9 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 Current observability is log-based plus command-line status inspection.
 Operators can grep logs for structured events or run the coordinator status
 command against SQLite/RabbitMQ state, but TaskFlow does not aggregate those
-events into a metrics backend or provide stable dashboard contracts.
+events into a metrics backend or provide exporter or dashboard contracts. The
+stable fencing-counter names above do not have high-cardinality labels or
+metric exemplars; assignment correlation remains on structured log events.
 
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and
@@ -176,7 +193,8 @@ tracks is implemented and needs promoted operational visibility:
 
 Before adding a metrics exporter, define:
 
-- metric names, units, and label cardinality;
+- exporter mappings, units, and bounded label cardinality for the existing
+  fencing counters, plus names for any newly promoted metrics;
 - which log events remain canonical and which become metrics;
 - promoted lease and attempt-history metric contracts;
 - outbox and DLQ state transitions for RabbitMQ metrics;

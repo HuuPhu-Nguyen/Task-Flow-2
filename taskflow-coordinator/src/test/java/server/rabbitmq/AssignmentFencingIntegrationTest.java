@@ -1,7 +1,12 @@
 package server.rabbitmq;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
@@ -22,6 +27,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,6 +56,14 @@ class AssignmentFencingIntegrationTest {
             registry.register(PEER_ID, peer);
             CapturingOutput output = new CapturingOutput();
             TaskScheduler scheduler = new TaskScheduler(mailbox, registry, db, output, config);
+            Logger schedulerLogger = (Logger) LoggerFactory.getLogger(TaskScheduler.class);
+            Level previousLogLevel = schedulerLogger.getLevel();
+            boolean previousAdditive = schedulerLogger.isAdditive();
+            schedulerLogger.setLevel(Level.INFO);
+            schedulerLogger.setAdditive(false);
+            ThreadSafeListAppender logAppender = new ThreadSafeListAppender();
+            logAppender.start();
+            schedulerLogger.addAppender(logAppender);
             Thread schedulerThread = new Thread(scheduler, "same-worker-aba-integration-test-scheduler");
             schedulerThread.start();
 
@@ -57,6 +71,7 @@ class AssignmentFencingIntegrationTest {
                 mailbox.put(new MessageEnvelope(jobSubmit(jobId), PEER_ID));
                 TaskAssignMessage first = output.awaitAssignment("attempt 1 / assignment X");
                 assertEquals(1, first.getAttemptNumber());
+                assertTraceEvent(logAppender, "task_assignment_created", first);
 
                 RecordingAcknowledgement failedAttemptAcknowledgement = new RecordingAcknowledgement();
                 mailbox.put(new MessageEnvelope(
@@ -70,6 +85,7 @@ class AssignmentFencingIntegrationTest {
                 assertEquals(first.getTaskId(), current.getTaskId());
                 assertEquals(2, current.getAttemptNumber());
                 assertNotEquals(first.getAssignmentId(), current.getAssignmentId());
+                assertTraceEvent(logAppender, "task_assignment_created", current);
 
                 DatabaseManager.TaskRecord beforeStale = persistedTask(db, jobId);
                 SchedulerMetrics.Snapshot metricsBeforeStale = scheduler.getMetricsSnapshot();
@@ -103,6 +119,12 @@ class AssignmentFencingIntegrationTest {
                 assertEquals(metricsBeforeStale.failureCount(), metricsAfterStale.failureCount());
                 assertEquals(metricsBeforeStale.retryCount(), metricsAfterStale.retryCount());
                 assertEquals(metricsBeforeStale.staleResultCount() + 1, metricsAfterStale.staleResultCount());
+                assertEquals(
+                        metricsBeforeStale.taskResultsStaleTotal() + 1,
+                        metricsAfterStale.taskResultsStaleTotal()
+                );
+                assertTraceEvent(logAppender, "task_result_stale_rejected", first);
+                assertNoTraceEvent(logAppender, "task_result_duplicate_ignored", first);
                 assertEquals(activeTasksBeforeStale, peer.getActiveTasks());
                 assertEquals(completedTasksBeforeStale, peer.getCompletedTasks());
                 assertEquals(failedTasksBeforeStale, peer.getFailedTasks());
@@ -151,12 +173,62 @@ class AssignmentFencingIntegrationTest {
                 );
                 assertEquals(1, scheduler.getMetricsSnapshot().successCount());
                 assertEquals(1, scheduler.getMetricsSnapshot().staleResultCount());
+                assertEquals(1, scheduler.getMetricsSnapshot().taskResultsCommittedTotal());
+                assertEquals(1, scheduler.getMetricsSnapshot().taskResultsStaleTotal());
+                assertEquals(0, scheduler.getMetricsSnapshot().taskResultsDuplicateTotal());
+                assertEquals(2, scheduler.getMetricsSnapshot().assignmentGenerationsTotal());
+                assertTraceEvent(logAppender, "task_result_committed", current);
                 assertEquals(0, peer.getActiveTasks());
                 assertEquals(1L, peer.getCompletedTasks());
             } finally {
                 schedulerThread.interrupt();
                 schedulerThread.join(2_000);
+                schedulerLogger.detachAppender(logAppender);
+                logAppender.stop();
+                schedulerLogger.setLevel(previousLogLevel);
+                schedulerLogger.setAdditive(previousAdditive);
             }
+        }
+    }
+
+    private static void assertTraceEvent(ThreadSafeListAppender appender,
+                                         String eventName,
+                                         TaskAssignMessage assignment) {
+        String event = appender.events().stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("event=" + eventName))
+                .filter(message -> message.contains("assignment_id=" + assignment.getAssignmentId()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "Missing " + eventName + " for assignment " + assignment.getAssignmentId()
+                ));
+        assertTrue(event.contains("job_id=" + assignment.getJobId()));
+        assertTrue(event.contains("task_id=" + assignment.getTaskId()));
+        assertTrue(event.contains("attempt_number=" + assignment.getAttemptNumber()));
+        assertTrue(event.contains("assignment_id=" + assignment.getAssignmentId()));
+        assertTrue(event.contains("worker_id=" + PEER_ID));
+    }
+
+    private static void assertNoTraceEvent(ThreadSafeListAppender appender,
+                                           String eventName,
+                                           TaskAssignMessage assignment) {
+        assertTrue(appender.events().stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .noneMatch(message -> message.contains("event=" + eventName)
+                        && message.contains("assignment_id=" + assignment.getAssignmentId())));
+    }
+
+    private static final class ThreadSafeListAppender extends AppenderBase<ILoggingEvent> {
+        private final CopyOnWriteArrayList<ILoggingEvent> events = new CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            event.prepareForDeferredProcessing();
+            events.add(event);
+        }
+
+        private List<ILoggingEvent> events() {
+            return events;
         }
     }
 

@@ -263,9 +263,21 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 - `dispatch_latency_ms` (average from task becoming pending to assignment)
 - `retry_count`
 - `task_success_rate` (successful attempts / total attempts)
-- `success_count`
 - `failure_count`
+- `taskflow_task_results_committed_total`
+- `taskflow_task_results_stale_total`
+- `taskflow_task_results_duplicate_total`
+- `taskflow_assignment_generations_total`
 
-These metrics are intended for immediate operational visibility in Phase 1 and as migration inputs to dedicated metrics backends in later phases.
+The four `taskflow_*_total` counters distinguish authoritative result commits,
+obsolete-generation rejection, duplicate-completion suppression, and assignment
+generation creation. The matching structured events are
+`task_result_committed`, `task_result_stale_rejected`,
+`task_result_duplicate_ignored`, and `task_assignment_created`. Each event
+carries `job_id`, `task_id`, `attempt_number`, `assignment_id`, and `worker_id`,
+the log-field spellings of the protocol correlation tuple. These metrics are
+intended for immediate log-based operational visibility in Phase 1 and as
+migration inputs to a dedicated metrics backend in later phases; no exporter or
+high-cardinality metric exemplar is implemented.
 
 `docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox visibility, or promoted DLQ workflow metrics need operational visibility.

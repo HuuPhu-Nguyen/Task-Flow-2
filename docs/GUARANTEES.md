@@ -244,6 +244,14 @@ planned.
 | <a id="e-i9"></a> I9 | Planned | None; object storage is not implemented on the current baseline. | `ObjectStoreIntegrityContractTest#corruptPayloadIsRejectedBeforeProcessorInvocation` (TF-0504) | Add object references, streaming length/digest verification, and corrupt-byte tests. |
 | <a id="e-i10"></a> I10 | Partial | [`TaskSchedulerFailureTest#taskFailureAtRetryLimitReturnsFailedJobResult`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java); [`TaskSchedulerFailureTest#taskTimeoutAtRetryLimitReturnsFailedJobResult`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerFailureTest.java); [`CoordinatorStartupRecoveryTest#releasesExpiredAssignedLeasesOnResume`](../taskflow-coordinator/src/test/java/server/CoordinatorStartupRecoveryTest.java) | `CorrectnessChaosExperiment#allJobsTerminateAfterFailuresStop` (TF-0706) | Prove eventual terminality after coordinator, broker, executor, redelivery, and delay faults stop. |
 
+Fencing observability evidence is explicit as well:
+[`SchedulerMetricsTest#exposesExactFencingMetricNamesAndTypedCounters`](../taskflow-core/src/test/java/server/scheduler/SchedulerMetricsTest.java)
+fixes the four counter names, while
+[`AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit`](../taskflow-coordinator/src/test/java/server/rabbitmq/AssignmentFencingIntegrationTest.java)
+and
+[`TaskSchedulerPersistenceTest#duplicateResultIsAcknowledgedWithoutRequeueOrSecondSuccess`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
+prove the complete trace tuple and distinct stale-versus-duplicate events.
+
 Detailed current implementation behavior remains documented in
 [Current execution behavior](EXECUTION_GUARANTEES.md). That document is
 subordinate to this contract and must not promote a partial/planned evidence row

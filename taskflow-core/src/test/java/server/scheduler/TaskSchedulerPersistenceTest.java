@@ -1,6 +1,11 @@
 package server.scheduler;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
@@ -29,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -621,6 +627,14 @@ class TaskSchedulerPersistenceTest {
         RecordingJobStateStore store = new RecordingJobStateStore();
         MultiTaskOutput output = new MultiTaskOutput();
         TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, SchedulerConfig.defaults());
+        Logger schedulerLogger = (Logger) LoggerFactory.getLogger(TaskScheduler.class);
+        Level previousLogLevel = schedulerLogger.getLevel();
+        boolean previousAdditive = schedulerLogger.isAdditive();
+        schedulerLogger.setLevel(Level.INFO);
+        schedulerLogger.setAdditive(false);
+        ThreadSafeListAppender logAppender = new ThreadSafeListAppender();
+        logAppender.start();
+        schedulerLogger.addAppender(logAppender);
         Thread schedulerThread = new Thread(scheduler, "scheduler-duplicate-result-disposition-test");
         schedulerThread.start();
 
@@ -655,6 +669,12 @@ class TaskSchedulerPersistenceTest {
             assertEquals(0, duplicateAcknowledgement.rejectCount());
             assertEquals(1, scheduler.getMetricsSnapshot().successCount());
             assertEquals(1, scheduler.getMetricsSnapshot().duplicateResultCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().taskResultsCommittedTotal());
+            assertEquals(1, scheduler.getMetricsSnapshot().taskResultsDuplicateTotal());
+            assertEquals(0, scheduler.getMetricsSnapshot().taskResultsStaleTotal());
+            assertTraceEvent(logAppender, "task_result_duplicate_ignored", first, "peer-1");
+            assertNoTraceEvent(logAppender, "task_result_stale_rejected", first);
+            assertFencingMetricNames(logAppender);
             PeerInfo peer = registry.get("peer-1");
             assertNotNull(peer);
             assertEquals(1L, peer.getCompletedTasks());
@@ -666,6 +686,10 @@ class TaskSchedulerPersistenceTest {
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
+            schedulerLogger.detachAppender(logAppender);
+            logAppender.stop();
+            schedulerLogger.setLevel(previousLogLevel);
+            schedulerLogger.setAdditive(previousAdditive);
         }
     }
 
@@ -1349,6 +1373,60 @@ class TaskSchedulerPersistenceTest {
                 false,
                 error
         );
+    }
+
+    private static void assertTraceEvent(ThreadSafeListAppender appender,
+                                         String eventName,
+                                         TaskAssignMessage assignment,
+                                         String workerId) {
+        String event = appender.events().stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("event=" + eventName))
+                .filter(message -> message.contains("assignment_id=" + assignment.getAssignmentId()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "Missing " + eventName + " for assignment " + assignment.getAssignmentId()
+                ));
+        assertTrue(event.contains("job_id=" + assignment.getJobId()));
+        assertTrue(event.contains("task_id=" + assignment.getTaskId()));
+        assertTrue(event.contains("attempt_number=" + assignment.getAttemptNumber()));
+        assertTrue(event.contains("assignment_id=" + assignment.getAssignmentId()));
+        assertTrue(event.contains("worker_id=" + workerId));
+    }
+
+    private static void assertNoTraceEvent(ThreadSafeListAppender appender,
+                                           String eventName,
+                                           TaskAssignMessage assignment) {
+        assertTrue(appender.events().stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .noneMatch(message -> message.contains("event=" + eventName)
+                        && message.contains("assignment_id=" + assignment.getAssignmentId())));
+    }
+
+    private static void assertFencingMetricNames(ThreadSafeListAppender appender) {
+        String event = appender.events().stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(message -> message.contains("event=scheduler_metrics"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Missing scheduler_metrics event."));
+        assertTrue(event.contains(SchedulerMetrics.TASK_RESULTS_COMMITTED_TOTAL_NAME + "="));
+        assertTrue(event.contains(SchedulerMetrics.TASK_RESULTS_STALE_TOTAL_NAME + "="));
+        assertTrue(event.contains(SchedulerMetrics.TASK_RESULTS_DUPLICATE_TOTAL_NAME + "="));
+        assertTrue(event.contains(SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME + "="));
+    }
+
+    private static final class ThreadSafeListAppender extends AppenderBase<ILoggingEvent> {
+        private final CopyOnWriteArrayList<ILoggingEvent> events = new CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            event.prepareForDeferredProcessing();
+            events.add(event);
+        }
+
+        private List<ILoggingEvent> events() {
+            return events;
+        }
     }
 
     private static boolean awaitActiveJobs(TaskScheduler scheduler, long expected) throws InterruptedException {

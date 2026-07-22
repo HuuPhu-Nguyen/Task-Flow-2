@@ -599,13 +599,14 @@ public class TaskScheduler implements Runnable {
             );
         }
 
+        metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.COMMITTED);
         onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
-        logInfoEvent("task_completed", fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "peer_id", envelope.fromNodeId(),
-                "attempt_number", result.getAttemptNumber(),
-                "assignment_id", result.getAssignmentId(),
+        logInfoEvent("task_result_committed", assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                result.getAttemptNumber(),
+                result.getAssignmentId(),
+                envelope.fromNodeId(),
                 "commit_outcome", commitOutcome,
                 "duration_ms", Math.max(0L, completion.durationMs())
         ));
@@ -778,8 +779,16 @@ public class TaskScheduler implements Runnable {
                 return;
             }
         }
-        metrics.recordDispatch(dispatchLatencyMs);
+        metrics.recordAssignmentGeneration(dispatchLatencyMs);
         peer.incrementTasks();
+        logInfoEvent("task_assignment_created", assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                assignmentIdentity.attemptNumber(),
+                assignmentIdentity.assignmentId(),
+                peer.getNodeId(),
+                "dispatch_latency_ms", dispatchLatencyMs
+        ));
         try {
             output.sendTask(peer, message);
         } catch (Exception e) {
@@ -808,12 +817,6 @@ public class TaskScheduler implements Runnable {
             ));
             return;
         }
-        logInfoEvent("task_assigned", fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "peer_id", peer.getNodeId(),
-                "dispatch_latency_ms", dispatchLatencyMs
-        ));
     }
 
     private void assignWithBrokerOutbox(EmbarrassinglyParallelJob<?, ?> job,
@@ -856,17 +859,17 @@ public class TaskScheduler implements Runnable {
             return;
         }
 
-        metrics.recordDispatch(dispatchLatencyMs);
+        metrics.recordAssignmentGeneration(dispatchLatencyMs);
         peer.incrementTasks();
         BrokerOutboxStore.OutboxRecord outboxRecord = committed.outboxRecord();
         boolean published = publishBrokerOutboxRecord(outboxStore, outboxPublisher, outboxRecord);
-        logInfoEvent("task_assigned", fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "peer_id", peer.getNodeId(),
+        logInfoEvent("task_assignment_created", assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                committed.identity().attemptNumber(),
+                committed.identity().assignmentId(),
+                peer.getNodeId(),
                 "dispatch_latency_ms", dispatchLatencyMs,
-                "assignment_attempt", committed.identity().attemptNumber(),
-                "assignment_id", committed.identity().assignmentId(),
                 "outbox_id", outboxRecord.outboxId(),
                 "outbox_published", published
         ));
@@ -948,7 +951,6 @@ public class TaskScheduler implements Runnable {
     }
 
     private void onAttemptSuccess(String peerId, long durationMs) {
-        metrics.recordAttemptSuccess();
         PeerInfo peer = registry.get(peerId);
         if (peer == null) {
             return;
@@ -974,19 +976,21 @@ public class TaskScheduler implements Runnable {
                                             String reportingPeerId,
                                             TaskResultMessage result,
                                             JobStateStore.ResultCommitOutcome outcome) {
-        Map<String, Object> eventFields = fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "peer_id", reportingPeerId,
-                "attempt_number", result.getAttemptNumber(),
-                "assignment_id", result.getAssignmentId(),
+        Map<String, Object> eventFields = assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                result.getAttemptNumber(),
+                result.getAssignmentId(),
+                reportingPeerId,
                 "commit_outcome", outcome
         );
-        if (outcome == JobStateStore.ResultCommitOutcome.STORAGE_FAILURE
-                || outcome == JobStateStore.ResultCommitOutcome.UNKNOWN_TASK) {
-            logErrorEvent("task_result_not_committed", eventFields);
-        } else {
-            logInfoEvent("task_result_not_committed", eventFields);
+        switch (outcome) {
+            case STALE_ASSIGNMENT -> logInfoEvent("task_result_stale_rejected", eventFields);
+            case DUPLICATE_ALREADY_COMPLETED -> logInfoEvent("task_result_duplicate_ignored", eventFields);
+            case UNKNOWN_TASK, STORAGE_FAILURE -> logErrorEvent("task_result_not_committed", eventFields);
+            case COMMITTED -> throw new IllegalArgumentException(
+                    "Committed results must use the task_result_committed event."
+            );
         }
     }
 
@@ -1487,10 +1491,15 @@ public class TaskScheduler implements Runnable {
                 "dispatch_latency_ms", String.format(Locale.US, "%.2f", snapshot.avgDispatchLatencyMs()),
                 "retry_count", snapshot.retryCount(),
                 "task_success_rate", String.format(Locale.US, "%.4f", snapshot.taskSuccessRate()),
-                "success_count", snapshot.successCount(),
                 "failure_count", snapshot.failureCount(),
-                "duplicate_result_count", snapshot.duplicateResultCount(),
-                "stale_result_count", snapshot.staleResultCount(),
+                SchedulerMetrics.TASK_RESULTS_COMMITTED_TOTAL_NAME,
+                snapshot.taskResultsCommittedTotal(),
+                SchedulerMetrics.TASK_RESULTS_STALE_TOTAL_NAME,
+                snapshot.taskResultsStaleTotal(),
+                SchedulerMetrics.TASK_RESULTS_DUPLICATE_TOTAL_NAME,
+                snapshot.taskResultsDuplicateTotal(),
+                SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME,
+                snapshot.assignmentGenerationsTotal(),
                 "unknown_result_count", snapshot.unknownResultCount(),
                 "result_storage_failure_count", snapshot.resultStorageFailureCount()
         ));
@@ -1503,6 +1512,30 @@ public class TaskScheduler implements Runnable {
         Map<String, Object> out = new LinkedHashMap<>();
         for (int i = 0; i < keyValues.length; i += 2) {
             out.put(String.valueOf(keyValues[i]), keyValues[i + 1]);
+        }
+        return out;
+    }
+
+    private Map<String, Object> assignmentTraceFields(String jobId,
+                                                      String taskId,
+                                                      int attemptNumber,
+                                                      String assignmentId,
+                                                      String workerId,
+                                                      Object... additionalFields) {
+        Map<String, Object> out = fields(
+                "job_id", jobId,
+                "task_id", taskId,
+                "attempt_number", attemptNumber,
+                "assignment_id", assignmentId,
+                "worker_id", workerId
+        );
+        Map<String, Object> extras = fields(additionalFields);
+        for (Map.Entry<String, Object> entry : extras.entrySet()) {
+            if (out.putIfAbsent(entry.getKey(), entry.getValue()) != null) {
+                throw new IllegalArgumentException(
+                        "Assignment trace field cannot be replaced: " + entry.getKey()
+                );
+            }
         }
         return out;
     }

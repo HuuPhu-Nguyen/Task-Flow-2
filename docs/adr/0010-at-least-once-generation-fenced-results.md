@@ -85,11 +85,15 @@ transport nor a different database invalidates generation fencing by itself.
   database predicate for same-participant reassignment.
 - `TaskSchedulerPersistenceTest#staleResultIsAcknowledgedWithoutRequeueOrSuccessAccounting`
   and `#duplicateResultIsAcknowledgedWithoutRequeueOrSecondSuccess` prove the
-  scheduler disposition and metric boundary.
+  scheduler disposition and metric boundary. `SchedulerMetricsTest` fixes the
+  four public fencing-counter names, while the duplicate-result test proves the
+  full correlation tuple and the distinct duplicate event.
 - `AssignmentFencingIntegrationTest#sameWorkerAbaResultCannotCommit` and
   `RabbitMqCoordinatorLiveIntegrationTest#sameWorkerAbaResultCannotCommitThroughLiveBroker`
   prove the complete same-participant scenario through the scheduler, SQLite,
-  and live RabbitMQ.
+  and live RabbitMQ. The deterministic integration test also proves distinct
+  assignment-created, stale-rejected, and committed events with the complete
+  correlation tuple.
 - `WorkerAssignmentDeduplicationIntegrationTest#duplicateRunningAssignmentExecutesOnce`
   and `#duplicateCompletedAssignmentRepublishesSameResult` prove the RabbitMQ
   executor acknowledgement/execution/publication decisions; engine tests prove
