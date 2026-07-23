@@ -2,6 +2,7 @@ package server.scheduler;
 
 import protocol.TaskResultMessage;
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
 import server.model.MessageEnvelope;
@@ -178,6 +179,11 @@ final class ResultCommitService {
                 result.getAssignmentId(),
                 completedAt
         );
+        AssignmentIdentity activeAssignment = decision.accepted()
+                ? task.getAssignmentIdentity().orElseThrow(() -> new IllegalStateException(
+                        "Accepted task result is missing assignment identity for " + task.getTaskId()
+                ))
+                : null;
         EmbarrassinglyParallelJob.PreparedTaskResult preparedResult = decision.accepted()
                 ? job.prepareTaskResult(result.getResultPayload())
                 : null;
@@ -234,6 +240,7 @@ final class ResultCommitService {
                     "Authoritative result commit could not be applied to scheduler memory."
             );
         }
+        state.indexClosedAssignment(task, activeAssignment);
 
         metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.COMMITTED);
         attempts.onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());

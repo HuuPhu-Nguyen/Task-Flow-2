@@ -3,6 +3,7 @@ package server.scheduler;
 import protocol.JobResultMessage;
 import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
+import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
 import server.registry.PeerInfo;
@@ -330,13 +331,15 @@ final class JobCompletionService {
         }
         if (!completion.success) {
             for (TaskUnit<?> task : completion.job.getTasks().values()) {
+                AssignmentIdentity closedIdentity = task.getAssignmentIdentity().orElse(null);
                 task.projectCommittedJobFailure().ifPresent(peerId -> {
                     PeerInfo peer = registry.get(peerId);
                     if (peer != null) {
-                        peer.decrementTasks();
+                        registry.releaseTaskCapacity(peer);
                         registry.updateMetricsSnapshot(peerId);
                     }
                 });
+                state.indexTerminalTask(task, closedIdentity);
             }
         }
         completion.terminalProjectionApplied = true;

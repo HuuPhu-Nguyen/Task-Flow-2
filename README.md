@@ -196,7 +196,13 @@ focused services behind an orchestration-only `SchedulerLoop`.
 - `LeaseService` / `AttemptService`: timeout, lease, participant-loss, retry, and terminal-attempt effects
 - `JobCompletionService`: aggregation, terminal state, final-result delivery/outbox intent, and cleanup
 - `RecoveryService`: installation of reconciled persisted projections
+- `SchedulerWorkloadIndex`: per-job pending deques, runnable-job rotation, exact assignment deadlines, and worker-assignment discovery
 - `SchedulerLoop`: mailbox, timer, dispatch, completion-retry, and metrics orchestration only
+
+Normal timeout, lease, dispatch, and participant-loss work is index-driven
+rather than a scan of every task in every active job. The index lifecycle,
+cardinality bounds, exact stale-deadline fencing, complexity, and 100,000-task
+profile are documented in [`docs/SCHEDULER.md`](docs/SCHEDULER.md).
 
 **Load Balancing**
 - Default maximum of **3 concurrent tasks per executor participant**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`

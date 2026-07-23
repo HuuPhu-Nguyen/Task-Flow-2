@@ -88,7 +88,7 @@ public class TaskScheduler implements Runnable {
             throw new IllegalArgumentException("leaseOwnerId is required");
         }
 
-        SchedulerState state = new SchedulerState();
+        SchedulerState state = new SchedulerState(effectiveConfig);
         this.metrics = new SchedulerMetrics();
         SchedulerEventLog events = new SchedulerEventLog();
         SchedulerPersistence persistence = new SchedulerPersistence(db, events);
@@ -110,7 +110,7 @@ public class TaskScheduler implements Runnable {
                 outbox,
                 events
         );
-        AttemptService attempts = new AttemptService(checkedRegistry, persistence, metrics);
+        AttemptService attempts = new AttemptService(state, checkedRegistry, persistence, metrics);
         LeaseService leases = new LeaseService(
                 state,
                 effectiveConfig,

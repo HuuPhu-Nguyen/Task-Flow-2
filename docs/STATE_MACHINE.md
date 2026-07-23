@@ -139,6 +139,7 @@ when durable state and memory disagree.
 | Boundary | Runtime owner |
 |---|---|
 | Mailbox polling and cycle order | `SchedulerLoop`; it delegates message, timeout, lease, dispatch, completion-retry, and metric stages through an in-memory-testable `Work` seam. |
+| Work discovery | `SchedulerWorkloadIndex` owns post-commit pending/runnable/deadline/worker-assignment projections; every popped deadline is revalidated against the exact current assignment before a transition decision. |
 | J0/T0 submission and broker disposition | `SchedulerMessageService` validates/routes envelopes and adds an active projection only after startup persistence succeeds. |
 | T1 assignment | `AssignmentService` owns placement, assignment preparation, transactional assignment/outbox creation, non-outbox dispatch, and projection installation. |
 | T2 successful result | `ResultCommitService` owns the typed SQLite commit outcome and applies the result projection only after `COMMITTED`. |

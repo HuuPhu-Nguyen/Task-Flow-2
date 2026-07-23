@@ -1,6 +1,7 @@
 package server.registry;
 
 import java.util.Collection;
+import java.util.List;
 
 public interface PeerRegistry {
     void register(String nodeId, PeerInfo peer);
@@ -25,4 +26,25 @@ public interface PeerRegistry {
     Collection<PeerInfo> getAllPeers();
 
     PeerInfo get(String nodeId);
+
+    /**
+     * Returns only live peers that support the requested task type and have
+     * scheduler capacity under the supplied limit.
+     */
+    List<PeerInfo> getAvailablePeers(String taskType, int maxTasksPerPeer);
+
+    /**
+     * Projects one already-authoritative assignment into worker capacity.
+     */
+    void reserveTaskCapacity(PeerInfo peer);
+
+    /**
+     * Releases one capacity slot using the exact peer object selected at T1.
+     */
+    void releaseTaskCapacity(PeerInfo peer);
+
+    /**
+     * Releases one capacity slot after a result/failure identified its worker.
+     */
+    void releaseTaskCapacity(String nodeId);
 }

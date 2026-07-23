@@ -13,7 +13,8 @@ import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
 
-import java.util.Comparator;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 
 /** Owns T1 placement, assignment persistence, projection, and outbound intent. */
@@ -61,31 +62,47 @@ final class AssignmentService {
     }
 
     void dispatchPendingTasks() {
-        for (EmbarrassinglyParallelJob<?, ?> job : state.activeJobsSnapshot()) {
+        int jobsToVisit = state.runnableJobCount();
+        for (int jobIndex = 0; jobIndex < jobsToVisit; jobIndex++) {
+            EmbarrassinglyParallelJob<?, ?> job = state.pollRunnableJob();
+            if (job == null) {
+                return;
+            }
             if (!state.hasActiveJob(job.getJobId()) || jobCompletions.isPending(job.getJobId())) {
                 continue;
             }
-            List<PeerInfo> candidates = getAvailablePeers(job.getTaskType());
+            Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(job.getTaskType()));
             if (candidates.isEmpty()) {
+                state.requeueRunnableJob(job.getJobId());
                 continue;
             }
 
-            List<? extends TaskUnit<?>> pending = job.getPendingTasks().stream()
-                    .sorted(Comparator.comparingInt((TaskUnit<?> task) -> task.getRetryCount()).reversed())
-                    .toList();
-
-            for (TaskUnit<?> task : pending) {
-                PeerInfo bestPeer = candidates.stream()
-                        .filter(peer -> peer.getActiveTasks() < config.maxTasksPerPeer())
-                        .findFirst()
-                        .orElse(null);
+            int tasksToVisit = state.pendingTaskCount(job.getJobId());
+            for (int taskIndex = 0; taskIndex < tasksToVisit; taskIndex++) {
+                while (!candidates.isEmpty()
+                        && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
+                    candidates.removeFirst();
+                }
+                PeerInfo bestPeer = candidates.peekFirst();
                 if (bestPeer == null) {
                     break;
                 }
+                TaskUnit<?> task = state.pollPendingTask(job.getJobId());
+                if (task == null) {
+                    break;
+                }
                 assign(job, task, bestPeer);
+                if (task.getStatus() == TaskUnit.TaskStatus.PENDING
+                        && state.hasActiveJob(job.getJobId())
+                        && !jobCompletions.isPending(job.getJobId())) {
+                    state.indexPendingTask(task, true);
+                }
                 if (!state.hasActiveJob(job.getJobId()) || jobCompletions.isPending(job.getJobId())) {
                     break;
                 }
+            }
+            if (state.hasActiveJob(job.getJobId()) && !jobCompletions.isPending(job.getJobId())) {
+                state.requeueRunnableJob(job.getJobId());
             }
         }
     }
@@ -162,8 +179,9 @@ final class AssignmentService {
             return;
         }
 
+        state.indexAssignedTask(task, assignmentIdentity);
         metrics.recordAssignmentGeneration(dispatchLatencyMs);
-        peer.incrementTasks();
+        registry.reserveTaskCapacity(peer);
         events.info("task_assignment_created", events.assignmentTraceFields(
                 job.getJobId(),
                 task.getTaskId(),
@@ -203,7 +221,8 @@ final class AssignmentService {
                 return;
             }
             task.resetToPending();
-            peer.decrementTasks();
+            state.indexClosedAssignment(task, assignmentIdentity);
+            registry.releaseTaskCapacity(peer);
             events.error("task_dispatch_failed", events.fields(
                     "job_id", job.getJobId(),
                     "task_id", task.getTaskId(),
@@ -289,8 +308,9 @@ final class AssignmentService {
             return;
         }
 
+        state.indexAssignedTask(task, committed.identity());
         metrics.recordAssignmentGeneration(dispatchLatencyMs);
-        peer.incrementTasks();
+        registry.reserveTaskCapacity(peer);
         BrokerOutboxStore.OutboxRecord outboxRecord = committed.outboxRecord();
         boolean published = outbox.publish(outboxRecord);
         events.info("task_assignment_created", events.assignmentTraceFields(
@@ -315,11 +335,7 @@ final class AssignmentService {
     private List<PeerInfo> getAvailablePeers(String taskType) {
         // RabbitMQ participants are eligible while present in the live registry;
         // heartbeat timeout removes them before a later dispatch cycle.
-        return registry.getAllPeers().stream()
-                .filter(peer -> peer.supportsTaskType(taskType))
-                .filter(peer -> peer.getActiveTasks() < config.maxTasksPerPeer())
-                .sorted(Comparator.comparingDouble(PeerInfo::getSelectionScore))
-                .toList();
+        return registry.getAvailablePeers(taskType, config.maxTasksPerPeer());
     }
 
     private static boolean durableStorageFailed(JobStateStore.DurableTransitionOutcome outcome) {

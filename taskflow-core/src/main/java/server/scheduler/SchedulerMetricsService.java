@@ -39,9 +39,19 @@ final class SchedulerMetricsService {
         }
         lastMetricsLogAtMillis = now;
         SchedulerMetrics.Snapshot snapshot = metrics.snapshot();
+        SchedulerWorkloadIndex.Snapshot workload = state.workloadSnapshot();
         events.info("scheduler_metrics", events.fields(
                 "queue_depth", snapshot.queueDepth(),
                 "active_jobs", snapshot.activeJobs(),
+                "pending_tasks_indexed", workload.pendingTasks(),
+                "runnable_jobs_indexed", workload.runnableJobs(),
+                "live_assignments_indexed", workload.liveAssignments(),
+                "deadline_entries_indexed", workload.deadlineEntries(),
+                "deadline_head_checks_total", workload.deadlineHeadChecks(),
+                "deadline_entries_popped_total", workload.deadlineEntriesPopped(),
+                "deadline_entries_validated_total", workload.deadlineEntriesValidated(),
+                "deadline_stale_rejected_total", workload.staleDeadlineEntriesRejected(),
+                "deadline_reschedules_total", workload.deadlineReschedules(),
                 "dispatch_latency_ms", String.format(Locale.US, "%.2f", snapshot.avgDispatchLatencyMs()),
                 "retry_count", snapshot.retryCount(),
                 "task_success_rate", String.format(Locale.US, "%.4f", snapshot.taskSuccessRate()),

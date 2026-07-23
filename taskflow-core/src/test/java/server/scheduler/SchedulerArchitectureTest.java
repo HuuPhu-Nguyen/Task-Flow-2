@@ -121,8 +121,18 @@ class SchedulerArchitectureTest {
         );
         assertOrdered(
                 assignment,
+                "task.markAssigned(assignmentIdentity",
+                "state.indexAssignedTask(task, assignmentIdentity)"
+        );
+        assertOrdered(
+                assignment,
                 "store.commitAssignedTaskFailure(",
                 "task.resetToPending()"
+        );
+        assertOrdered(
+                assignment,
+                "task.resetToPending()",
+                "state.indexClosedAssignment(task, assignmentIdentity)"
         );
         assertOrdered(
                 assignment,
@@ -132,9 +142,11 @@ class SchedulerArchitectureTest {
 
         String attempt = read(schedulerRoot, "AttemptService.java");
         assertOrdered(attempt, "persistTaskFailure(", "task.failAttemptBy(");
+        assertOrdered(attempt, "task.failAttemptBy(", "state.indexClosedAssignment(");
 
         String result = read(schedulerRoot, "ResultCommitService.java");
         assertOrdered(result, "store.commitTaskResult(", "job.applyCommittedResult(");
+        assertOrdered(result, "job.applyCommittedResult(", "state.indexClosedAssignment(");
 
         String completion = read(schedulerRoot, "JobCompletionService.java");
         assertOrdered(
@@ -157,6 +169,45 @@ class SchedulerArchitectureTest {
                 "persistJobCompletionOutbox(completion)",
                 "projectTerminalState(completion)"
         );
+    }
+
+    @Test
+    void normalSchedulerMaintenanceUsesIndexesInsteadOfFullTaskOrPeerScans() throws IOException {
+        Path schedulerRoot = schedulerSourceRoot();
+        String assignment = read(schedulerRoot, "AssignmentService.java");
+        assertFalse(assignment.contains("activeJobsSnapshot()"));
+        assertFalse(assignment.contains("getPendingTasks()"));
+        assertFalse(assignment.contains("getAllPeers()"));
+        assertTrue(assignment.contains("pollRunnableJob()"));
+        assertTrue(assignment.contains("pollPendingTask("));
+        assertTrue(assignment.contains("getAvailablePeers(taskType"));
+
+        String leases = read(schedulerRoot, "LeaseService.java");
+        String timeoutStage = between(
+                leases,
+                "void checkTimeouts()",
+                "void checkLeaseExpirations()"
+        );
+        String leaseStage = between(
+                leases,
+                "void checkLeaseExpirations()",
+                "LeaseExpiryResult expireTaskLeaseIfNeeded"
+        );
+        for (String normalStage : List.of(timeoutStage, leaseStage)) {
+            assertFalse(normalStage.contains("activeJobs()"));
+            assertFalse(normalStage.contains("getTasks().values()"));
+        }
+        assertTrue(timeoutStage.contains("pollDueTimeout("));
+        assertTrue(leaseStage.contains("pollDueLeaseExpiry("));
+
+        String peerUnavailableStage = between(
+                leases,
+                "void handlePeerUnavailable",
+                "private void recordTerminalOrPersistenceFailure"
+        );
+        assertFalse(peerUnavailableStage.contains("activeJobs()"));
+        assertFalse(peerUnavailableStage.contains("getTasks().values()"));
+        assertTrue(peerUnavailableStage.contains("currentAssignmentsForWorker("));
     }
 
     private static String read(Path schedulerRoot, String file) throws IOException {

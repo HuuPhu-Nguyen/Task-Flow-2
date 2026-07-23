@@ -139,6 +139,40 @@ class InMemoryPeerRegistryTest {
         assertEquals(250L, metrics.taskDurationEwmaMs());
     }
 
+    @Test
+    void availableCapacityIndexIsKeyedByTaskTypeAndTracksTheConfiguredBoundary() {
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo textPeer = new PeerInfo(
+                "text-peer",
+                server.scheduler.SchedulerConfig.defaults(),
+                List.of("text_analysis")
+        );
+        PeerInfo imagePeer = new PeerInfo(
+                "image-peer",
+                server.scheduler.SchedulerConfig.defaults(),
+                List.of("image_conversion")
+        );
+        registry.register(textPeer.getNodeId(), textPeer);
+        registry.register(imagePeer.getNodeId(), imagePeer);
+
+        assertEquals(List.of(textPeer), registry.getAvailablePeers("TEXT_ANALYSIS", 1));
+        assertEquals(List.of(imagePeer), registry.getAvailablePeers("image_conversion", 1));
+
+        registry.reserveTaskCapacity(textPeer);
+
+        assertEquals(List.of(), registry.getAvailablePeers("text_analysis", 1));
+        assertEquals(List.of(imagePeer), registry.getAvailablePeers("image_conversion", 1));
+
+        registry.releaseTaskCapacity(textPeer);
+
+        assertEquals(List.of(textPeer), registry.getAvailablePeers("text_analysis", 1));
+
+        registry.updateHeartbeat(textPeer.getNodeId(), List.of("video_transcode"));
+
+        assertEquals(List.of(), registry.getAvailablePeers("text_analysis", 1));
+        assertEquals(List.of(textPeer), registry.getAvailablePeers("video_transcode", 1));
+    }
+
     private static final class RecordingPeerRegistryStore implements PeerRegistryStore {
         private final List<PeerRegistryRecord> records = new ArrayList<>();
 

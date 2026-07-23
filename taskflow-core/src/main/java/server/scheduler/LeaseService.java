@@ -10,6 +10,8 @@ import java.util.Map;
 
 /** Owns timeout, lease-expiry, and participant-unavailability transition rules. */
 final class LeaseService {
+    private static final long DEADLINE_RECHECK_MILLIS = SchedulerLoop.DEFAULT_POLL_TIMEOUT_MILLIS;
+
     private final SchedulerState state;
     private final SchedulerConfig config;
     private final TaskFlowClock clock;
@@ -41,47 +43,49 @@ final class LeaseService {
         long now = clock.nowEpochMillis();
         Map<String, String> jobsToFail = new LinkedHashMap<>();
 
-        for (EmbarrassinglyParallelJob<?, ?> job : state.activeJobs()) {
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                if (task.getStatus() != TaskUnit.TaskStatus.ASSIGNED
-                        || task.getAssignmentIdentity().isEmpty()) {
-                    continue;
+        SchedulerState.DeadlineTarget target;
+        while ((target = state.pollDueTimeout(now)) != null) {
+            EmbarrassinglyParallelJob<?, ?> job = target.job();
+            TaskUnit<?> task = target.task();
+            TransitionDecision decision = transitions.taskTimedOut(
+                    task,
+                    config.maxTaskRetries(),
+                    config.taskTimeoutMillis(),
+                    now
+            );
+            if (!decision.accepted()) {
+                if (!rescheduleForLaterCycle(target, now)) {
+                    break;
                 }
-
-                TransitionDecision decision = transitions.taskTimedOut(
-                        task,
-                        config.maxTaskRetries(),
-                        config.taskTimeoutMillis(),
-                        now
-                );
-                if (!decision.accepted()) {
-                    continue;
-                }
-
-                String assignedPeerId = task.getAssignedPeerId();
-                AttemptService.FailureResult failure = attempts.closeFailedAttempt(
-                        task,
-                        assignedPeerId,
-                        decision,
-                        config.maxTaskRetries(),
-                        "task_timeout",
-                        now
-                );
-                if (!failure.handled()) {
-                    recordDurableFailure(job, failure, jobsToFail);
-                    continue;
-                }
-                events.error("task_timeout", events.fields(
-                        "job_id", job.getJobId(),
-                        "task_id", task.getTaskId(),
-                        "assigned_peer_id", assignedPeerId,
-                        "retry_count", task.getRetryCount(),
-                        "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
-                ));
-
-                recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
-                        " exceeded max retries after timeout.");
+                continue;
             }
+
+            String assignedPeerId = task.getAssignedPeerId();
+            AttemptService.FailureResult failure = attempts.closeFailedAttempt(
+                    task,
+                    assignedPeerId,
+                    decision,
+                    config.maxTaskRetries(),
+                    "task_timeout",
+                    now
+            );
+            if (!failure.handled()) {
+                recordDurableFailure(job, failure, jobsToFail);
+                if (!rescheduleForLaterCycle(target, now)) {
+                    break;
+                }
+                continue;
+            }
+            events.error("task_timeout", events.fields(
+                    "job_id", job.getJobId(),
+                    "task_id", task.getTaskId(),
+                    "assigned_peer_id", assignedPeerId,
+                    "retry_count", task.getRetryCount(),
+                    "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
+            ));
+
+            recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
+                    " exceeded max retries after timeout.");
         }
 
         failJobs(jobsToFail);
@@ -91,12 +95,14 @@ final class LeaseService {
         long now = clock.nowEpochMillis();
         Map<String, String> jobsToFail = new LinkedHashMap<>();
 
-        for (EmbarrassinglyParallelJob<?, ?> job : state.activeJobs()) {
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                LeaseExpiryResult result = expireTaskLeaseIfNeeded(job, task, now);
-                if (result.jobFailureReason() != null) {
-                    jobsToFail.putIfAbsent(job.getJobId(), result.jobFailureReason());
-                }
+        SchedulerState.DeadlineTarget target;
+        while ((target = state.pollDueLeaseExpiry(now)) != null) {
+            LeaseExpiryResult result = expireTaskLeaseIfNeeded(target.job(), target.task(), now);
+            if (result.jobFailureReason() != null) {
+                jobsToFail.putIfAbsent(target.job().getJobId(), result.jobFailureReason());
+            }
+            if (!rescheduleForLaterCycle(target, now)) {
+                break;
             }
         }
 
@@ -160,49 +166,43 @@ final class LeaseService {
         int retryScheduled = 0;
         int terminalFailures = 0;
 
-        for (EmbarrassinglyParallelJob<?, ?> job : state.activeJobs()) {
-            for (TaskUnit<?> task : job.getTasks().values()) {
-                if (task.getStatus() != TaskUnit.TaskStatus.ASSIGNED
-                        || !peerId.equals(task.getAssignedPeerId())
-                        || task.getAssignmentIdentity().isEmpty()) {
-                    continue;
-                }
-
-                long occurredAt = clock.nowEpochMillis();
-                TransitionDecision decision = transitions.workerUnavailable(
-                        task,
-                        config.maxTaskRetries(),
-                        occurredAt
-                );
-                AttemptService.FailureResult failure = attempts.closeFailedAttempt(
-                        task,
-                        peerId,
-                        decision,
-                        config.maxTaskRetries(),
-                        normalizedReason,
-                        occurredAt
-                );
-                if (!failure.handled()) {
-                    recordDurableFailure(job, failure, jobsToFail);
-                    continue;
-                }
-                if (failure.outcome() == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
-                    retryScheduled++;
-                } else {
-                    terminalFailures++;
-                }
-
-                events.error("task_peer_unavailable", events.fields(
-                        "job_id", job.getJobId(),
-                        "task_id", task.getTaskId(),
-                        "peer_id", peerId,
-                        "retry_count", task.getRetryCount(),
-                        "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
-                        "reason", normalizedReason
-                ));
-                recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
-                        " exceeded max retries after peer became unavailable.");
+        for (SchedulerState.AssignmentTarget target : state.currentAssignmentsForWorker(peerId)) {
+            EmbarrassinglyParallelJob<?, ?> job = target.job();
+            TaskUnit<?> task = target.task();
+            long occurredAt = clock.nowEpochMillis();
+            TransitionDecision decision = transitions.workerUnavailable(
+                    task,
+                    config.maxTaskRetries(),
+                    occurredAt
+            );
+            AttemptService.FailureResult failure = attempts.closeFailedAttempt(
+                    task,
+                    peerId,
+                    decision,
+                    config.maxTaskRetries(),
+                    normalizedReason,
+                    occurredAt
+            );
+            if (!failure.handled()) {
+                recordDurableFailure(job, failure, jobsToFail);
+                continue;
             }
+            if (failure.outcome() == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
+                retryScheduled++;
+            } else {
+                terminalFailures++;
+            }
+
+            events.error("task_peer_unavailable", events.fields(
+                    "job_id", job.getJobId(),
+                    "task_id", task.getTaskId(),
+                    "peer_id", peerId,
+                    "retry_count", task.getRetryCount(),
+                    "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
+                    "reason", normalizedReason
+            ));
+            recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
+                    " exceeded max retries after peer became unavailable.");
         }
 
         if (retryScheduled > 0 || terminalFailures > 0) {
@@ -247,6 +247,24 @@ final class LeaseService {
                 jobCompletions.failJob(job, entry.getValue());
             }
         }
+    }
+
+    private static long nextDeadlineRecheck(long nowMillis) {
+        return nowMillis >= Long.MAX_VALUE - DEADLINE_RECHECK_MILLIS
+                ? Long.MAX_VALUE
+                : nowMillis + DEADLINE_RECHECK_MILLIS;
+    }
+
+    /**
+     * Re-indexes a still-current assignment after a deferred transition.
+     *
+     * @return {@code false} only when the clock is saturated and the caller must
+     *         stop this pass to avoid immediately polling the same entry forever
+     */
+    private boolean rescheduleForLaterCycle(SchedulerState.DeadlineTarget target, long nowMillis) {
+        long nextCheck = nextDeadlineRecheck(nowMillis);
+        state.rescheduleCurrentDeadline(target, nextCheck);
+        return nextCheck > nowMillis;
     }
 
     record LeaseExpiryResult(boolean handled, String jobFailureReason) {

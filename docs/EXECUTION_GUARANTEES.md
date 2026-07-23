@@ -535,6 +535,15 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 
 - `queue_depth`
 - `active_jobs`
+- `pending_tasks_indexed`
+- `runnable_jobs_indexed`
+- `live_assignments_indexed`
+- `deadline_entries_indexed`
+- `deadline_head_checks_total`
+- `deadline_entries_popped_total`
+- `deadline_entries_validated_total`
+- `deadline_stale_rejected_total`
+- `deadline_reschedules_total`
 - `dispatch_latency_ms` (average from task becoming pending to assignment)
 - `retry_count`
 - `task_success_rate` (successful attempts / total attempts)
@@ -554,5 +563,8 @@ the log-field spellings of the protocol correlation tuple. These metrics are
 intended for immediate log-based operational visibility in Phase 1 and as
 migration inputs to a dedicated metrics backend in later phases; no exporter or
 high-cardinality metric exemplar is implemented.
+
+The workload-index counters and their steady-state complexity are defined in
+[`SCHEDULER.md`](SCHEDULER.md).
 
 `docs/OBSERVABILITY_SCOPE.md` maps the current structured-log events and records that a dedicated metrics backend is deferred until promoted lease/attempt-history dashboards, RabbitMQ outbox visibility, or promoted DLQ workflow metrics need operational visibility.

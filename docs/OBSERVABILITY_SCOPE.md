@@ -19,6 +19,11 @@ metrics.
 Queue pressure and scheduler health:
 
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`,
+  `pending_tasks_indexed`, `runnable_jobs_indexed`,
+  `live_assignments_indexed`, `deadline_entries_indexed`,
+  `deadline_head_checks_total`, `deadline_entries_popped_total`,
+  `deadline_entries_validated_total`, `deadline_stale_rejected_total`,
+  `deadline_reschedules_total`,
   `dispatch_latency_ms`, `retry_count`, `task_success_rate`, `failure_count`,
   `taskflow_task_results_committed_total`,
   `taskflow_task_results_stale_total`,
@@ -26,7 +31,8 @@ Queue pressure and scheduler health:
   `taskflow_assignment_generations_total`, `unknown_result_count`, and
   `result_storage_failure_count`. The four `taskflow_*_total` fields are
   monotonic process-lifetime counters with stable names; they are log fields,
-  not an exported metrics-backend contract.
+  not an exported metrics-backend contract. Workload-index field semantics and
+  complexity are defined in [`SCHEDULER.md`](SCHEDULER.md).
 - Coordinator `status summary`, `status jobs`, `status peers`, `status outbox`,
   `status queues`, and `status dlq` commands report persisted job/task state,
   retry and lease counts, last-known peers, pending coordinator outbox rows,

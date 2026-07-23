@@ -10,13 +10,16 @@ import server.scheduler.transition.TransitionDecision;
 
 /** Executes one reducer-approved failed-attempt projection and persistence effect. */
 final class AttemptService {
+    private final SchedulerState state;
     private final PeerRegistry registry;
     private final SchedulerPersistence persistence;
     private final SchedulerMetrics metrics;
 
-    AttemptService(PeerRegistry registry,
+    AttemptService(SchedulerState state,
+                   PeerRegistry registry,
                    SchedulerPersistence persistence,
                    SchedulerMetrics metrics) {
+        this.state = state;
         this.registry = registry;
         this.persistence = persistence;
         this.metrics = metrics;
@@ -62,6 +65,7 @@ final class AttemptService {
                             + task.getTaskId()
             );
         }
+        state.indexClosedAssignment(task, assignment);
 
         if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
             metrics.recordRetry();
@@ -76,7 +80,7 @@ final class AttemptService {
             return;
         }
         peer.recordTaskSuccess(durationMs);
-        peer.decrementTasks();
+        registry.releaseTaskCapacity(peer);
         registry.updateMetricsSnapshot(workerId);
     }
 
@@ -87,7 +91,7 @@ final class AttemptService {
             return;
         }
         peer.recordTaskFailure();
-        peer.decrementTasks();
+        registry.releaseTaskCapacity(peer);
         registry.updateMetricsSnapshot(workerId);
     }
 
