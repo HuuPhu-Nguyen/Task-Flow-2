@@ -117,6 +117,30 @@ Run the profile proof from the repository root:
 .\mvnw.cmd -pl taskflow-core -am "-Dtest=SchedulerWorkloadIndexTest#profileOneTickWithOneHundredThousandNonDueAssignmentsUsesOnlyDeadlineHeads" "-Dsurefire.failIfNoSpecifiedTests=false" test
 ```
 
+### Reproducible profile record
+
+The profile was recorded on 2026-07-24 with these revisions:
+
+- Baseline `ad7b10c039c175a204c5b8e34f2ac3605d8933fc`: the timeout
+  stage and lease stage each traversed every active job and task. With 100,000
+  assigned tasks, one timeout/lease maintenance pair therefore made 200,000
+  task visits before evaluating the transitions. This is a source-derived
+  operation baseline; that revision did not expose traversal counters.
+- Changed `d157c1ea738b58e0829ea1c0e4a5763b077b2ebb`: the deterministic
+  workload above retained 200,000 deadline entries while the same non-due
+  maintenance pair made two head checks, zero deadline pops, and zero task
+  validations. Maven reported 0.172 seconds for the whole test, including
+  building the index, so that wall-clock value is recorded but is not used as
+  the tick-complexity assertion.
+
+The recording machine used a 14-core/20-thread Intel Core i5-13500HX, 63.7 GiB
+RAM, 64-bit Windows 11 Pro 10.0.26200, and Oracle HotSpot Java 25.0.2. The
+operation-count assertion is the portable result; absolute time will vary by
+machine and JVM. The changed design moves work into `O(log A)` assignment
+deadline insertion/removal and still sorts the compatible-worker snapshot.
+Due-work batch bounds, absolute active-work bounds, and the final per-job
+dispatch quota remain assigned to TF-0402, TF-0405, and TF-0403 respectively.
+
 Additional boundary evidence:
 
 - [`SchedulerWorkloadIndexTest#poppedDeadlineMustMatchExactCurrentAssignmentId`](../taskflow-core/src/test/java/server/scheduler/SchedulerWorkloadIndexTest.java)
