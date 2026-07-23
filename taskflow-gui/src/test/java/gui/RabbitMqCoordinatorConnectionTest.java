@@ -8,6 +8,7 @@ import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.BrokerTransport;
+import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
@@ -95,6 +96,7 @@ class RabbitMqCoordinatorConnectionTest {
         assertTrue(acknowledgement.deferred);
         assertTrue(acknowledgement.acked);
         assertFalse(acknowledgement.requeued);
+        assertEquals(DeliveryDisposition.ACK_SUCCESS, acknowledgement.disposition);
         connection.close();
     }
 
@@ -119,11 +121,12 @@ class RabbitMqCoordinatorConnectionTest {
         assertTrue(acknowledgement.deferred);
         assertTrue(acknowledgement.requeued);
         assertFalse(acknowledgement.acked);
+        assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition);
         connection.close();
     }
 
     @Test
-    void taskExecutionFailureRequeuesAssignment() throws Exception {
+    void deterministicTaskExecutionFailureQuarantinesAssignment() throws Exception {
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         RecordingListener listener = new RecordingListener();
         RabbitMqCoordinatorConnection connection = newConnection(
@@ -140,8 +143,10 @@ class RabbitMqCoordinatorConnectionTest {
         transport.deliverToPeer(TransportRoute.TASK_ASSIGN, taskAssignment("peer-1"), acknowledgement);
 
         assertTrue(acknowledgement.deferred);
-        assertTrue(acknowledgement.requeued);
+        assertTrue(acknowledgement.rejected);
+        assertFalse(acknowledgement.requeued);
         assertFalse(acknowledgement.acked);
+        assertEquals(DeliveryDisposition.QUARANTINE_POISON, acknowledgement.disposition);
         assertEquals(List.of(), transport.published);
         connection.close();
     }
@@ -172,6 +177,7 @@ class RabbitMqCoordinatorConnectionTest {
         assertTrue(acknowledgement.deferred);
         assertTrue(acknowledgement.acked);
         assertFalse(acknowledgement.requeued);
+        assertEquals(DeliveryDisposition.ACK_DUPLICATE_OR_STALE, acknowledgement.disposition);
         assertEquals(List.of(), transport.published);
         connection.close();
     }
@@ -215,6 +221,7 @@ class RabbitMqCoordinatorConnectionTest {
         assertTrue(acknowledgement.deferred);
         assertTrue(acknowledgement.acked);
         assertFalse(acknowledgement.requeued);
+        assertEquals(DeliveryDisposition.ACK_DUPLICATE_OR_STALE, acknowledgement.disposition);
         connection.close();
     }
 
@@ -237,6 +244,7 @@ class RabbitMqCoordinatorConnectionTest {
 
         assertTrue(acknowledgement.acked);
         assertFalse(acknowledgement.deferred);
+        assertEquals(DeliveryDisposition.ACK_DUPLICATE_OR_STALE, acknowledgement.disposition);
         assertNull(workerRuntime.assignedTask.get());
         connection.close();
     }
@@ -266,6 +274,7 @@ class RabbitMqCoordinatorConnectionTest {
 
         assertSame(result, listener.jobResult.get());
         assertTrue(acknowledgement.acked);
+        assertEquals(DeliveryDisposition.ACK_SUCCESS, acknowledgement.disposition);
         connection.close();
     }
 
@@ -289,6 +298,7 @@ class RabbitMqCoordinatorConnectionTest {
                 acknowledgement);
 
         assertTrue(acknowledgement.rejected);
+        assertEquals(DeliveryDisposition.REJECT_INVALID, acknowledgement.disposition);
         connection.close();
     }
 
@@ -438,6 +448,15 @@ class RabbitMqCoordinatorConnectionTest {
         private boolean requeued;
         private boolean rejected;
         private boolean deferred;
+        private DeliveryDisposition disposition;
+
+        @Override
+        public void settle(DeliveryDisposition requestedDisposition) throws Exception {
+            if (disposition == null) {
+                disposition = requestedDisposition;
+            }
+            TransportAcknowledgement.super.settle(requestedDisposition);
+        }
 
         @Override
         public void ack() {

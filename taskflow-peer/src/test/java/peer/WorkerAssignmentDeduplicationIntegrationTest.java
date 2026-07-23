@@ -4,9 +4,11 @@ import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import peer.engine.AssignmentCacheConfig;
 import peer.engine.PeerExecutionEngine;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.BrokerTransport;
+import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
@@ -20,6 +22,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,6 +33,70 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WorkerAssignmentDeduplicationIntegrationTest {
     private static final String PEER_ID = "peer-1";
+
+    @Test
+    void invalidAssignmentRoutePayloadIsRejectedWithoutRetry() throws Exception {
+        PeerExecutionEngine engine = new PeerExecutionEngine(
+                PEER_ID,
+                new AssignmentCacheConfig(8, TimeUnit.MINUTES.toMillis(1))
+        );
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        try {
+            RabbitMqPeerNode.handleTaskAssignment(
+                    PEER_ID,
+                    new RecordingBrokerTransport(),
+                    engine,
+                    new InboundTransportMessage(
+                            TransportRoute.TASK_ASSIGN,
+                            "coordinator",
+                            new PongMessage("coordinator", Instant.EPOCH.toString(), java.util.List.of()),
+                            acknowledgement
+                    )
+            );
+
+            assertTrue(acknowledgement.rejected.get());
+            assertFalse(acknowledgement.requeued.get());
+            assertEquals(DeliveryDisposition.REJECT_INVALID, acknowledgement.disposition.get());
+        } finally {
+            engine.shutdown();
+        }
+    }
+
+    @Test
+    void assignmentIdentityCollisionIsQuarantinedAsDeterministicPoison() throws Exception {
+        PeerExecutionEngine engine = new PeerExecutionEngine(
+                PEER_ID,
+                new AssignmentCacheConfig(8, TimeUnit.MINUTES.toMillis(1))
+        );
+        RecordingBrokerTransport transport = new RecordingBrokerTransport();
+        try {
+            engine.registerProcessor("TEST", task -> "done");
+            TaskAssignMessage original = taskAssignment("task-1");
+            RecordingAcknowledgement originalAck = new RecordingAcknowledgement();
+            RabbitMqPeerNode.handleTaskAssignment(
+                    PEER_ID,
+                    transport,
+                    engine,
+                    delivery(original, originalAck)
+            );
+            assertTrue(originalAck.awaitAck());
+
+            TaskAssignMessage collision = taskAssignment("task-2");
+            RecordingAcknowledgement collisionAck = new RecordingAcknowledgement();
+            RabbitMqPeerNode.handleTaskAssignment(
+                    PEER_ID,
+                    transport,
+                    engine,
+                    delivery(collision, collisionAck)
+            );
+
+            assertTrue(collisionAck.rejected.get());
+            assertFalse(collisionAck.requeued.get());
+            assertEquals(DeliveryDisposition.QUARANTINE_POISON, collisionAck.disposition.get());
+        } finally {
+            engine.shutdown();
+        }
+    }
 
     @Test
     void duplicateRunningAssignmentExecutesOnce() throws Exception {
@@ -72,6 +139,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
             assertTrue(duplicateAck.deferred.get());
             assertFalse(duplicateAck.requeued.get());
             assertFalse(duplicateAck.rejected.get());
+            assertEquals(DeliveryDisposition.ACK_DUPLICATE_OR_STALE, duplicateAck.disposition.get());
             assertFalse(originalAck.awaitAck(100, TimeUnit.MILLISECONDS));
             assertEquals(1, invocations.get());
             assertNull(transport.results.poll(100, TimeUnit.MILLISECONDS));
@@ -82,6 +150,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
             OutboundTransportMessage result = transport.results.poll(2, TimeUnit.SECONDS);
             assertNotNull(result);
             assertEquals(TransportRoute.TASK_RESULT, result.route());
+            assertEquals(DeliveryDisposition.ACK_SUCCESS, originalAck.disposition.get());
             assertEquals(1, invocations.get());
             assertEquals(0, transport.results.size());
         } finally {
@@ -114,6 +183,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
                     delivery(assignment, originalAck)
             );
             assertTrue(originalAck.awaitAck());
+            assertEquals(DeliveryDisposition.ACK_SUCCESS, originalAck.disposition.get());
             OutboundTransportMessage firstPublish = transport.results.poll(2, TimeUnit.SECONDS);
             assertNotNull(firstPublish);
 
@@ -142,6 +212,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
             assertTrue(duplicateAck.deferred.get());
             assertFalse(duplicateAck.requeued.get());
             assertFalse(duplicateAck.rejected.get());
+            assertEquals(DeliveryDisposition.ACK_DUPLICATE_OR_STALE, duplicateAck.disposition.get());
         } finally {
             engine.shutdown();
         }
@@ -204,6 +275,13 @@ class WorkerAssignmentDeduplicationIntegrationTest {
         private final AtomicBoolean deferred = new AtomicBoolean();
         private final AtomicBoolean requeued = new AtomicBoolean();
         private final AtomicBoolean rejected = new AtomicBoolean();
+        private final AtomicReference<DeliveryDisposition> disposition = new AtomicReference<>();
+
+        @Override
+        public void settle(DeliveryDisposition requestedDisposition) throws Exception {
+            disposition.compareAndSet(null, requestedDisposition);
+            TransportAcknowledgement.super.settle(requestedDisposition);
+        }
 
         @Override
         public void ack() {

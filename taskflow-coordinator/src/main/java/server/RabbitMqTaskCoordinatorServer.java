@@ -23,6 +23,7 @@ import server.runtime.UuidAssignmentIdGenerator;
 import server.scheduler.SchedulerConfig;
 import server.scheduler.SchedulerMailbox;
 import server.scheduler.TaskScheduler;
+import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
 import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransport;
@@ -162,9 +163,10 @@ public class RabbitMqTaskCoordinatorServer {
 
     private static void handleHeartbeat(PeerRegistry registry,
                                         SchedulerConfig schedulerConfig,
-                                        InboundTransportMessage delivery) {
+                                        InboundTransportMessage delivery) throws Exception {
         Message message = delivery.message();
         if (!(message instanceof PongMessage pong)) {
+            settle(delivery, DeliveryDisposition.REJECT_INVALID);
             return;
         }
         String envelopePeerId = delivery.fromNodeId();
@@ -176,12 +178,14 @@ public class RabbitMqTaskCoordinatorServer {
                 && !PeerIdentity.require(envelopePeerId).equals(PeerIdentity.require(messagePeerId))) {
             LOGGER.warn("event=rabbitmq_heartbeat_identity_mismatch envelope_peer_id={} message_peer_id={}",
                     envelopePeerId, messagePeerId);
+            settle(delivery, DeliveryDisposition.REJECT_INVALID);
             return;
         }
         String peerNodeId = envelopePeerId == null || envelopePeerId.isBlank()
                 ? messagePeerId
                 : envelopePeerId;
         if (peerNodeId == null || peerNodeId.isBlank()) {
+            settle(delivery, DeliveryDisposition.REJECT_INVALID);
             return;
         }
         peerNodeId = PeerIdentity.require(peerNodeId);
@@ -193,6 +197,14 @@ public class RabbitMqTaskCoordinatorServer {
                     new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes(), PeerTransport.RABBITMQ));
         } else {
             registry.updateHeartbeat(peerNodeId, pong.getSupportedTaskTypes());
+        }
+        settle(delivery, DeliveryDisposition.ACK_SUCCESS);
+    }
+
+    private static void settle(InboundTransportMessage delivery,
+                               DeliveryDisposition disposition) throws Exception {
+        if (delivery.acknowledgement() != null) {
+            delivery.acknowledgement().settle(disposition);
         }
     }
 }

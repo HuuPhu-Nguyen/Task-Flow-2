@@ -93,14 +93,31 @@ scheduler logs. The task-protocol codes introduced with version `2` are:
 - `unsupported_protocol_version` when a message object bypasses parser-level
   version checks.
 
-RabbitMQ codec failures are logged with `action=reject` and settled using
-reject-without-requeue; when TaskFlow DLQ routing is enabled, RabbitMQ can place
-the rejected body in the dead-letter queue for operator review. The scheduler
-repeats validation as defense in depth and rejects a broker delivery without
-requeue if an incompatible result is injected directly.
+Every consumed delivery is settled through one of five domain-aware outcomes:
+
+| Disposition | Meaning | Current RabbitMQ settlement |
+|---|---|---|
+| `ACK_SUCCESS` | The delivery was handled successfully. | Acknowledge. |
+| `ACK_DUPLICATE_OR_STALE` | The event is already applied, obsolete, or addressed to another current owner. | Acknowledge without changing authoritative state. |
+| `RETRY_TRANSIENT` | Temporary infrastructure unavailability or bounded-ingress pressure prevented handling. | Negative-acknowledge with requeue until TF-0303 supplies delayed, bounded retry queues. |
+| `REJECT_INVALID` | The envelope/message is malformed, unsupported, or permanently invalid. | Reject without requeue; RabbitMQ dead-letters it when configured. |
+| `QUARANTINE_POISON` | Processing failed deterministically, including assignment-identity cache conflicts. | Reject without requeue into the current dead-letter workflow; TF-0303 will add automatic bounded-attempt quarantine routing. |
+
+RabbitMQ codec failures are logged with `reason_code` and
+`disposition=REJECT_INVALID`. The scheduler repeats validation as defense in
+depth and gives an incompatible result the same terminal disposition when it is
+injected directly. Duplicate and stale scheduler or executor outcomes are
+acknowledged explicitly rather than falling through a generic success path.
+
+The shared failure classifier maps `MessageValidationException` and invalid
+arguments to rejection, explicit transient failures plus I/O, timeout,
+interruption, cancellation, and executor-saturation failures to transient
+retry, and otherwise-unclassified deterministic failures to poison
+quarantine. There is no configurable generic
+`catch (Exception) -> requeue` policy.
 
 These permanent compatibility failures are distinct from temporary scheduler
-mailbox saturation, which still requeues a broker delivery for backpressure.
+mailbox saturation, which receives `RETRY_TRANSIENT` for backpressure.
 
 ## RabbitMQ Envelopes
 

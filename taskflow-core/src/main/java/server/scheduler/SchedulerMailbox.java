@@ -1,6 +1,7 @@
 package server.scheduler;
 
 import server.model.MessageEnvelope;
+import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
 import transport.TransportAcknowledgement;
 
@@ -38,7 +39,7 @@ public final class SchedulerMailbox {
                 acknowledgement
         ));
         if (!queued && acknowledgement != null) {
-            acknowledgement.requeue();
+            acknowledgement.settle(DeliveryDisposition.RETRY_TRANSIENT);
         }
         return queued;
     }

@@ -19,6 +19,10 @@ import server.model.MessageEnvelope;
 import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
+import transport.ClassifiedDeliveryFailure;
+import transport.DeliveryDisposition;
+import transport.DeliveryFailureClassifier;
+import transport.TransientDeliveryException;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -69,39 +73,58 @@ final class SchedulerMessageService {
     }
 
     void processEnvelope(MessageEnvelope envelope) {
+        DeliveryDisposition disposition;
+        String reasonCode;
         try {
-            handleMessage(envelope);
+            disposition = handleMessage(envelope);
+            reasonCode = reasonCode(disposition);
         } catch (MessageValidationException e) {
+            disposition = DeliveryDisposition.REJECT_INVALID;
+            reasonCode = e.reasonCode();
             events.error("scheduler_message_validation_failed", events.fields(
                     "message_type", messageType(envelope),
                     "from_node_id", envelope.fromNodeId(),
                     "reason_code", e.reasonCode(),
-                    "action", "reject",
+                    "disposition", disposition,
                     "error", e.getMessage()
             ));
-            rejectEnvelope(envelope);
-            return;
         } catch (Exception e) {
+            preserveInterrupt(e);
+            ClassifiedDeliveryFailure failure = DeliveryFailureClassifier.classify(e);
+            disposition = failure.disposition();
+            reasonCode = failure.reasonCode();
             events.error("scheduler_message_processing_failed", events.fields(
                     "message_type", messageType(envelope),
                     "from_node_id", envelope.fromNodeId(),
+                    "reason_code", reasonCode,
+                    "disposition", disposition,
                     "error", e.getMessage()
             ));
-            requeueEnvelope(envelope);
-            return;
         }
-        ackEnvelope(envelope);
+        settleEnvelope(envelope, disposition, reasonCode);
     }
 
-    private void handleMessage(MessageEnvelope envelope) throws Exception {
+    private static String reasonCode(DeliveryDisposition disposition) {
+        return switch (disposition) {
+            case ACK_SUCCESS -> "handled";
+            case ACK_DUPLICATE_OR_STALE -> "duplicate_or_stale_domain_event";
+            case RETRY_TRANSIENT -> "transient_infrastructure_failure";
+            case REJECT_INVALID -> "invalid_delivery";
+            case QUARANTINE_POISON -> "deterministic_processing_failure";
+        };
+    }
+
+    private DeliveryDisposition handleMessage(MessageEnvelope envelope) throws Exception {
         Message message = envelope.message();
         if (message instanceof JobSubmitMessage submit) {
             handleJobSubmit(envelope, submit);
+            return DeliveryDisposition.ACK_SUCCESS;
         } else if (message instanceof TaskResultMessage result) {
             MessageValidator.validate(result);
-            resultCommits.handleTaskResult(envelope, result);
+            return resultCommits.handleTaskResult(envelope, result);
         } else if (message instanceof JobResultRequestMessage request) {
             handleJobResultRequest(envelope, request);
+            return DeliveryDisposition.ACK_SUCCESS;
         } else if (message instanceof PeerDisconnectedMessage disconnected) {
             MessageValidator.validate(disconnected);
             String peerId = disconnected.getNodeId();
@@ -109,7 +132,12 @@ final class SchedulerMessageService {
                 peerId = envelope.fromNodeId();
             }
             leases.handlePeerUnavailable(peerId, disconnected.getReason());
+            return DeliveryDisposition.ACK_SUCCESS;
         }
+        throw new MessageValidationException(
+                "unsupported_scheduler_message_type",
+                "Scheduler does not handle message type " + messageType(envelope) + "."
+        );
     }
 
     private void handleJobSubmit(MessageEnvelope envelope, JobSubmitMessage submit) throws Exception {
@@ -538,8 +566,10 @@ final class SchedulerMessageService {
                         "job_id", submit.getJobId(),
                         "requester_id", requesterNodeId
                 ));
-                throw new IllegalStateException(
-                        "Job start failure result was not routed to requester " + requesterNodeId
+                throw new TransientDeliveryException(
+                        "job_start_failure_unroutable",
+                        "Job start failure result was not routed to requester " + requesterNodeId,
+                        null
                 );
             }
         } catch (Exception sendError) {
@@ -559,8 +589,10 @@ final class SchedulerMessageService {
                         "job_id", response.getJobId(),
                         "requester_id", requesterNodeId
                 ));
-                throw new IllegalStateException(
-                        "Requested job result was not routed to requester " + requesterNodeId
+                throw new TransientDeliveryException(
+                        "job_result_unroutable",
+                        "Requested job result was not routed to requester " + requesterNodeId,
+                        null
                 );
             }
         } catch (Exception sendError) {
@@ -599,49 +631,29 @@ final class SchedulerMessageService {
         return false;
     }
 
-    private void ackEnvelope(MessageEnvelope envelope) {
+    private void settleEnvelope(MessageEnvelope envelope,
+                                DeliveryDisposition disposition,
+                                String reasonCode) {
         if (envelope.acknowledgement() == null) {
             return;
         }
         try {
-            envelope.acknowledgement().ack();
+            envelope.acknowledgement().settle(disposition);
+            if (disposition != DeliveryDisposition.ACK_SUCCESS) {
+                events.info("scheduler_delivery_disposed", events.fields(
+                        "message_type", messageType(envelope),
+                        "from_node_id", envelope.fromNodeId(),
+                        "reason_code", reasonCode,
+                        "disposition", disposition
+                ));
+            }
         } catch (Exception e) {
             preserveInterrupt(e);
-            events.error("scheduler_message_ack_failed", events.fields(
+            events.error("scheduler_message_settlement_failed", events.fields(
                     "message_type", messageType(envelope),
                     "from_node_id", envelope.fromNodeId(),
-                    "error", e.getMessage()
-            ));
-        }
-    }
-
-    private void requeueEnvelope(MessageEnvelope envelope) {
-        if (envelope.acknowledgement() == null) {
-            return;
-        }
-        try {
-            envelope.acknowledgement().requeue();
-        } catch (Exception e) {
-            preserveInterrupt(e);
-            events.error("scheduler_message_requeue_failed", events.fields(
-                    "message_type", messageType(envelope),
-                    "from_node_id", envelope.fromNodeId(),
-                    "error", e.getMessage()
-            ));
-        }
-    }
-
-    private void rejectEnvelope(MessageEnvelope envelope) {
-        if (envelope.acknowledgement() == null) {
-            return;
-        }
-        try {
-            envelope.acknowledgement().reject();
-        } catch (Exception e) {
-            preserveInterrupt(e);
-            events.error("scheduler_message_reject_failed", events.fields(
-                    "message_type", messageType(envelope),
-                    "from_node_id", envelope.fromNodeId(),
+                    "reason_code", reasonCode,
+                    "disposition", disposition,
                     "error", e.getMessage()
             ));
         }

@@ -28,8 +28,8 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   the dead-letter workflow;
 - duplicate or stale scheduler outcomes are acknowledged without changing
   authoritative state;
-- scheduler-mailbox saturation and current transient handler/storage failures
-  requeue under the documented RabbitMQ rules;
+- scheduler-mailbox saturation and explicitly transient handler/storage
+  failures use `RETRY_TRANSIENT` under the documented RabbitMQ rules;
 - coordinator `TASK_ASSIGN` and final `JOB_RESULT` publication intent is stored
   in SQLite outbox rows before publication when persistence is available;
 - publisher confirms and mandatory-return detection decide whether an outbound
@@ -38,9 +38,9 @@ All supported runtime delivery behavior is defined against RabbitMQ:
 At-least-once delivery and execution remain explicit. Publisher confirmation is
 not consumer completion, and exactly-once delivery is not claimed.
 
-Typed delivery dispositions and bounded delayed poison-message retry are later
-Phase 3 work. Until those tasks complete, the limits in
-`docs/RABBITMQ_SCOPE.md` remain authoritative.
+The five typed delivery dispositions are implemented. Bounded delayed
+poison-message retry and automatic quarantine remain later Phase 3 work, so the
+limits in `docs/RABBITMQ_SCOPE.md` remain authoritative.
 
 ## Current Runtime
 
@@ -92,7 +92,7 @@ transitional rather than production-ready. The remaining promotion gates are:
 - direct TLS/certificate configuration if brokers are used across untrusted
   networks;
 - continued broker-backed CI, Docker Compose, and JavaFX smoke evidence;
-- typed broker dispositions and bounded delayed poison retry/quarantine;
+- bounded delayed poison retry/quarantine with an observable attempt count;
 - measured overload evidence before adding adaptive throttling.
 
 ## Public Claim Rule

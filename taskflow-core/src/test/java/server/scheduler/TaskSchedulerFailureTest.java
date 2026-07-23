@@ -13,8 +13,10 @@ import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
+import transport.DeliveryDisposition;
 import transport.TransportAcknowledgement;
 
+import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Arrays;
@@ -195,6 +197,7 @@ class TaskSchedulerFailureTest {
             assertEquals(1, acknowledgement.ackCount());
             assertEquals(0, acknowledgement.requeueCount());
             assertEquals(0, acknowledgement.rejectCount());
+            assertEquals(DeliveryDisposition.ACK_SUCCESS, acknowledgement.disposition());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -316,6 +319,7 @@ class TaskSchedulerFailureTest {
             assertEquals(0, acknowledgement.ackCount());
             assertEquals(0, acknowledgement.requeueCount());
             assertEquals(1, acknowledgement.rejectCount());
+            assertEquals(DeliveryDisposition.REJECT_INVALID, acknowledgement.disposition());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -353,6 +357,7 @@ class TaskSchedulerFailureTest {
                 assertEquals(0, acknowledgement.ackCount());
                 assertEquals(0, acknowledgement.requeueCount());
                 assertEquals(1, acknowledgement.rejectCount());
+                assertEquals(DeliveryDisposition.REJECT_INVALID, acknowledgement.disposition());
             }
             assertFalse(output.awaitResult(150));
             assertEquals(1, peer.getActiveTasks());
@@ -439,6 +444,7 @@ class TaskSchedulerFailureTest {
             assertEquals(0, acknowledgement.ackCount());
             assertEquals(1, acknowledgement.requeueCount());
             assertEquals(0, acknowledgement.rejectCount());
+            assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -477,6 +483,7 @@ class TaskSchedulerFailureTest {
             assertEquals(0, acknowledgement.ackCount());
             assertEquals(1, acknowledgement.requeueCount());
             assertEquals(0, acknowledgement.rejectCount());
+            assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1376,7 +1383,7 @@ class TaskSchedulerFailureTest {
         @Override
         public boolean sendJobResult(String requesterNodeId, JobResultMessage message) throws Exception {
             attempted.countDown();
-            throw new Exception("transient result send failure");
+            throw new IOException("transient result send failure");
         }
 
         boolean awaitAttempt() throws InterruptedException {
@@ -1410,6 +1417,13 @@ class TaskSchedulerFailureTest {
         private final AtomicInteger ackCount = new AtomicInteger();
         private final AtomicInteger requeueCount = new AtomicInteger();
         private final AtomicInteger rejectCount = new AtomicInteger();
+        private final AtomicReference<DeliveryDisposition> disposition = new AtomicReference<>();
+
+        @Override
+        public void settle(DeliveryDisposition requestedDisposition) throws Exception {
+            disposition.compareAndSet(null, requestedDisposition);
+            TransportAcknowledgement.super.settle(requestedDisposition);
+        }
 
         @Override
         public void ack() {
@@ -1451,6 +1465,10 @@ class TaskSchedulerFailureTest {
 
         int rejectCount() {
             return rejectCount.get();
+        }
+
+        DeliveryDisposition disposition() {
+            return disposition.get();
         }
     }
 

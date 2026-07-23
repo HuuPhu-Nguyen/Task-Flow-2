@@ -10,6 +10,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.MessageValidationException;
 import transport.BrokerTransport;
+import transport.ClassifiedDeliveryFailure;
+import transport.DeliveryDisposition;
+import transport.DeliveryFailureClassifier;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportMessageHandler;
@@ -70,7 +73,7 @@ public class RabbitMqTransport implements BrokerTransport {
             closeAfterStartupFailure(connection, channel, e);
             throw e;
         }
-        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} requeue_on_handler_failure={}",
+        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={}",
                 config.host(),
                 config.port(),
                 config.virtualHost(),
@@ -78,8 +81,7 @@ public class RabbitMqTransport implements BrokerTransport {
                 config.durable(),
                 config.prefetchCount(),
                 config.publisherConfirmTimeoutMillis(),
-                config.deadLetterEnabled(),
-                config.requeueOnHandlerFailure());
+                config.deadLetterEnabled());
     }
 
     private static RabbitMqConnectionResources openResources(RabbitMqTransportConfig config) throws Exception {
@@ -278,22 +280,33 @@ public class RabbitMqTransport implements BrokerTransport {
                     String reasonCode = e instanceof MessageValidationException validation
                             ? validation.reasonCode()
                             : "message_decode_failed";
-                    LOGGER.warn("event=rabbitmq_delivery_decode_failed route={} queue={} reason_code={} action=reject error={}",
-                            route.name(), queueName, reasonCode, e.getMessage(), e);
-                    rejectFailedDelivery(acknowledgement);
+                    LOGGER.warn("event=rabbitmq_delivery_decode_failed route={} queue={} reason_code={} disposition={} error={}",
+                            route.name(),
+                            queueName,
+                            reasonCode,
+                            DeliveryDisposition.REJECT_INVALID,
+                            e.getMessage(),
+                            e);
+                    settleDelivery(acknowledgement, DeliveryDisposition.REJECT_INVALID);
                     return;
                 }
 
                 try {
                     handler.handle(message);
                     if (!acknowledgement.isSettled() && !acknowledgement.isDeferred()) {
-                        acknowledgement.ack();
+                        settleDelivery(acknowledgement, DeliveryDisposition.ACK_SUCCESS);
                     }
                 } catch (Exception e) {
-                    String action = config.requeueOnHandlerFailure() ? "requeue" : "reject";
-                    LOGGER.warn("event=rabbitmq_delivery_handler_failed route={} queue={} action={} error={}",
-                            route.name(), queueName, action, e.getMessage(), e);
-                    settleHandlerFailure(acknowledgement);
+                    preserveInterrupt(e);
+                    ClassifiedDeliveryFailure failure = DeliveryFailureClassifier.classify(e);
+                    LOGGER.warn("event=rabbitmq_delivery_handler_failed route={} queue={} reason_code={} disposition={} error={}",
+                            route.name(),
+                            queueName,
+                            failure.reasonCode(),
+                            failure.disposition(),
+                            e.getMessage(),
+                            e);
+                    settleDelivery(acknowledgement, failure.disposition());
                 }
             }, tag -> {
                 LOGGER.warn("event=rabbitmq_consumer_cancelled route={} queue={} consumer_tag={}",
@@ -305,29 +318,25 @@ public class RabbitMqTransport implements BrokerTransport {
         }
     }
 
-    private void settleHandlerFailure(RabbitMqAcknowledgement acknowledgement) throws IOException {
+    private void settleDelivery(RabbitMqAcknowledgement acknowledgement,
+                                DeliveryDisposition disposition) throws IOException {
         if (acknowledgement.isSettled()) {
             return;
         }
         try {
-            if (config.requeueOnHandlerFailure()) {
-                acknowledgement.requeue();
-            } else {
-                acknowledgement.reject();
-            }
+            acknowledgement.settle(disposition);
         } catch (Exception ackError) {
-            throw new IOException("Failed to settle RabbitMQ delivery after handler failure", ackError);
+            preserveInterrupt(ackError);
+            throw new IOException(
+                    "Failed to settle RabbitMQ delivery as " + disposition,
+                    ackError
+            );
         }
     }
 
-    private void rejectFailedDelivery(RabbitMqAcknowledgement acknowledgement) throws IOException {
-        if (acknowledgement.isSettled()) {
-            return;
-        }
-        try {
-            acknowledgement.reject();
-        } catch (Exception ackError) {
-            throw new IOException("Failed to reject RabbitMQ delivery", ackError);
+    private static void preserveInterrupt(Exception error) {
+        if (error instanceof InterruptedException) {
+            Thread.currentThread().interrupt();
         }
     }
 

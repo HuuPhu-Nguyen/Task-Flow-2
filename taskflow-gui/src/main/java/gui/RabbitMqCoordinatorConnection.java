@@ -12,10 +12,14 @@ import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.BrokerTransport;
+import transport.ClassifiedDeliveryFailure;
+import transport.DeliveryDisposition;
+import transport.DeliveryFailureClassifier;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
+import transport.TransientDeliveryException;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
@@ -167,13 +171,13 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
         Message message = delivery.message();
         TransportAcknowledgement acknowledgement = delivery.acknowledgement();
         if (!(message instanceof TaskAssignMessage task)) {
-            reject(acknowledgement);
+            settle(acknowledgement, DeliveryDisposition.REJECT_INVALID);
             return;
         }
         if (!peerId.equals(task.getNodeId())) {
             LOGGER.warn("event=gui_rabbitmq_task_assignment_ignored peer_id={} assigned_peer_id={}",
                     peerId, task.getNodeId());
-            ack(acknowledgement);
+            settle(acknowledgement, DeliveryDisposition.ACK_DUPLICATE_OR_STALE);
             return;
         }
 
@@ -184,11 +188,17 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
             AssignmentExecution execution = workerRuntime.executeAssignment(task);
             logAssignmentCacheDecision(task, execution, workerRuntime.assignmentCacheSnapshot());
             if (execution.disposition() == AssignmentExecution.Disposition.DUPLICATE_RUNNING) {
-                ack(acknowledgement);
+                settle(acknowledgement, DeliveryDisposition.ACK_DUPLICATE_OR_STALE);
                 return;
             }
             execution.resultFuture().whenComplete((result, failure) ->
-                    completeTaskAssignment(task, result, failure, acknowledgement));
+                    completeTaskAssignment(
+                            task,
+                            result,
+                            failure,
+                            acknowledgement,
+                            execution.disposition()
+                    ));
         } catch (AssignmentCacheConflictException conflict) {
             LOGGER.warn(
                     "event=gui_rabbitmq_task_assignment_cache_conflict peer_id={} task_id={} "
@@ -198,10 +208,17 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     task.getAssignmentId(),
                     conflict.getMessage()
             );
-            reject(acknowledgement);
+            settle(acknowledgement, DeliveryDisposition.QUARANTINE_POISON);
         } catch (Exception e) {
-            requeueQuietly(acknowledgement);
-            throw e;
+            ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(e);
+            LOGGER.warn("event=gui_rabbitmq_task_assignment_handler_failed peer_id={} task_id={} reason_code={} disposition={} error={}",
+                    peerId,
+                    task.getTaskId(),
+                    classified.reasonCode(),
+                    classified.disposition(),
+                    e.getMessage(),
+                    e);
+            settle(acknowledgement, classified.disposition());
         }
     }
 
@@ -226,11 +243,18 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
     private void completeTaskAssignment(TaskAssignMessage task,
                                         TaskResultMessage result,
                                         Throwable failure,
-                                        TransportAcknowledgement acknowledgement) {
+                                        TransportAcknowledgement acknowledgement,
+                                        AssignmentExecution.Disposition executionDisposition) {
         if (failure != null) {
-            LOGGER.warn("event=gui_rabbitmq_task_execution_failed peer_id={} task_id={} error={}",
-                    peerId, task.getTaskId(), failure.getMessage(), failure);
-            requeueQuietly(acknowledgement);
+            ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(failure);
+            LOGGER.warn("event=gui_rabbitmq_task_execution_failed peer_id={} task_id={} reason_code={} disposition={} error={}",
+                    peerId,
+                    task.getTaskId(),
+                    classified.reasonCode(),
+                    classified.disposition(),
+                    failure.getMessage(),
+                    failure);
+            settleQuietly(acknowledgement, classified.disposition());
             return;
         }
         try {
@@ -240,13 +264,27 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     result
             ));
             if (!published) {
-                throw new IllegalStateException("Task result publish was not confirmed for task " + task.getTaskId());
+                throw new TransientDeliveryException(
+                        "broker_publish_not_confirmed",
+                        "Task result publish was not confirmed for task " + task.getTaskId(),
+                        null
+                );
             }
-            ack(acknowledgement);
+            DeliveryDisposition disposition =
+                    executionDisposition == AssignmentExecution.Disposition.DUPLICATE_COMPLETED
+                            ? DeliveryDisposition.ACK_DUPLICATE_OR_STALE
+                            : DeliveryDisposition.ACK_SUCCESS;
+            settle(acknowledgement, disposition);
         } catch (Exception publishFailure) {
-            LOGGER.warn("event=gui_rabbitmq_task_result_publish_failed peer_id={} task_id={} error={}",
-                    peerId, task.getTaskId(), publishFailure.getMessage(), publishFailure);
-            requeueQuietly(acknowledgement);
+            ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(publishFailure);
+            LOGGER.warn("event=gui_rabbitmq_task_result_publish_failed peer_id={} task_id={} reason_code={} disposition={} error={}",
+                    peerId,
+                    task.getTaskId(),
+                    classified.reasonCode(),
+                    classified.disposition(),
+                    publishFailure.getMessage(),
+                    publishFailure);
+            settleQuietly(acknowledgement, classified.disposition());
         }
     }
 
@@ -254,11 +292,11 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
         Message message = delivery.message();
         TransportAcknowledgement acknowledgement = delivery.acknowledgement();
         if (!(message instanceof JobResultMessage result)) {
-            reject(acknowledgement);
+            settle(acknowledgement, DeliveryDisposition.REJECT_INVALID);
             return;
         }
         listener.onJobResult(this, result);
-        ack(acknowledgement);
+        settle(acknowledgement, DeliveryDisposition.ACK_SUCCESS);
         LOGGER.info("event=gui_rabbitmq_job_result_received peer_id={} job_id={} success={}",
                 peerId, result.getJobId(), result.isSuccessful());
     }
@@ -294,7 +332,11 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                 new PongMessage(peerId, Instant.now().toString(), workerRuntime.supportedTaskTypes())
         ));
         if (!published) {
-            throw new IllegalStateException("Heartbeat publish was not confirmed.");
+            throw new TransientDeliveryException(
+                    "broker_publish_not_confirmed",
+                    "Heartbeat publish was not confirmed.",
+                    null
+            );
         }
     }
 
@@ -313,35 +355,27 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                 base.deadLetterEnabled(),
                 base.deadLetterExchangeName(),
                 base.deadLetterQueueName(),
-                base.deadLetterRoutingKey(),
-                base.requeueOnHandlerFailure()
+                base.deadLetterRoutingKey()
         );
     }
 
-    private static void ack(TransportAcknowledgement acknowledgement) throws Exception {
+    private static void settle(TransportAcknowledgement acknowledgement,
+                               DeliveryDisposition disposition) throws Exception {
         if (acknowledgement != null) {
-            acknowledgement.ack();
+            acknowledgement.settle(disposition);
         }
     }
 
-    private static void reject(TransportAcknowledgement acknowledgement) throws Exception {
-        if (acknowledgement != null) {
-            acknowledgement.reject();
-        }
-    }
-
-    private static void requeue(TransportAcknowledgement acknowledgement) throws Exception {
-        if (acknowledgement != null) {
-            acknowledgement.requeue();
-        }
-    }
-
-    private static void requeueQuietly(TransportAcknowledgement acknowledgement) {
+    private static void settleQuietly(TransportAcknowledgement acknowledgement,
+                                      DeliveryDisposition disposition) {
         try {
-            requeue(acknowledgement);
-        } catch (Exception requeueError) {
-            LOGGER.warn("event=gui_rabbitmq_delivery_requeue_failed error={}",
-                    requeueError.getMessage(), requeueError);
+            settle(acknowledgement, disposition);
+        } catch (Exception settlementError) {
+            if (settlementError instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            LOGGER.warn("event=gui_rabbitmq_delivery_settlement_failed disposition={} error={}",
+                    disposition, settlementError.getMessage(), settlementError);
         }
     }
 

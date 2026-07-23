@@ -42,8 +42,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
-import transport.TransportRoute;
+import transport.DeliveryDisposition;
 import transport.TransportAcknowledgement;
+import transport.TransportRoute;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -760,6 +761,7 @@ class TaskSchedulerPersistenceTest {
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
         RecordingJobStateStore store = new RecordingJobStateStore(true, "markTaskFailed");
         TaskCapturingOutput output = new TaskCapturingOutput();
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
         SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_TASK_RETRIES", "1"));
         TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
         Thread schedulerThread = new Thread(scheduler, "scheduler-terminal-task-write-failure-test");
@@ -775,9 +777,15 @@ class TaskSchedulerPersistenceTest {
             TaskAssignMessage assignment = output.task();
             assertTrue(store.awaitTaskAssigned());
 
-            mailbox.put(new MessageEnvelope(failedResult(assignment, "processor failed"), "peer-1"));
+            mailbox.put(new MessageEnvelope(
+                    failedResult(assignment, "processor failed"),
+                    "peer-1",
+                    acknowledgement
+            ));
 
             assertTrue(store.awaitEvent("markTaskFailed:task-job-terminal-task-write-failure-0"));
+            assertTrue(acknowledgement.awaitRequeue());
+            assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
             assertFalse(output.awaitResult(300));
             assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
             assertEquals(0, scheduler.getMetricsSnapshot().retryCount());
@@ -820,6 +828,7 @@ class TaskSchedulerPersistenceTest {
             assertEquals(0, acknowledgement.ackCount());
             assertEquals(1, acknowledgement.requeueCount());
             assertEquals(0, acknowledgement.rejectCount());
+            assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
             assertEquals(1, scheduler.getMetricsSnapshot().activeJobs());
             assertEquals(0, scheduler.getMetricsSnapshot().successCount());
             assertEquals(1, scheduler.getMetricsSnapshot().resultStorageFailureCount());
@@ -875,6 +884,10 @@ class TaskSchedulerPersistenceTest {
             assertEquals(1, staleAcknowledgement.ackCount());
             assertEquals(0, staleAcknowledgement.requeueCount());
             assertEquals(0, staleAcknowledgement.rejectCount());
+            assertEquals(
+                    DeliveryDisposition.ACK_DUPLICATE_OR_STALE,
+                    staleAcknowledgement.disposition()
+            );
             assertFalse(output.awaitResult(300));
             assertEquals(0, scheduler.getMetricsSnapshot().successCount());
             assertEquals(1, scheduler.getMetricsSnapshot().staleResultCount());
@@ -941,6 +954,10 @@ class TaskSchedulerPersistenceTest {
             assertEquals(1, duplicateAcknowledgement.ackCount());
             assertEquals(0, duplicateAcknowledgement.requeueCount());
             assertEquals(0, duplicateAcknowledgement.rejectCount());
+            assertEquals(
+                    DeliveryDisposition.ACK_DUPLICATE_OR_STALE,
+                    duplicateAcknowledgement.disposition()
+            );
             assertEquals(1, scheduler.getMetricsSnapshot().successCount());
             assertEquals(1, scheduler.getMetricsSnapshot().duplicateResultCount());
             assertEquals(1, scheduler.getMetricsSnapshot().taskResultsCommittedTotal());
@@ -1895,6 +1912,13 @@ class TaskSchedulerPersistenceTest {
         private final AtomicInteger rejectCount = new AtomicInteger();
         private final CountDownLatch acked = new CountDownLatch(1);
         private final CountDownLatch requeued = new CountDownLatch(1);
+        private final AtomicReference<DeliveryDisposition> disposition = new AtomicReference<>();
+
+        @Override
+        public void settle(DeliveryDisposition requestedDisposition) throws Exception {
+            disposition.compareAndSet(null, requestedDisposition);
+            TransportAcknowledgement.super.settle(requestedDisposition);
+        }
 
         @Override
         public void ack() {
@@ -1931,6 +1955,10 @@ class TaskSchedulerPersistenceTest {
 
         int rejectCount() {
             return rejectCount.get();
+        }
+
+        DeliveryDisposition disposition() {
+            return disposition.get();
         }
     }
 

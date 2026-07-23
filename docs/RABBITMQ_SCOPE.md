@@ -20,8 +20,10 @@ Focused broker-failure coverage now spans coordinator, command-line
 participant, GUI service adapters, publisher confirms, requeue/reject/DLQ
 behavior, and result routing. Automated JavaFX RabbitMQ desktop smoke evidence
 covers live submit/execute/result/save and broker-failure heartbeat handling.
-Full broker outage/restart recovery remains incomplete. TF-0301 removed the
-legacy socket runtime and transport selector from supported builds and releases.
+The runtime now classifies every consumed message through a five-value typed
+delivery disposition. Full broker outage/restart recovery and delayed bounded
+retry remain incomplete. TF-0301 removed the legacy socket runtime and
+transport selector from supported builds and releases.
 
 ## Current RabbitMQ Guarantees
 
@@ -67,12 +69,15 @@ The current RabbitMQ path includes:
   increment and assignment UUID; the scheduler publishes the exact envelope
   returned by that transaction, so a publish retry cannot create a replacement
   identity.
-- Manual acknowledgement, deferred acknowledgement, requeue, and reject
-  behavior. Scheduler-level tests prove typed duplicate/stale task-result
-  outcomes acknowledge without requeue, while result-commit storage failure
-  requeues without an in-memory completion. Live broker coverage also proves an
-  obsolete attempt-1/X result from a participant reassigned under attempt-2/Y
-  is acknowledged as stale without changing Y, and only Y commits.
+- One typed consumer-settlement contract: `ACK_SUCCESS`,
+  `ACK_DUPLICATE_OR_STALE`, `RETRY_TRANSIENT`, `REJECT_INVALID`, and
+  `QUARANTINE_POISON`. Scheduler-level tests prove duplicate/stale task-result
+  outcomes acknowledge without requeue, result-commit storage failure retries
+  without an in-memory completion, invalid input rejects, and deterministic
+  processing failure does not enter a generic requeue loop. Live broker
+  coverage also proves an obsolete attempt-1/X result from a participant
+  reassigned under attempt-2/Y is acknowledged as stale without changing Y,
+  and only Y commits.
 - Bounded executor-side assignment deduplication shared by command-line and
   JavaFX RabbitMQ adapters. A duplicate running delivery is acknowledged
   without another processor invocation; a completed cached assignment
@@ -91,7 +96,8 @@ The current RabbitMQ path includes:
   publish confirmation. Malformed or unknown-route poison messages are left in
   the DLQ for quarantine or discard.
 - Live broker tests for shared-route delivery, peer-route delivery,
-  acknowledgement drain, handler-failure requeue, reject-to-dead-letter,
+  acknowledgement drain, transient-handler retry, deterministic-handler
+  reject-to-dead-letter,
   DLQ redrive/quarantine behavior, prefetch behavior, broker-side
   connection-close recovery, coordinator job completion, seeded pending outbox
   replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
@@ -104,8 +110,8 @@ The current RabbitMQ path includes:
   RabbitMQ service-adapter tests.
 - Focused service-adapter failure-path tests cover command-line requester
   publish exceptions, JavaFX RabbitMQ startup heartbeat publish failure,
-  task-result publish failure, task-execution failure requeue, and live
-  `JOB_RESULT` acknowledgement after GUI routing.
+  transient task-result publish failure, deterministic task-execution poison
+  disposition, and live `JOB_RESULT` acknowledgement after GUI routing.
 - Docker Compose demo coverage for a RabbitMQ-backed image conversion job when
   Docker is available.
 
@@ -121,6 +127,10 @@ TaskFlow does not yet provide:
   confirmed.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
+- Delayed retry queues, broker-owned attempt limits, preserved retry reason
+  metadata, and automatic final-quarantine routing. TF-0303 owns that topology;
+  the current adapter maps `RETRY_TRANSIENT` to immediate broker requeue and
+  terminal rejection dispositions to the existing dead-letter workflow.
 - Native RabbitMQ TLS/certificate configuration. Current configuration exposes
   host, port, username, password, vhost, and topology settings; use a trusted
   network or verified TLS-terminating tunnel/proxy until direct TLS support is

@@ -36,6 +36,12 @@ Assignment generation, task retry count, and broker delivery-attempt count are
 separate concepts. Coordinator fencing does not make arbitrary plugin external
 side effects exactly once.
 
+Consumed broker messages use the separate five-value disposition contract:
+successful and duplicate/stale outcomes acknowledge, explicit transient
+failures retry, and invalid or deterministic-poison outcomes reject without
+requeue. Delayed attempt accounting and automatic final quarantine remain
+topology work rather than task retry state.
+
 ## Alternatives Considered
 
 - **Claim exactly-once execution:** rejected because process crashes and

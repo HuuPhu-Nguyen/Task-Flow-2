@@ -85,8 +85,7 @@ class RabbitMqTopologyTest {
                 false,
                 "",
                 "",
-                "",
-                defaults.requeueOnHandlerFailure()
+                ""
         );
         RabbitMqTopology topology = new RabbitMqTopology(config);
 

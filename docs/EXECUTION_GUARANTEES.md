@@ -125,6 +125,23 @@ nodes may enable the requester role, executor role, or both.
 - Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
 - RabbitMQ remains transitional; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it production-ready.
 
+## RabbitMQ Delivery Disposition
+
+- Every supported consumer settles through exactly one of `ACK_SUCCESS`,
+  `ACK_DUPLICATE_OR_STALE`, `RETRY_TRANSIENT`, `REJECT_INVALID`, or
+  `QUARANTINE_POISON`.
+- Successful work is acknowledged. Duplicate, stale, or wrong-current-owner
+  domain events are also acknowledged without changing authoritative state.
+- Malformed, unsupported-version, unknown-type, or otherwise invalid protocol
+  deliveries are rejected without requeue.
+- Explicit transient infrastructure failures and bounded-mailbox pressure retry;
+  otherwise-unclassified deterministic processing failures are poison and do
+  not enter the generic requeue path.
+- TF-0303 remains responsible for delayed retry queues, delivery-attempt limits,
+  and automatic final-quarantine routing. Until then, `RETRY_TRANSIENT` maps to
+  RabbitMQ requeue while both terminal rejection dispositions use
+  reject-without-requeue and the configured dead-letter workflow.
+
 ## RabbitMQ Connection Recovery
 
 - RabbitMQ client automatic connection recovery is enabled for transport connections.
@@ -135,7 +152,9 @@ nodes may enable the requester role, executor role, or both.
 ## RabbitMQ Dead Lettering
 
 - RabbitMQ topology declaration can configure a dead-letter exchange, dead-letter queue, and quarantine queue for normal TaskFlow queues.
-- Malformed or validation-failing broker deliveries are rejected, and handler failures can be rejected when `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+- Malformed or validation-failing broker deliveries use `REJECT_INVALID`, while
+  deterministic handler failures use `QUARANTINE_POISON`; both reject without
+  requeue.
 - Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
 - `peer.PeerNode dlq inspect` reads dead-letter metadata and body previews without acknowledging the DLQ entry.
 - `peer.PeerNode dlq redrive` republishes only valid TaskFlow broker envelopes to the original routing key captured in RabbitMQ dead-letter metadata, increments `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after RabbitMQ confirms the publish.

@@ -50,8 +50,8 @@ the large binary data plane.
 
 ## Consequences
 
-- Runtime delivery code can converge on one typed disposition and one broker
-  contract suite.
+- Runtime delivery code uses one five-value typed disposition contract; bounded
+  delayed retry and final automatic quarantine remain follow-up topology work.
 - RabbitMQ, its topology, and broker-backed integration evidence become runtime
   prerequisites for supported distributed operation.
 - Publisher confirms do not mean consumer processing or exactly-once delivery;

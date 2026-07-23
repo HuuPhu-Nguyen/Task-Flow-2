@@ -7,6 +7,8 @@ import server.job.TaskUnit;
 import server.model.MessageEnvelope;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
+import transport.DeliveryDisposition;
+import transport.TransientDeliveryException;
 
 import java.util.Map;
 
@@ -45,14 +47,14 @@ final class ResultCommitService {
         this.events = events;
     }
 
-    void handleTaskResult(MessageEnvelope envelope, TaskResultMessage result) {
+    DeliveryDisposition handleTaskResult(MessageEnvelope envelope, TaskResultMessage result) {
         EmbarrassinglyParallelJob<?, ?> job = state.activeJob(result.getJobId());
         if (job == null) {
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
         TaskUnit<?> task = job.getTasks().get(result.getTaskId());
         if (task == null) {
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
 
         LeaseService.LeaseExpiryResult leaseExpiry = leases.expireTaskLeaseIfNeeded(
@@ -64,20 +66,19 @@ final class ResultCommitService {
             if (leaseExpiry.jobFailureReason() != null) {
                 jobCompletions.failJob(job, leaseExpiry.jobFailureReason());
             }
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
 
         if (!result.isSuccessful()) {
-            handleFailedResult(envelope, result, job, task);
-            return;
+            return handleFailedResult(envelope, result, job, task);
         }
-        handleSuccessfulResult(envelope, result, job, task);
+        return handleSuccessfulResult(envelope, result, job, task);
     }
 
-    private void handleFailedResult(MessageEnvelope envelope,
-                                    TaskResultMessage result,
-                                    EmbarrassinglyParallelJob<?, ?> job,
-                                    TaskUnit<?> task) {
+    private DeliveryDisposition handleFailedResult(MessageEnvelope envelope,
+                                                   TaskResultMessage result,
+                                                   EmbarrassinglyParallelJob<?, ?> job,
+                                                   TaskUnit<?> task) {
         long failedAt = clock.nowEpochMillis();
         TransitionDecision decision = transitions.executionFailed(
                 task,
@@ -99,7 +100,7 @@ final class ResultCommitService {
                         "commit_outcome", JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
                         "successful", false
                 ));
-                return;
+                return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
             }
             events.info("task_failure_result_ignored", events.assignmentTraceFields(
                     job.getJobId(),
@@ -110,7 +111,7 @@ final class ResultCommitService {
                     "disposition", decision.disposition(),
                     "reason", decision.detail()
             ));
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
 
         AttemptService.FailureResult failure = attempts.closeFailedAttempt(
@@ -122,11 +123,18 @@ final class ResultCommitService {
                 failedAt
         );
         if (!failure.handled()) {
-            if (failure.storageFailed()) {
+            if (failure.durableOutcome() == JobStateStore.DurableTransitionOutcome.STORAGE_FAILURE) {
                 jobCompletions.failJob(
                         job,
                         persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
                 );
+                return DeliveryDisposition.RETRY_TRANSIENT;
+            } else if (failure.durableOutcome() == JobStateStore.DurableTransitionOutcome.UNKNOWN_ENTITY) {
+                jobCompletions.failJob(
+                        job,
+                        persistence.failureReason(persistence.taskFailureOperation(failure.outcome()))
+                );
+                return DeliveryDisposition.QUARANTINE_POISON;
             } else {
                 metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT);
                 events.info("task_result_stale_rejected", events.assignmentTraceFields(
@@ -139,7 +147,7 @@ final class ResultCommitService {
                         "successful", false
                 ));
             }
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
         events.error("task_failed", events.fields(
                 "job_id", job.getJobId(),
@@ -153,12 +161,13 @@ final class ResultCommitService {
         if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
             jobCompletions.failJob(job, "Task " + task.getTaskId() + " reached max retries.");
         }
+        return DeliveryDisposition.ACK_SUCCESS;
     }
 
-    private void handleSuccessfulResult(MessageEnvelope envelope,
-                                        TaskResultMessage result,
-                                        EmbarrassinglyParallelJob<?, ?> job,
-                                        TaskUnit<?> task) {
+    private DeliveryDisposition handleSuccessfulResult(MessageEnvelope envelope,
+                                                       TaskResultMessage result,
+                                                       EmbarrassinglyParallelJob<?, ?> job,
+                                                       TaskUnit<?> task) {
         long completedAt = clock.nowEpochMillis();
         long startedAt = task.getStartTime();
         long durationMs = startedAt > 0L ? Math.max(0L, completedAt - startedAt) : 0L;
@@ -198,9 +207,13 @@ final class ResultCommitService {
             metrics.recordResultCommitOutcome(commitOutcome);
             logResultCommitDisposition(job, task, envelope.fromNodeId(), result, commitOutcome);
             if (commitOutcome == JobStateStore.ResultCommitOutcome.STORAGE_FAILURE) {
-                throw new IllegalStateException(persistence.failureReason("commitTaskResult"));
+                throw new TransientDeliveryException(
+                        "task_result_storage_failure",
+                        persistence.failureReason("commitTaskResult"),
+                        null
+                );
             }
-            return;
+            return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
 
         if (!decision.accepted() || preparedResult == null) {
@@ -239,6 +252,7 @@ final class ResultCommitService {
         } else if (job.hasTerminalFailure()) {
             jobCompletions.failJob(job, "Job has one or more terminal failed tasks.");
         }
+        return DeliveryDisposition.ACK_SUCCESS;
     }
 
     private void logResultCommitDisposition(EmbarrassinglyParallelJob<?, ?> job,

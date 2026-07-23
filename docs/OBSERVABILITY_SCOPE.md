@@ -137,8 +137,7 @@ Persistence and recovery:
 RabbitMQ publish, acknowledgement, and DLQ routing:
 
 - `rabbitmq_connected` records the broker connection configuration, including
-  prefetch, publisher-confirm timeout, dead-letter setting, and handler-failure
-  requeue policy.
+  prefetch, publisher-confirm timeout, and dead-letter setting.
 - `rabbitmq_topology_declared` records dead-letter exchange, dead-letter queue,
   and quarantine queue declaration when enabled.
 - `rabbitmq_dlq_topology_declared` records the DLQ and quarantine queues used
@@ -153,16 +152,22 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 - `rabbitmq_outbox_published`, `rabbitmq_outbox_publish_deferred`,
   `rabbitmq_outbox_publish_failed`, `rabbitmq_outbox_publish_mark_failed`, and
   `rabbitmq_outbox_replay` record coordinator outbox replay activity.
-- `scheduler_message_ack_failed`, `scheduler_message_requeue_failed`, and
-  `rabbitmq_delivery_requeue_failed` record failed acknowledgement settlement.
+- `scheduler_message_validation_failed` and
+  `scheduler_message_processing_failed` include stable `reason_code` and
+  `disposition` fields. `scheduler_delivery_disposed` records every non-success
+  scheduler settlement, and `scheduler_message_settlement_failed` records a
+  failed broker settlement attempt.
+- `rabbitmq_delivery_settlement_failed` and
+  `gui_rabbitmq_delivery_settlement_failed` record participant settlement
+  failures with the requested disposition.
 - `task_result_publish_failed` and `rabbitmq_heartbeat_failed` record peer-side
   RabbitMQ publish failures.
-- `rabbitmq_delivery_decode_failed action=reject` records malformed broker
-  delivery rejection. With dead-lettering enabled, RabbitMQ routes rejected
-  deliveries to the configured dead-letter queue.
-- `rabbitmq_delivery_handler_failed action=reject` can also route failed
-  handler deliveries to the dead-letter queue when
-  `TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE=false`.
+- `rabbitmq_delivery_decode_failed` records malformed broker input with
+  `reason_code` and `disposition=REJECT_INVALID`. With dead-lettering enabled,
+  RabbitMQ routes the rejected delivery to the configured dead-letter queue.
+- `rabbitmq_delivery_handler_failed` records the classified `reason_code` and
+  one of the typed failure dispositions. Participant assignment, execution, and
+  result-publication failure events expose the same fields.
 - `rabbitmq_dlq_redriven`, `rabbitmq_dlq_quarantined`, and
   `rabbitmq_dlq_discarded` record explicit operator decisions on DLQ entries.
 - `rabbitmq_dlq_redrive_rejected status=not_redrivable`,

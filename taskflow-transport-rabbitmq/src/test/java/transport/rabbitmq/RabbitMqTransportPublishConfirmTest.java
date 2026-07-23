@@ -145,8 +145,7 @@ class RabbitMqTransportPublishConfirmTest {
                 defaults.deadLetterEnabled(),
                 defaults.deadLetterExchangeName(),
                 defaults.deadLetterQueueName(),
-                defaults.deadLetterRoutingKey(),
-                defaults.requeueOnHandlerFailure()
+                defaults.deadLetterRoutingKey()
         );
     }
 

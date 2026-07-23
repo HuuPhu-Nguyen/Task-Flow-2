@@ -10,6 +10,7 @@ import transport.BrokerTransport;
 import transport.OutboundTransportMessage;
 import transport.TransportMessageHandler;
 import transport.TransportRoute;
+import transport.TransientDeliveryException;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -72,7 +73,7 @@ class PeerNodeTest {
                 new PingMessage("peer-1", "now")
         );
 
-        IllegalStateException error = assertThrows(IllegalStateException.class,
+        TransientDeliveryException error = assertThrows(TransientDeliveryException.class,
                 () -> RabbitMqPeerNode.publishConfirmed(transport, message, "publish failed"));
 
         assertEquals("publish failed", error.getMessage());
@@ -111,12 +112,14 @@ class PeerNodeTest {
     void rabbitMqSubmitCommandFailsWhenBrokerDoesNotConfirmJobSubmit() {
         RecordingBrokerTransport transport = new RecordingBrokerTransport(false);
 
-        IllegalStateException error = assertThrows(IllegalStateException.class, () -> RabbitMqPeerNode.submitJob(
-                "peer-submit",
-                transport,
-                new String[] {"submit", "TEXT_ANALYSIS", "csv", "notes.txt"},
-                Map.of("TEXT_ANALYSIS", new CapturingClientPlugin())
-        ));
+        TransientDeliveryException error = assertThrows(
+                TransientDeliveryException.class,
+                () -> RabbitMqPeerNode.submitJob(
+                        "peer-submit",
+                        transport,
+                        new String[] {"submit", "TEXT_ANALYSIS", "csv", "notes.txt"},
+                        Map.of("TEXT_ANALYSIS", new CapturingClientPlugin())
+                ));
 
         assertTrue(error.getMessage().contains("Job submit publish was not confirmed"));
         assertEquals(TransportRoute.JOB_SUBMIT, transport.publishedMessage.route());

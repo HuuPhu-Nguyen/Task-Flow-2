@@ -15,6 +15,7 @@ class RabbitMqOnlyRuntimeArchitectureTest {
     private static final List<String> RUNTIME_MODULES = List.of(
             "taskflow-spi",
             "taskflow-core",
+            "taskflow-transport-rabbitmq",
             "taskflow-coordinator",
             "taskflow-peer",
             "taskflow-gui"
@@ -78,6 +79,44 @@ class RabbitMqOnlyRuntimeArchitectureTest {
             try (Stream<Path> files = Files.walk(configRoot)) {
                 for (Path file : files.filter(Files::isRegularFile).toList()) {
                     assertNoSelector(file);
+                }
+            }
+        }
+    }
+
+    @Test
+    void consumerRuntimeUsesTypedDeliveryDispositionInsteadOfPrimitiveSettlementCalls()
+            throws IOException {
+        Path root = repositoryRoot();
+        String disposition = Files.readString(root.resolve(
+                "taskflow-spi/src/main/java/transport/DeliveryDisposition.java"
+        ));
+        for (String required : List.of(
+                "ACK_SUCCESS",
+                "ACK_DUPLICATE_OR_STALE",
+                "RETRY_TRANSIENT",
+                "REJECT_INVALID",
+                "QUARANTINE_POISON"
+        )) {
+            assertTrue(disposition.contains(required), "Missing delivery disposition " + required);
+        }
+
+        for (String module : RUNTIME_MODULES) {
+            Path sourceRoot = root.resolve(module).resolve("src/main/java");
+            if (!Files.isDirectory(sourceRoot)) {
+                continue;
+            }
+            try (Stream<Path> sources = Files.walk(sourceRoot)) {
+                for (Path source : sources.filter(Files::isRegularFile).toList()) {
+                    String content = Files.readString(source);
+                    assertFalse(content.contains(".ack()"),
+                            source + " bypasses typed broker disposition with ack()");
+                    assertFalse(content.contains(".requeue()"),
+                            source + " bypasses typed broker disposition with requeue()");
+                    assertFalse(content.contains(".reject()"),
+                            source + " bypasses typed broker disposition with reject()");
+                    assertFalse(content.contains("TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE"),
+                            source + " retains the removed generic handler-failure toggle");
                 }
             }
         }

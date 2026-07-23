@@ -16,8 +16,7 @@ public record RabbitMqTransportConfig(
         boolean deadLetterEnabled,
         String deadLetterExchangeName,
         String deadLetterQueueName,
-        String deadLetterRoutingKey,
-        boolean requeueOnHandlerFailure
+        String deadLetterRoutingKey
 ) {
     public static final int DEFAULT_PORT = 5672;
 
@@ -77,8 +76,7 @@ public record RabbitMqTransportConfig(
                 true,
                 "taskflow.dead-letter.exchange",
                 "taskflow.dead-letter",
-                "dead-letter",
-                true
+                "dead-letter"
         );
     }
 
@@ -102,8 +100,7 @@ public record RabbitMqTransportConfig(
                 booleanValue(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", defaults.deadLetterEnabled()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", defaults.deadLetterExchangeName()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", defaults.deadLetterQueueName()),
-                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", defaults.deadLetterRoutingKey()),
-                booleanValue(env, "TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE", defaults.requeueOnHandlerFailure())
+                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", defaults.deadLetterRoutingKey())
         );
     }
 

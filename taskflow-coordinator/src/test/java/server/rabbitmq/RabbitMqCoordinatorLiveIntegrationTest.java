@@ -845,8 +845,7 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 true,
                 name + ".dlx",
                 name + ".dlq",
-                "dead-letter",
-                false
+                "dead-letter"
         );
     }
 

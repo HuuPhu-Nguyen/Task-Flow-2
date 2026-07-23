@@ -3,6 +3,7 @@ package server.scheduler;
 import org.junit.jupiter.api.Test;
 import protocol.PongMessage;
 import server.model.MessageEnvelope;
+import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
@@ -11,6 +12,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -71,6 +73,7 @@ class SchedulerMailboxTest {
 
         assertEquals(1, acknowledgement.deferCount());
         assertEquals(1, acknowledgement.requeueCount());
+        assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
         assertEquals(1, mailbox.size());
     }
 
@@ -90,8 +93,10 @@ class SchedulerMailboxTest {
 
         assertEquals(1, firstOverflow.deferCount());
         assertEquals(1, firstOverflow.requeueCount());
+        assertEquals(DeliveryDisposition.RETRY_TRANSIENT, firstOverflow.disposition());
         assertEquals(1, secondOverflow.deferCount());
         assertEquals(1, secondOverflow.requeueCount());
+        assertEquals(DeliveryDisposition.RETRY_TRANSIENT, secondOverflow.disposition());
         assertEquals(1, mailbox.size());
         assertSame(accepted, mailbox.take());
     }
@@ -112,6 +117,13 @@ class SchedulerMailboxTest {
     private static class RecordingAcknowledgement implements TransportAcknowledgement {
         private final AtomicInteger deferCount = new AtomicInteger();
         private final AtomicInteger requeueCount = new AtomicInteger();
+        private final AtomicReference<DeliveryDisposition> disposition = new AtomicReference<>();
+
+        @Override
+        public void settle(DeliveryDisposition requestedDisposition) throws Exception {
+            disposition.compareAndSet(null, requestedDisposition);
+            TransportAcknowledgement.super.settle(requestedDisposition);
+        }
 
         @Override
         public void ack() {
@@ -137,6 +149,10 @@ class SchedulerMailboxTest {
 
         int requeueCount() {
             return requeueCount.get();
+        }
+
+        DeliveryDisposition disposition() {
+            return disposition.get();
         }
     }
 }

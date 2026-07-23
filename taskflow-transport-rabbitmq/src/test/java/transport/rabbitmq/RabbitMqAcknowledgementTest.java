@@ -2,6 +2,9 @@ package transport.rabbitmq;
 
 import com.rabbitmq.client.Channel;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import transport.DeliveryDisposition;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -13,6 +16,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqAcknowledgementTest {
+    @ParameterizedTest
+    @EnumSource(DeliveryDisposition.class)
+    void typedDispositionIsRecordedAndSettlesExactlyOnce(DeliveryDisposition disposition)
+            throws Exception {
+        RecordingChannel channel = new RecordingChannel();
+        RabbitMqAcknowledgement acknowledgement = new RabbitMqAcknowledgement(channel.proxy(), 41L);
+
+        acknowledgement.settle(disposition);
+        acknowledgement.settle(DeliveryDisposition.ACK_SUCCESS);
+
+        assertEquals(disposition, acknowledgement.settledDisposition());
+        assertEquals(disposition.acknowledges() ? 1 : 0, channel.ackCount);
+        assertEquals(disposition.retries() ? 1 : 0, channel.nackCount);
+        assertEquals(disposition.rejects() ? 1 : 0, channel.rejectCount);
+        assertEquals(1, channel.ackCount + channel.nackCount + channel.rejectCount);
+    }
+
     @Test
     void ackSettlesDeliveryOnlyOnce() throws Exception {
         RecordingChannel channel = new RecordingChannel();

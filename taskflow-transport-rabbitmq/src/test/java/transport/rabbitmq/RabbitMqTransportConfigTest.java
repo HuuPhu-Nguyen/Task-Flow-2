@@ -25,7 +25,6 @@ class RabbitMqTransportConfigTest {
         assertEquals("taskflow.dead-letter.exchange", config.deadLetterExchangeName());
         assertEquals("taskflow.dead-letter", config.deadLetterQueueName());
         assertEquals("dead-letter", config.deadLetterRoutingKey());
-        assertTrue(config.requeueOnHandlerFailure());
     }
 
     @Test
@@ -44,8 +43,7 @@ class RabbitMqTransportConfigTest {
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", "true"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", "tf.dlx"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", "tf.dlq"),
-                Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", "tf.dead"),
-                Map.entry("TASKFLOW_RABBITMQ_REQUEUE_ON_HANDLER_FAILURE", "false")
+                Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", "tf.dead")
         ));
 
         assertEquals("broker", config.host());
@@ -62,7 +60,6 @@ class RabbitMqTransportConfigTest {
         assertEquals("tf.dlx", config.deadLetterExchangeName());
         assertEquals("tf.dlq", config.deadLetterQueueName());
         assertEquals("tf.dead", config.deadLetterRoutingKey());
-        assertEquals(false, config.requeueOnHandlerFailure());
     }
 
     @Test
@@ -83,8 +80,7 @@ class RabbitMqTransportConfigTest {
                 true,
                 "",
                 defaults.deadLetterQueueName(),
-                defaults.deadLetterRoutingKey(),
-                defaults.requeueOnHandlerFailure()
+                defaults.deadLetterRoutingKey()
         ));
     }
 
@@ -116,8 +112,7 @@ class RabbitMqTransportConfigTest {
                 defaults.deadLetterEnabled(),
                 defaults.deadLetterExchangeName(),
                 defaults.deadLetterQueueName(),
-                defaults.deadLetterRoutingKey(),
-                defaults.requeueOnHandlerFailure()
+                defaults.deadLetterRoutingKey()
         ));
 
         assertEquals("publisherConfirmTimeoutMillis must be positive", error.getMessage());

@@ -9,24 +9,26 @@ adaptive throttling remains deferred.
   `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`.
 - RabbitMQ coordinator deliveries for `JOB_SUBMIT` and `TASK_RESULT` remain
   unacknowledged until scheduler admission. If the mailbox is full, the
-  delivery is requeued and already accepted work is unchanged.
+  delivery receives `RETRY_TRANSIENT` and already accepted work is unchanged.
 - RabbitMQ consumers apply `TASKFLOW_RABBITMQ_PREFETCH`, limiting outstanding
   unacknowledged deliveries per consumer channel.
 - Executor participants defer `TASK_ASSIGN` acknowledgement until the matching
-  `TASK_RESULT` publication is broker-confirmed. A failed publication requeues
-  the assignment.
+  `TASK_RESULT` publication is broker-confirmed. A transient failed publication
+  gives the assignment `RETRY_TRANSIENT`.
 - Participant liveness events are internal coordinator events. If the bounded
   scheduler mailbox cannot admit one, the coordinator logs an explicit
   dropped-event error instead of claiming it was handled.
 
-These mechanisms define one broker-facing overload contract. They do not claim
-adaptive capacity management or bounded delayed poison-message retry.
+These mechanisms define one broker-facing overload contract. The current
+RabbitMQ adapter maps `RETRY_TRANSIENT` to immediate broker requeue. It does not
+yet claim adaptive capacity management or the delayed/attempt-bounded retry
+topology owned by TF-0303.
 
 ## Current Evidence
 
 - `SchedulerMailboxTest` covers bounded mailbox creation, accepted broker
-  delivery deferral, full-mailbox requeue, and repeated overflow without
-  replacing already accepted work.
+  delivery deferral, full-mailbox transient disposition, and repeated overflow
+  without replacing already accepted work.
 - `RabbitMqTransportLiveTest` covers prefetch with unacknowledged deliveries.
 - `RabbitMqCoordinatorConnectionTest` and `WorkerAssignmentDeduplicationIntegrationTest`
   cover deferred assignment acknowledgement and confirmed result publication.

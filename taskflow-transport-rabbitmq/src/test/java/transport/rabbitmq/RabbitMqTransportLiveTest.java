@@ -17,6 +17,7 @@ import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
 import transport.TransportRoute;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -115,7 +116,7 @@ class RabbitMqTransportLiveTest {
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
         RabbitMqManagement management = RabbitMqManagement.fromEnvironment(config);
         Assumptions.assumeTrue(management.isAvailable(),
@@ -170,12 +171,12 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void rejectsHandlerFailuresToDeadLetterQueueAgainstLiveBroker() throws Exception {
+    void rejectsDeterministicHandlerFailureToDeadLetterQueueAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -207,12 +208,12 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void inspectsAndRedrivesDeadLetteredHandlerFailureAgainstLiveBroker() throws Exception {
+    void inspectsAndRedrivesDeadLetteredDeterministicHandlerFailureAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -267,7 +268,7 @@ class RabbitMqTransportLiveTest {
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -302,12 +303,12 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void requeuesHandlerFailuresWhenConfiguredAgainstLiveBroker() throws Exception {
+    void requeuesTransientHandlerFailuresAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, true);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -322,7 +323,7 @@ class RabbitMqTransportLiveTest {
                 String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
                     int attempt = attempts.incrementAndGet();
                     if (attempt == 1) {
-                        throw new IllegalStateException("expected live-test requeue");
+                        throw new IOException("expected transient live-test requeue");
                     }
                     assertDelivery(redelivered, failure, () -> assertHeartbeatDelivery(delivery));
                 });
@@ -349,7 +350,7 @@ class RabbitMqTransportLiveTest {
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token, false);
+        RabbitMqTransportConfig config = liveConfig(token);
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -527,10 +528,6 @@ class RabbitMqTransportLiveTest {
     }
 
     private static RabbitMqTransportConfig liveConfig(String token) {
-        return liveConfig(token, false);
-    }
-
-    private static RabbitMqTransportConfig liveConfig(String token, boolean requeueOnHandlerFailure) {
         RabbitMqTransportConfig base = RabbitMqTransportConfig.fromEnvironment();
         String name = "taskflow.live." + token;
         return new RabbitMqTransportConfig(
@@ -547,8 +544,7 @@ class RabbitMqTransportLiveTest {
                 true,
                 name + ".dlx",
                 name + ".dlq",
-                "dead-letter",
-                requeueOnHandlerFailure
+                "dead-letter"
         );
     }
 

@@ -255,8 +255,7 @@ class RabbitMqDlqClientTest {
                 defaults.deadLetterEnabled(),
                 defaults.deadLetterExchangeName(),
                 defaults.deadLetterQueueName(),
-                defaults.deadLetterRoutingKey(),
-                defaults.requeueOnHandlerFailure()
+                defaults.deadLetterRoutingKey()
         );
     }
 
