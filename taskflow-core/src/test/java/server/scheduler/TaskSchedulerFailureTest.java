@@ -803,7 +803,7 @@ class TaskSchedulerFailureTest {
                     List.of("TEST_TASK")
             ));
             mailbox.put(new MessageEnvelope(
-                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "tcp_disconnect"),
+                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "heartbeat_timeout"),
                     "peer-1"
             ));
 
@@ -976,7 +976,7 @@ class TaskSchedulerFailureTest {
             assertNotNull(assignment);
             registry.remove("peer-1");
             mailbox.put(new MessageEnvelope(
-                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "tcp_disconnect"),
+                    new PeerDisconnectedMessage("peer-1", "2026-06-13T00:00:00Z", "heartbeat_timeout"),
                     "peer-1"
             ));
 

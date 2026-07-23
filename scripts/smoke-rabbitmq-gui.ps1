@@ -79,7 +79,7 @@ function Invoke-DockerCompose {
     throw "Docker Compose was not found. Install Docker Desktop, or start RabbitMQ yourself and rerun with -SkipDocker."
 }
 
-function Wait-TcpPort {
+function Wait-NetworkPort {
     param(
         [Parameter(Mandatory = $true)][string]$Address,
         [Parameter(Mandatory = $true)][int]$Port,
@@ -112,7 +112,7 @@ function Wait-RabbitMqReady {
     )
 
     if (-not $UseDockerHealthCheck) {
-        Wait-TcpPort -Address "localhost" -Port 5672 -TimeoutSeconds $TimeoutSeconds
+        Wait-NetworkPort -Address "localhost" -Port 5672 -TimeoutSeconds $TimeoutSeconds
         return
     }
 
@@ -176,7 +176,6 @@ function Start-TaskFlowProcess {
     $lines = @(
         "`$ErrorActionPreference = 'Stop'",
         "Set-Location -LiteralPath $(ConvertTo-SingleQuotedLiteral $RepoRoot)",
-        "`$env:TASKFLOW_TRANSPORT = 'rabbitmq'",
         "`$env:TASKFLOW_RABBITMQ_HOST = 'localhost'",
         "`$env:TASKFLOW_RABBITMQ_PORT = '5672'",
         "`$env:TASKFLOW_RABBITMQ_USERNAME = 'guest'",
@@ -360,7 +359,6 @@ try {
     } else {
         Write-Host ""
         Write-Host "Launch the GUI in another PowerShell window with:"
-        Write-Host "`$env:TASKFLOW_TRANSPORT = 'rabbitmq'"
         Write-Host "`$env:TASKFLOW_RABBITMQ_HOST = 'localhost'"
         Write-Host "`$env:TASKFLOW_RABBITMQ_PORT = '5672'"
         Write-Host "`$env:TASKFLOW_RABBITMQ_USERNAME = 'guest'"

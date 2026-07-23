@@ -44,7 +44,6 @@ public class PeerLivenessMonitor {
                     onTimeout.accept(peer);
                 }
                 registry.remove(peer.getNodeId());
-                peer.closeConnection();
             }
         }
     }

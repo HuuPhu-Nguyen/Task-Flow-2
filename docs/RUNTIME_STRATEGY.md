@@ -1,135 +1,105 @@
 # Runtime Strategy
 
-This document records TaskFlow's transport direction. It does not add
+This document records TaskFlow's supported transport direction. It does not add
 guarantees beyond `docs/EXECUTION_GUARANTEES.md`.
 
 ## Decision
 
-RabbitMQ is the default runtime for the coordinator, command-line participants
-(the existing `taskflow-peer` artifact), and JavaFX GUI participants when
-`TASKFLOW_TRANSPORT` is unset or blank.
+RabbitMQ is the sole supported runtime transport for the coordinator,
+command-line participants (`taskflow-peer`), and JavaFX participants.
 
-TCP is deprecated as the legacy local compatibility/demo path. It remains
-available only when selected explicitly with `TASKFLOW_TRANSPORT=tcp`, and TCP
-must keep working until a later removal slice closes the removal gates below.
+TF-0301 completed the migration by removing the socket coordinator, participant
+and GUI implementations; their tests and smoke scripts; the transport selector;
+and their release surface. Runtime entry points now delegate directly to their
+RabbitMQ implementations. `TASKFLOW_TRANSPORT` is no longer read.
 
-This is a default-runtime decision, not a support-status promotion. RabbitMQ is
-still documented as transitional in `docs/RABBITMQ_SCOPE.md` because full
-broker outage/restart recovery remains outside the current support claim.
+The `taskflow-peer`, `PeerNode`, `peerId`, and `nodeId` names remain compatibility
+vocabulary for participant roles and persisted/wire fields. They do not indicate
+a second transport or distributed coordinator authority.
 
-## Rationale
+## One Delivery Contract
 
-The broker-backed runtime is the better long-term fit for the framework:
+All supported runtime delivery behavior is defined against RabbitMQ:
 
-- participants have explicit broker identities and peer-targeted compatibility
-  routes;
-- coordinator and participant processes can communicate without one socket per
-  participant;
-- broker queues expose natural integration points for prefetch, acknowledgement,
-  dead-lettering, and later operator workflows;
-- the Docker Compose demo already exercises a distributed broker-backed path.
+- shared routes carry heartbeats, job submissions, and task results;
+- participant-specific routes carry task assignments and final job results;
+- consumers use manual acknowledgement and configured prefetch;
+- invalid or incompatible messages are rejected without requeue and can enter
+  the dead-letter workflow;
+- duplicate or stale scheduler outcomes are acknowledged without changing
+  authoritative state;
+- scheduler-mailbox saturation and current transient handler/storage failures
+  requeue under the documented RabbitMQ rules;
+- coordinator `TASK_ASSIGN` and final `JOB_RESULT` publication intent is stored
+  in SQLite outbox rows before publication when persistence is available;
+- publisher confirms and mandatory-return detection decide whether an outbound
+  row can be marked sent; replay can therefore duplicate delivery.
 
-TCP remains available for compatibility while the remaining recovery and
-operational gaps are closed.
+At-least-once delivery and execution remain explicit. Publisher confirmation is
+not consumer completion, and exactly-once delivery is not claimed.
 
-## Current State
+Typed delivery dispositions and bounded delayed poison-message retry are later
+Phase 3 work. Until those tasks complete, the limits in
+`docs/RABBITMQ_SCOPE.md` remain authoritative.
 
-- RabbitMQ is the default when `TASKFLOW_TRANSPORT` is unset or blank.
-- The JavaFX GUI submits jobs, executes assigned work, and receives live results
-  through RabbitMQ by default or TCP when `TASKFLOW_TRANSPORT=tcp`.
-- TCP is selected explicitly with `TASKFLOW_TRANSPORT=tcp` for the coordinator,
-  command-line participant, and JavaFX participant.
-- TCP and RabbitMQ participants share the explicit peer identity contract in
-  `docs/PEER_IDENTITY.md`: `TASKFLOW_PEER_ID` provides stable configured IDs,
-  generated fallback IDs are runtime-scoped, and TCP no longer uses remote
-  socket addresses as peer IDs.
-- The coordinator persists durable peer registry metadata in SQLite when
-  persistence is available: peer ID, runtime type, transport, capabilities,
-  heartbeat/disconnect times, status, and scheduling metric snapshots. Live
-  connection objects and broker consumers remain in memory only.
-- GUI and command-line submitters generate peer-scoped, collision-resistant job
-  IDs with the sanitized peer ID, a timestamp, and a full UUID. The scheduler
-  treats `jobId` as a requester-scoped idempotency key: an exact owner/request
-  replay returns current status or the terminal result without creating work,
-  while request-hash, owner, and unverifiable-legacy collisions are rejected.
-  SQLite schema v12 keeps this decision stable across coordinator restart.
-- RabbitMQ command-line participants can register with peer IDs, send heartbeats,
-  execute assigned work in the executor role, submit jobs in the requester role,
-  receive `JOB_RESULT`, and handle successful final results through
-  `ClientJobPlugin.handleResult(...)`.
-- RabbitMQ JavaFX participants use GUI service adapters for signed job submission,
-  peer-specific task assignment, task-result publication, live `JOB_RESULT`
-  routing, and plugin-backed result handling. RabbitMQ GUI result-request replay
-  after restart is not implemented.
-- Automated JavaFX RabbitMQ desktop smoke evidence covers GUI startup,
-  broker-backed text-analysis submission, assigned-task execution, live
-  `JOB_RESULT` routing, plugin-backed result saving, and broker-failure
-  heartbeat handling.
-- SQLite-backed RabbitMQ coordinator runs persist outbound `TASK_ASSIGN` and
-  final `JOB_RESULT` messages in a broker outbox transactionally with scheduler
-  state changes, replay pending rows on startup, and retry unsent rows while the
-  coordinator runs.
-- RabbitMQ dead-letter entries can be inspected through the compatibility
-  `taskflow-peer` artifact, redriven to their original routing key when they
-  contain valid TaskFlow broker envelopes, quarantined, or discarded.
-- RabbitMQ has focused live broker coverage, including coordinator outbox
-  crash-window scenarios, a dedicated GitHub Actions broker integration job,
-  and a Docker Compose demo. Live broker tests remain opt-in for local runs.
-- Focused RabbitMQ failure-path tests cover command-line requester publish
-  exceptions, JavaFX GUI heartbeat publish failure, task-result publish
-  failure, task-execution failure requeue, publisher confirms,
-  requeue/reject/DLQ behavior, and result routing.
+## Current Runtime
 
-## RabbitMQ Support Promotion Gates
+- The coordinator is the sole scheduling and durable-state authority.
+- Command-line and JavaFX participants can enable requester, executor, or both
+  roles through their Maven runtime profiles.
+- Participants use explicit sanitized IDs from `TASKFLOW_PEER_ID`, or a unique
+  process-scoped generated fallback.
+- SQLite stores last-known participant metadata and coordinator outbox rows;
+  live broker consumers and channels remain process-local.
+- GUI and command-line submitters use peer-scoped, collision-resistant job IDs.
+- Exact duplicate submissions are resolved through requester ownership and the
+  persisted canonical request hash.
+- RabbitMQ command-line and JavaFX participants submit jobs, execute assignments,
+  publish results, and receive live final results through the same broker
+  contract.
+- RabbitMQ GUI `JOB_RESULT_REQUEST` replay after restart is not implemented;
+  exact duplicate submission replay and live `JOB_RESULT` delivery are the
+  available paths.
+- Live broker tests, broker-backed CI, Docker Compose, and the JavaFX desktop
+  smoke helper exercise the supported runtime.
 
-Do not describe RabbitMQ as the primary supported production runtime until the
-remaining gates are complete. The default transport has flipped to RabbitMQ,
-TCP deprecation has started, and TCP removal remains separate.
+## Legacy Data
 
-- Keep JavaFX RabbitMQ desktop smoke or automation evidence passing for job
-  submission, assigned-task execution, `JOB_RESULT` reception, result handling,
-  and disconnect/broker-failure handling.
-- A clear RabbitMQ GUI result-request decision: implement broker-backed
-  `JOB_RESULT_REQUEST` replay or keep it explicitly unsupported while live
-  `JOB_RESULT` delivery is the supported GUI RabbitMQ path.
-- Keep broader broker-failure integration tests passing for coordinator,
-  command-line participant, GUI service adapters, publisher confirms,
-  requeue/reject/DLQ behavior, and result routing.
-- The RabbitMQ-backed CI integration profile remains reliable for the focused
-  live broker gates.
-- README and docs stay updated so quick-start, demos, execution guarantees, and
-  limitations all describe the same runtime behavior.
+No runtime creates legacy socket participants or transport metadata. Existing
+SQLite peer-registry rows written with the removed transport value remain
+readable: their persisted runtime label is preserved for operator history and
+their unrecognized transport is exposed as `UNKNOWN`. Historical rows do not
+reactivate a runtime path.
 
-## TCP Deprecation And Removal Gates
+## Migration
 
-TCP removal must happen only after the RabbitMQ support-promotion gates pass
-and after a compatibility window.
+Deployments upgrading from the removed socket runtime must:
 
-`docs/TCP_DEPRECATION_GATES.md` tracks the deprecation evidence and the
-remaining limits before TCP can be removed.
+1. provide a reachable RabbitMQ broker;
+2. configure `TASKFLOW_RABBITMQ_*` settings as needed;
+3. remove `TASKFLOW_TRANSPORT` from environment, container, and service files;
+4. expose broker port `5672` (or the configured AMQP port), not the former
+   coordinator-listener port;
+5. assign unique stable `TASKFLOW_PEER_ID` values to concurrent participants.
 
-TCP deprecation keeps the runtime working:
+## Production-Readiness Gates
 
-- keep the TCP runtime working;
-- mark TCP as legacy in docs and runtime logs;
-- provide a migration note from TCP commands to RabbitMQ commands;
-- make RabbitMQ the recommended quick-start/demo path;
-- verify fresh clone, CI, Docker Compose demo, JavaFX RabbitMQ service tests,
-  and manual or automated GUI smoke evidence.
+RabbitMQ is the only supported transport, but the implementation remains
+transitional rather than production-ready. The remaining promotion gates are:
 
-Only in a later cleanup, remove TCP:
-
-- remove TCP-only coordinator, peer, and GUI transport code with no unrelated
-  feature work;
-- remove or rewrite TCP-only docs, scripts, and smoke paths;
-- keep plugin contracts and peer lifecycle semantics unchanged;
-- run full Maven, dependency-tree, demo, fresh-clone, and CI gates.
+- full broker outage/restart recovery for active work;
+- a final participant-side `TASK_RESULT` durability decision;
+- direct TLS/certificate configuration if brokers are used across untrusted
+  networks;
+- continued broker-backed CI, Docker Compose, and JavaFX smoke evidence;
+- typed broker dispositions and bounded delayed poison retry/quarantine;
+- measured overload evidence before adding adaptive throttling.
 
 ## Public Claim Rule
 
-Use wording such as default RabbitMQ runtime, deprecated TCP compatibility path,
-and transitional RabbitMQ support.
+Use wording such as **sole supported RabbitMQ transport**, **at-least-once
+broker delivery**, and **transitional runtime**.
 
-Avoid saying RabbitMQ is a production-ready runtime, fully supported runtime,
-durable broker runtime, or complete TCP replacement until the gates in this
-document and `docs/RABBITMQ_SCOPE.md` are complete and tested.
+Do not describe TaskFlow as production-ready, exactly-once, fully outage
+recoverable, or automatically poison-message safe until the corresponding
+gates are implemented and tested.

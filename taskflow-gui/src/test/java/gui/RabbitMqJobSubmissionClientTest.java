@@ -8,8 +8,6 @@ import transport.OutboundTransportMessage;
 import transport.TransportMessageHandler;
 import transport.TransportRoute;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -90,7 +88,7 @@ class RabbitMqJobSubmissionClientTest {
                 "TEXT_ANALYSIS",
                 List.of("payload"),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true))));
+                new TestCoordinatorConnection()));
     }
 
     @Test
@@ -105,16 +103,6 @@ class RabbitMqJobSubmissionClientTest {
                 List.of("payload"),
                 "summary",
                 new FakeRabbitMqConnection("peer-2", new RecordingBrokerTransport())));
-    }
-
-    @Test
-    void resultRequestsAreNotSupportedForRabbitMqGuiYet() {
-        RabbitMqJobSubmissionClient client = new RabbitMqJobSubmissionClient(
-                "peer-1",
-                new RecordingRequesterTokenStore());
-
-        assertThrows(UnsupportedOperationException.class, () ->
-                client.requestJobResult("job-1", new FakeRabbitMqConnection("peer-1", new RecordingBrokerTransport())));
     }
 
     private static final class FakeRabbitMqConnection implements RabbitMqBrokerConnection {
@@ -135,11 +123,6 @@ class RabbitMqJobSubmissionClientTest {
         @Override
         public String peerId() {
             return peerId;
-        }
-
-        @Override
-        public PrintWriter writer() {
-            return null;
         }
 
         @Override

@@ -46,7 +46,6 @@ COPY --from=build /app/taskflow-peer/target/taskflow-peer-1.0-SNAPSHOT-combined-
 
 RUN mkdir -p target/demo-input target/demo-results target/rabbitmq-results
 
-ENV TASKFLOW_TRANSPORT=rabbitmq
 ENV TASKFLOW_RABBITMQ_HOST=rabbitmq
 ENV TASKFLOW_RABBITMQ_PORT=5672
 ENV TASKFLOW_RABBITMQ_USERNAME=guest

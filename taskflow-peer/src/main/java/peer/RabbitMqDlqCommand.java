@@ -36,7 +36,7 @@ final class RabbitMqDlqCommand {
 
     static String usage() {
         return """
-                Usage: TASKFLOW_TRANSPORT=rabbitmq peer.PeerNode dlq <inspect|redrive|quarantine|discard> [count]
+                Usage: peer.PeerNode dlq <inspect|redrive|quarantine|discard> [count]
                 Examples:
                   .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq inspect 5"
                   .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq redrive 1"

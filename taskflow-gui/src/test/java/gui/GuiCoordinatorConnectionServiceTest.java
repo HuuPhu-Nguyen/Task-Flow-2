@@ -5,8 +5,6 @@ import protocol.JobResultMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
@@ -28,11 +26,11 @@ class GuiCoordinatorConnectionServiceTest {
         CapturingFactory factory = new CapturingFactory();
         GuiCoordinatorConnectionService service = new GuiCoordinatorConnectionService(worker, factory);
 
-        service.start("example.test", 6789, new RecordingListener());
+        service.start("example.test", 5672, new RecordingListener());
 
         FakeConnection connection = factory.connection.get();
         assertEquals("example.test", factory.host.get());
-        assertEquals(6789, factory.port.get());
+        assertEquals(5672, factory.port.get());
         assertSame(worker, factory.workerRuntime.get());
         assertTrue(connection.started);
         assertSame(connection, service.currentConnection());
@@ -45,7 +43,7 @@ class GuiCoordinatorConnectionServiceTest {
         GuiCoordinatorConnectionService service =
                 new GuiCoordinatorConnectionService(new FakeWorkerRuntime(), factory);
         RecordingListener listener = new RecordingListener();
-        service.start("localhost", 6789, listener);
+        service.start("localhost", 5672, listener);
         FakeConnection connection = factory.connection.get();
 
         connection.listener.onConnectionFailed(connection, "connection refused");
@@ -60,7 +58,7 @@ class GuiCoordinatorConnectionServiceTest {
         CapturingFactory factory = new CapturingFactory();
         GuiCoordinatorConnectionService service =
                 new GuiCoordinatorConnectionService(new FakeWorkerRuntime(), factory);
-        service.start("localhost", 6789, new RecordingListener());
+        service.start("localhost", 5672, new RecordingListener());
         FakeConnection connection = factory.connection.get();
 
         service.clear(connection, true);
@@ -76,7 +74,7 @@ class GuiCoordinatorConnectionServiceTest {
         GuiCoordinatorConnectionService service =
                 new GuiCoordinatorConnectionService(new FakeWorkerRuntime(), factory);
         RecordingListener listener = new RecordingListener();
-        service.start("localhost", 6789, listener);
+        service.start("localhost", 5672, listener);
         FakeConnection connection = factory.connection.get();
 
         service.stop();
@@ -93,7 +91,7 @@ class GuiCoordinatorConnectionServiceTest {
         GuiCoordinatorConnectionService service =
                 new GuiCoordinatorConnectionService(new FakeWorkerRuntime(), factory);
         RecordingListener listener = new RecordingListener();
-        service.start("localhost", 6789, listener);
+        service.start("localhost", 5672, listener);
         JobResultMessage result = new JobResultMessage(
                 "coordinator",
                 Instant.EPOCH.toString(),
@@ -130,7 +128,6 @@ class GuiCoordinatorConnectionServiceTest {
 
     private static final class FakeConnection implements StartableCoordinatorConnection {
         private final CoordinatorConnectionListener listener;
-        private final PrintWriter writer = new PrintWriter(new StringWriter(), true);
         private boolean started;
         private boolean closed;
 
@@ -141,11 +138,6 @@ class GuiCoordinatorConnectionServiceTest {
         @Override
         public void start() {
             started = true;
-        }
-
-        @Override
-        public PrintWriter writer() {
-            return writer;
         }
 
         @Override
@@ -203,11 +195,6 @@ class GuiCoordinatorConnectionServiceTest {
                     true,
                     null
             ));
-        }
-
-        @Override
-        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
-            return CompletableFuture.completedFuture(true);
         }
 
         @Override

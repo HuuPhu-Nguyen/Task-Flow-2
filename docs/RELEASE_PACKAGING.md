@@ -21,6 +21,9 @@ remain compatibility names for the command-line participant runtime.
 - Plugin bundles stay as role-split Maven artifacts under `plugins/<domain>`.
 - Docker Compose remains the broker-backed demo distribution, not the only
   release packaging mechanism.
+- Every supported runtime package uses `taskflow-transport-rabbitmq`; no legacy
+  socket transport module or implementation is included in the default reactor
+  or release classpaths.
 
 The default `combined-runtime` participant is a dual-role convenience and demo
 package. Use the requester-only `submitter-runtime` profile or the executor-only
@@ -156,12 +159,33 @@ The GUI smoke command intentionally uses only the GUI jar. It verifies the
 package entry point and help path; full GUI launch still requires the JavaFX
 runtime dependencies on the module path as shown above.
 
+After packaging, verify that no removed runtime classes entered a release jar:
+
+```powershell
+$runtimeJars = @(
+    "taskflow-coordinator\target\taskflow-coordinator-1.0-SNAPSHOT-coordinator-runtime.jar",
+    "taskflow-peer\target\taskflow-peer-1.0-SNAPSHOT-combined-runtime.jar",
+    "taskflow-peer\target\taskflow-peer-1.0-SNAPSHOT-submitter-runtime.jar",
+    "taskflow-peer\target\taskflow-peer-1.0-SNAPSHOT-executor-runtime.jar",
+    "taskflow-gui\target\taskflow-gui-1.0-SNAPSHOT.jar"
+)
+foreach ($runtimeJar in $runtimeJars) {
+    $legacy = (& jar tf $runtimeJar) |
+        Select-String -CaseSensitive '^(server/(handler/PeerHandler|transport/TcpPeerConnection|scheduler/PeerRegistrySchedulerOutput)|messaging/(MessageDispatcher|MessageFactory|MessageHandler|SafeJsonWriter|handlers/(PingHandler|PongHandler))|transport/TransportConnection|gui/(GuiTransportMode|TcpCoordinatorConnection|TcpJobSubmissionClient))(\$.*)?\.class$'
+    if ($legacy) {
+        throw "Legacy transport class found in $runtimeJar`: $legacy"
+    }
+}
+```
+
 ## Dependency Gates
 
 Run dependency-tree checks whenever package roles change.
 
 Required checks for the current package strategy:
 
+- The root reactor and coordinator, command-line participant, and GUI packages
+  must declare RabbitMQ as their only runtime transport dependency.
 - `taskflow-coordinator` must not depend on client plugins, peer plugins,
   JavaFX, or JavaCV/FFmpeg.
 - `taskflow-peer -Psubmitter-runtime` and

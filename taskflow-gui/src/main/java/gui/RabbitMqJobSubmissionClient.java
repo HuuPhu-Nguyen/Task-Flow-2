@@ -93,8 +93,4 @@ final class RabbitMqJobSubmissionClient implements JobSubmissionClient {
         }
     }
 
-    @Override
-    public void requestJobResult(String jobId, CoordinatorConnection connection) {
-        throw new UnsupportedOperationException("RabbitMQ GUI result requests are not supported yet.");
-    }
 }

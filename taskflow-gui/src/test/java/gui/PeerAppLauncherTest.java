@@ -2,6 +2,7 @@ package gui;
 
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PeerAppLauncherTest {
@@ -16,7 +17,8 @@ class PeerAppLauncherTest {
         assertTrue(usage.contains("taskflow-gui-<version>.jar"));
         assertTrue(usage.contains("gui.PeerAppLauncher"));
         assertTrue(usage.contains("javafx.controls,javafx.fxml"));
-        assertTrue(usage.contains("TASKFLOW_TRANSPORT=tcp"));
-        assertTrue(usage.contains("TASKFLOW_TRANSPORT=rabbitmq"));
+        assertTrue(usage.contains("RabbitMQ JavaFX participant runtime"));
+        assertFalse(usage.contains("TASKFLOW_TRANSPORT"));
+        assertFalse(usage.contains("TCP"));
     }
 }

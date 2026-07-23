@@ -313,8 +313,9 @@ final class AssignmentService {
     }
 
     private List<PeerInfo> getAvailablePeers(String taskType) {
+        // RabbitMQ participants are eligible while present in the live registry;
+        // heartbeat timeout removes them before a later dispatch cycle.
         return registry.getAllPeers().stream()
-                .filter(PeerInfo::isConnected)
                 .filter(peer -> peer.supportsTaskType(taskType))
                 .filter(peer -> peer.getActiveTasks() < config.maxTasksPerPeer())
                 .sorted(Comparator.comparingDouble(PeerInfo::getSelectionScore))

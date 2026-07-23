@@ -22,7 +22,6 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StatusCommandTest {
@@ -36,8 +35,7 @@ class StatusCommandTest {
                 List.of(dlqMessage("msg-1", true))
         );
 
-        String output = runStatus(fakeDataSource(), rabbitMq, Map.of("TASKFLOW_TRANSPORT", "rabbitmq"),
-                "status", "summary", "5");
+        String output = runStatus(fakeDataSource(), rabbitMq, "status", "summary", "5");
 
         assertTrue(output.contains("database status=available path=taskflow.db schema="
                 + DatabaseManager.CURRENT_SCHEMA_VERSION));
@@ -51,40 +49,21 @@ class StatusCommandTest {
     }
 
     @Test
-    void summaryUsesRabbitMqWhenTransportIsUnset() throws Exception {
+    void summaryAlwaysUsesRabbitMq() throws Exception {
         FakeRabbitMqStatusClient rabbitMq = new FakeRabbitMqStatusClient(
                 List.of(new RabbitMqQueueStatus("JOB_SUBMIT", "taskflow.jobs", 0L, 0L, true, "")),
                 List.of()
         );
 
-        String output = runStatus(fakeDataSource(), rabbitMq, Map.of(), "status", "summary");
+        String output = runStatus(fakeDataSource(), rabbitMq, "status", "summary");
 
         assertTrue(output.contains("rabbitmq status=available queues=1"));
         assertTrue(rabbitMq.declaredTopology);
     }
 
     @Test
-    void summarySkipsRabbitMqOnlyWhenTcpIsExplicit() throws Exception {
-        FakeRabbitMqStatusClient rabbitMq = FakeRabbitMqStatusClient.empty();
-
-        String output = runStatus(fakeDataSource(), rabbitMq, Map.of("TASKFLOW_TRANSPORT", "tcp"),
-                "status", "summary");
-
-        assertTrue(output.contains("rabbitmq status=not_selected transport=tcp"));
-        assertFalse(rabbitMq.declaredTopology);
-    }
-
-    @Test
-    void summaryRejectsUnknownTransport() {
-        assertThrows(IllegalArgumentException.class, () ->
-                runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(),
-                        Map.of("TASKFLOW_TRANSPORT", "udp"), "status", "summary"));
-    }
-
-    @Test
     void jobsViewPrintsRecentJobsWithRetryAndAttemptCounts() throws Exception {
-        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), Map.of(),
-                "status", "jobs", "1");
+        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), "status", "jobs", "1");
 
         assertTrue(output.contains("TaskFlow jobs limit=1"));
         assertTrue(output.contains("job[1] id=job-running type=TEXT_ANALYSIS status=RUNNING requester=requester-1 files=2"));
@@ -99,7 +78,7 @@ class StatusCommandTest {
                 List.of()
         );
 
-        String output = runStatus(fakeDataSource(), rabbitMq, Map.of(), "status", "queues");
+        String output = runStatus(fakeDataSource(), rabbitMq, "status", "queues");
 
         assertTrue(output.contains("TaskFlow RabbitMQ queues"));
         assertTrue(output.contains("queue[1] role=JOB_SUBMIT name=taskflow.jobs messages=4 consumers=2 available=true error=\"\""));
@@ -113,7 +92,7 @@ class StatusCommandTest {
                 List.of(dlqMessage("msg-poison", false))
         );
 
-        String output = runStatus(fakeDataSource(), rabbitMq, Map.of(), "status", "dlq", "3");
+        String output = runStatus(fakeDataSource(), rabbitMq, "status", "dlq", "3");
 
         assertTrue(output.contains("TaskFlow RabbitMQ DLQ limit=3"));
         assertTrue(output.contains("dlq visible=1 limit=3 redrivable=0 nonRedrivable=1"));
@@ -125,7 +104,7 @@ class StatusCommandTest {
 
     @Test
     void helpPrintsStatusUsage() throws Exception {
-        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), Map.of(), "status", "--help");
+        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), "status", "--help");
 
         assertTrue(output.contains("status [summary|jobs|peers|outbox|queues|dlq] [count]"));
         assertTrue(output.contains("participant rows (peer registry compatibility view)"));
@@ -134,8 +113,7 @@ class StatusCommandTest {
 
     @Test
     void peersViewLabelsEntriesAsParticipantsWhileKeepingCompatibilityCommand() throws Exception {
-        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), Map.of(),
-                "status", "peers", "1");
+        String output = runStatus(fakeDataSource(), FakeRabbitMqStatusClient.empty(), "status", "peers", "1");
 
         assertTrue(output.contains("TaskFlow participants (peers compatibility view) limit=1"));
         assertTrue(output.contains("peer[1] id="));
@@ -143,11 +121,10 @@ class StatusCommandTest {
 
     private static String runStatus(FakeStatusDataSource dataSource,
                                     FakeRabbitMqStatusClient rabbitMq,
-                                    Map<String, String> environment,
                                     String... args) throws Exception {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         try (PrintStream out = new PrintStream(buffer, true, StandardCharsets.UTF_8)) {
-            StatusCommand.run(args, out, () -> dataSource, () -> rabbitMq, environment);
+            StatusCommand.run(args, out, () -> dataSource, () -> rabbitMq);
         }
         return buffer.toString(StandardCharsets.UTF_8);
     }
@@ -304,8 +281,8 @@ class StatusCommandTest {
                         ),
                         new PeerRegistryRecord(
                                 "peer-2",
-                                "TCP_PEER",
-                                PeerTransport.TCP,
+                                "RABBITMQ_PEER",
+                                PeerTransport.RABBITMQ,
                                 Set.of("IMAGE_CONVERSION"),
                                 20L,
                                 120L,

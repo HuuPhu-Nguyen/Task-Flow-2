@@ -6,9 +6,8 @@ transport direction is recorded in `docs/RUNTIME_STRATEGY.md`.
 
 ## Decision
 
-RabbitMQ is the default runtime, but the current RabbitMQ implementation
-remains a transitional broker adapter, not a fully supported production
-runtime.
+RabbitMQ is TaskFlow's sole supported runtime transport. The current
+implementation remains transitional, not a production-ready broker runtime.
 
 The current implementation is useful for broker-backed demos and focused
 integration coverage, but it does not yet provide every operational workflow
@@ -19,22 +18,21 @@ replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
 redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
 Focused broker-failure coverage now spans coordinator, command-line
 participant, GUI service adapters, publisher confirms, requeue/reject/DLQ
-behavior, and result routing. Automated JavaFX RabbitMQ desktop smoke evidence covers live
-submit/execute/result/save and broker-failure heartbeat handling. Full broker
-outage/restart recovery remains incomplete. TCP is deprecated and available
-only when selected explicitly with `TASKFLOW_TRANSPORT=tcp` until a later
-removal slice passes the gates in `docs/RUNTIME_STRATEGY.md`.
+behavior, and result routing. Automated JavaFX RabbitMQ desktop smoke evidence
+covers live submit/execute/result/save and broker-failure heartbeat handling.
+Full broker outage/restart recovery remains incomplete. TF-0301 removed the
+legacy socket runtime and transport selector from supported builds and releases.
 
 ## Current RabbitMQ Guarantees
 
 The current RabbitMQ path includes:
 
-- Coordinator and command-line participant entry points use RabbitMQ by default
-  when `TASKFLOW_TRANSPORT` is unset or blank.
+- Coordinator, command-line participant, and JavaFX entry points start RabbitMQ
+  directly; there is no runtime transport selector.
 - Shared broker routes for heartbeat, job submission, and task result messages.
 - Peer-specific broker routes for task assignment and job result messages.
-- Explicit sanitized peer IDs shared with TCP, command-line participants, and
-  JavaFX GUI participants through `TASKFLOW_PEER_ID` and
+- Explicit sanitized peer IDs shared by command-line and JavaFX GUI participants
+  through `TASKFLOW_PEER_ID` and
   `docs/PEER_IDENTITY.md`.
 - SQLite-backed coordinator participant-registry metadata under the existing
   peer registry schema: peer IDs, runtime types,
@@ -48,15 +46,14 @@ The current RabbitMQ path includes:
   are permanent conflicts. This uses the existing `JOB_SUBMIT` and
   peer-specific `JOB_RESULT` routes; it does not add the still-deferred broker
   `JOB_RESULT_REQUEST` control route.
-- JSON protocol serialization through the same protocol message types used by
-  TCP, with version checks on both the RabbitMQ envelope and the inner protocol
-  message.
+- JSON protocol serialization through the SPI protocol message types, with
+  version checks on both the RabbitMQ envelope and the inner protocol message.
 - Shared message validation for broker envelope sender IDs, required protocol
   fields, safe peer/job/task identifiers, task-type names, task-count limits,
   inline job payload size, and result payload size.
 - The command-line participant's requester mode builds payloads and handles
   successful final results through `ClientJobPlugin.handleResult(...)`.
-- JavaFX GUI mode uses RabbitMQ by default, publishes signed job submissions,
+- JavaFX GUI mode uses RabbitMQ, publishes signed job submissions,
   sends heartbeats, consumes peer-specific task assignments and job results,
   publishes task results, and routes successful final results through
   `ClientJobPlugin.handleResult(...)`.
@@ -138,9 +135,9 @@ the tested behavior above.
 
 ## Gates For Supported Runtime Status
 
-RabbitMQ can be reconsidered as the primary supported production runtime only
-after the support-promotion gates in `docs/RUNTIME_STRATEGY.md` and the
-behavior gates below are implemented and tested.
+RabbitMQ can be reconsidered production-ready only after the promotion gates in
+`docs/RUNTIME_STRATEGY.md` and the behavior gates below are implemented and
+tested.
 
 First keep support-promotion evidence current:
 
@@ -164,12 +161,12 @@ Then promote evidence:
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,
-  and transport scope describe the same default and support status.
+  and transport scope describe the same sole-transport and support status.
 - Add direct RabbitMQ TLS/certificate configuration and live verification if
   TaskFlow is expected to connect to brokers across untrusted networks.
 
-Only after those gates should documentation describe RabbitMQ as a primary
-supported production runtime rather than a transitional adapter.
+Only after those gates should documentation describe RabbitMQ as
+production-ready rather than transitional.
 
 ## Public Claim Rule
 

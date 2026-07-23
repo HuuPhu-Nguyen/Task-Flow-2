@@ -4,10 +4,6 @@ import org.junit.jupiter.api.Test;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.io.Writer;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -23,43 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PeerExecutionEngineTest {
-
-    @Test
-    void submitTaskReportsSuccessfulResultSend() throws Exception {
-        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
-        try {
-            engine.registerProcessor("TEST", task -> "done");
-            StringWriter buffer = new StringWriter();
-            PrintWriter out = new PrintWriter(buffer);
-
-            boolean sent = engine.submitTask(testTask(), out).get(2, TimeUnit.SECONDS);
-
-            assertTrue(sent);
-            assertTrue(buffer.toString().contains("\"protocolVersion\":2"));
-            assertTrue(buffer.toString().contains("\"type\":\"TASK_RESULT\""));
-            assertTrue(buffer.toString().contains("\"taskId\":\"task-1\""));
-            assertTrue(buffer.toString().contains("\"attemptNumber\":7"));
-            assertTrue(buffer.toString().contains(
-                    "\"assignmentId\":\"550e8400-e29b-41d4-a716-446655440000\""));
-        } finally {
-            engine.shutdown();
-        }
-    }
-
-    @Test
-    void submitTaskReportsFailedResultSend() throws Exception {
-        PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
-        try {
-            engine.registerProcessor("TEST", task -> "done");
-            PrintWriter out = new PrintWriter(new FailingWriter());
-
-            boolean sent = engine.submitTask(testTask(), out).get(2, TimeUnit.SECONDS);
-
-            assertFalse(sent);
-        } finally {
-            engine.shutdown();
-        }
-    }
 
     @Test
     void failedExecutionEchoesAssignmentIdentity() throws Exception {
@@ -408,19 +367,4 @@ class PeerExecutionEngineTest {
         );
     }
 
-    private static final class FailingWriter extends Writer {
-        @Override
-        public void write(char[] cbuf, int off, int len) throws IOException {
-            throw new IOException("write failed");
-        }
-
-        @Override
-        public void flush() throws IOException {
-            throw new IOException("flush failed");
-        }
-
-        @Override
-        public void close() {
-        }
-    }
 }

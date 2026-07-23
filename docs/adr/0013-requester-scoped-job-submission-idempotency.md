@@ -8,12 +8,12 @@ Scope: Implemented for the single-authoritative-coordinator SQLite runtime.
 
 ## Context
 
-RabbitMQ delivery is at least once, TCP responses can be lost, and a requester
-may not know whether a submission committed. Rejecting every duplicate job ID
-prevents duplicate work, but it also prevents a legitimate requester from
-discovering the accepted job after an uncertain response. Treating every
-duplicate as the same request would let a changed payload silently alias
-existing work.
+RabbitMQ delivery is at least once, a publisher confirmation or result message
+can be lost, and a requester may not know whether a submission committed.
+Rejecting every duplicate job ID prevents duplicate work, but it also prevents
+a legitimate requester from discovering the accepted job after an uncertain
+response. Treating every duplicate as the same request would let a changed
+payload silently alias existing work.
 
 TaskFlow already has per-job bearer tokens, optional signed requester keys, a
 globally unique job primary key, and an existing `JOB_RESULT` status/result

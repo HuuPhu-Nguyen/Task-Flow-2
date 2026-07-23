@@ -1,7 +1,5 @@
 package peer.engine;
 
-import com.google.gson.Gson;
-import messaging.SafeJsonWriter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import plugin.RetrySafety;
@@ -10,7 +8,6 @@ import protocol.PeerIdentity;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
-import java.io.PrintWriter;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -23,7 +20,6 @@ public class PeerExecutionEngine implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerExecutionEngine.class);
 
     private final ExecutorService executionPool = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
-    private final Gson gson = new Gson();
     private final String nodeId;
     private final Map<String, TaskProcessor<?>> processors = new ConcurrentHashMap<>();
     private final AssignmentCacheConfig assignmentCacheConfig;
@@ -183,32 +179,6 @@ public class PeerExecutionEngine implements AutoCloseable {
                     e.getMessage()
             );
         }
-    }
-
-    public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
-        AssignmentExecution execution;
-        try {
-            execution = executeAssignment(task);
-        } catch (RuntimeException error) {
-            LOGGER.warn("event=task_result_send_failed node_id={} job_id={} task_id={} error={}",
-                    nodeId, task.getJobId(), task.getTaskId(), error.getMessage(), error);
-            return CompletableFuture.completedFuture(false);
-        }
-        if (execution.disposition() == AssignmentExecution.Disposition.DUPLICATE_RUNNING) {
-            return CompletableFuture.completedFuture(true);
-        }
-        return execution.resultFuture().thenApply(response -> {
-            boolean sent = SafeJsonWriter.send(out, gson, response);
-            if (!sent) {
-                LOGGER.warn("event=task_result_send_failed node_id={} job_id={} task_id={}",
-                        nodeId, response.getJobId(), response.getTaskId());
-            }
-            return sent;
-        }).exceptionally(error -> {
-            LOGGER.warn("event=task_result_send_failed node_id={} job_id={} task_id={} error={}",
-                    nodeId, task.getJobId(), task.getTaskId(), error.getMessage(), error);
-            return false;
-        });
     }
 
     private void logCacheDecision(TaskAssignMessage task, AssignmentExecution.Disposition disposition) {

@@ -33,8 +33,6 @@ Queue pressure and scheduler health:
   RabbitMQ queue depths, and DLQ inspection summaries.
 - `scheduler_ingress_requeued reason=mailbox_full` records RabbitMQ
   scheduler-delivery requeue when the bounded scheduler mailbox is full.
-- TCP coordinator `peer_status` logs include peer connection state and active
-  scheduler work snapshots.
 
 Job lifecycle:
 
@@ -63,7 +61,7 @@ Task assignment, retry, and failure:
   `task_type`, `retry_safety`, and `plugin_class`.
 - `task_assignment_created` records each newly created assignment generation.
   RabbitMQ outbox assignments also include `outbox_id` and the immediate
-  `outbox_published` outcome; direct assignments include the same committed
+  `outbox_published` outcome; non-outbox assignments include the same committed
   identity before the send attempt.
 - `task_result_committed` records the one authoritative successful result after
   the SQLite commit decision has been applied to scheduler memory.
@@ -108,7 +106,7 @@ Final result delivery and abandoned states:
   attempt.
 - `job_result_delivery_abandoned` records final-result delivery exhaustion with
   attempt count, requester, success flag, and reason.
-- `job_terminal_persistence_deferred` records a direct-output terminal write
+- `job_terminal_persistence_deferred` records a non-outbox terminal write
   that did not commit; final-result delivery is suppressed and the active
   pending-completion projection remains available for retry.
 - `job_result_requester_missing` and `job_result_request_send_failed` record

@@ -45,7 +45,7 @@ class InMemoryPeerRegistryTest {
                 "peer-1",
                 server.scheduler.SchedulerConfig.defaults(),
                 List.of("image_conversion"),
-                PeerTransport.TCP
+                PeerTransport.RABBITMQ
         );
 
         assertTrue(registry.registerIfAbsent("peer-1", peer));
@@ -53,8 +53,8 @@ class InMemoryPeerRegistryTest {
         PeerRegistryRecord record = store.last("peer-1");
         assertNotNull(record);
         assertEquals("peer-1", record.peerId());
-        assertEquals("TCP_PEER", record.runtimeType());
-        assertEquals(PeerTransport.TCP, record.transport());
+        assertEquals("RABBITMQ_PEER", record.runtimeType());
+        assertEquals(PeerTransport.RABBITMQ, record.transport());
         assertEquals(PeerStatus.CONNECTED, record.status());
         assertEquals(java.util.Set.of("IMAGE_CONVERSION"), record.supportedTaskTypes());
         assertTrue(record.firstSeenAtMillis() > 0L);
@@ -102,7 +102,7 @@ class InMemoryPeerRegistryTest {
                 "peer-1",
                 server.scheduler.SchedulerConfig.defaults(),
                 List.of("image_conversion"),
-                PeerTransport.TCP
+                PeerTransport.RABBITMQ
         );
         PeerInfo duplicate = new PeerInfo(
                 "peer-1",
@@ -116,7 +116,7 @@ class InMemoryPeerRegistryTest {
 
         assertEquals(1, store.records.size());
         PeerRegistryRecord record = store.last("peer-1");
-        assertEquals(PeerTransport.TCP, record.transport());
+        assertEquals(PeerTransport.RABBITMQ, record.transport());
         assertEquals(java.util.Set.of("IMAGE_CONVERSION"), record.supportedTaskTypes());
     }
 

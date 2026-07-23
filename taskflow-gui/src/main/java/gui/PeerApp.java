@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.JobResultMessage;
 import protocol.PeerIdentity;
+import transport.rabbitmq.RabbitMqTransportConfig;
 
 import java.io.*;
 import java.nio.file.*;
@@ -41,7 +42,6 @@ public class PeerApp extends Application {
     private GuiResultSaveService resultSaveService = new GuiResultSaveService(Map.of());
     private GuiDownloadWindow downloadWindow =
             new GuiDownloadWindow(new GuiDownloadSaveController(resultSaveService::save));
-    private GuiTransportMode transportMode = GuiTransportMode.RABBITMQ;
     private String peerNodeId;
     private GuiSmokeAutomation smokeAutomation;
 
@@ -50,32 +50,20 @@ public class PeerApp extends Application {
         try {
             // Generate unique folders for this GUI instance
             this.sessionId = "PEER_" + (System.currentTimeMillis() % 100000);
-            this.transportMode = GuiTransportMode.fromEnvironment();
-            if (transportMode == GuiTransportMode.TCP) {
-                LOGGER.warn("event=tcp_transport_deprecated component=gui recommendation=TASKFLOW_TRANSPORT=rabbitmq");
-            }
             this.peerNodeId = PeerIdentity.configuredOrGenerated("GUI_PEER");
             inputStagingService = GuiInputStagingService.forSession(sessionId);
             inputStagingService.prepareDirectories();
 
             workerRuntime = new PeerEngineWorkerRuntime(peerNodeId);
             GuiRequesterTokenStore tokenStore = FileGuiRequesterTokenStore.openDefault();
-            if (transportMode == GuiTransportMode.RABBITMQ) {
-                jobSubmissionClient = new RabbitMqJobSubmissionClient(peerNodeId, tokenStore);
-                connectionService = new GuiCoordinatorConnectionService(
-                        workerRuntime,
-                        (host, port, runtime, listener) ->
-                                new RabbitMqCoordinatorConnection(peerNodeId, host, port, runtime, listener));
-            } else {
-                jobSubmissionClient = new TcpJobSubmissionClient(peerNodeId, tokenStore);
-                connectionService = new GuiCoordinatorConnectionService(
-                        workerRuntime,
-                        (host, port, runtime, listener) ->
-                                new TcpCoordinatorConnection(peerNodeId, host, port, runtime, listener));
-            }
+            jobSubmissionClient = new RabbitMqJobSubmissionClient(peerNodeId, tokenStore);
+            connectionService = new GuiCoordinatorConnectionService(
+                    workerRuntime,
+                    (host, port, runtime, listener) ->
+                            new RabbitMqCoordinatorConnection(peerNodeId, host, port, runtime, listener));
             jobSubmissionService = new GuiJobSubmissionService(jobSubmissionClient, myActiveJobIds);
-            LOGGER.info("event=gui_processors_registered transport={} peer_id={} task_types={}",
-                    transportMode.name().toLowerCase(), peerNodeId, workerRuntime.supportedTaskTypes());
+            LOGGER.info("event=gui_processors_registered transport=rabbitmq peer_id={} task_types={}",
+                    peerNodeId, workerRuntime.supportedTaskTypes());
             clientJobPlugins = ClientJobPlugins.discover();
             Map<String, ClientJobPlugin> clientJobPluginsByType = ClientJobPlugins.byTaskType(clientJobPlugins);
             resultSaveService = new GuiResultSaveService(clientJobPluginsByType);
@@ -107,8 +95,8 @@ public class PeerApp extends Application {
         root.setPadding(new Insets(20));
 
         TextField hostField = new TextField("localhost");
-        TextField portField = new TextField(Integer.toString(transportMode.defaultPort()));
-        Button connectBtn = new Button(transportMode.connectButtonText());
+        TextField portField = new TextField(Integer.toString(RabbitMqTransportConfig.DEFAULT_PORT));
+        Button connectBtn = new Button("Connect to RabbitMQ Broker");
 
         connectBtn.setOnAction(e -> {
             connectBtn.setDisable(true);
@@ -132,9 +120,9 @@ public class PeerApp extends Application {
         });
 
         root.getChildren().addAll(
-                new Label(transportMode.hostLabel() + ":"),
+                new Label("Broker Host:"),
                 hostField,
-                new Label(transportMode.portLabel() + ":"),
+                new Label("Broker Port:"),
                 portField,
                 connectBtn);
         window.setScene(new Scene(root, 300, 250));

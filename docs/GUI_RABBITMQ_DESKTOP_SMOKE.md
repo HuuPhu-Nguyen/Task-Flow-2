@@ -1,6 +1,6 @@
 # RabbitMQ JavaFX Desktop Smoke
 
-This is the repeatable desktop smoke gate for the JavaFX GUI in RabbitMQ mode.
+This is the repeatable desktop smoke gate for the RabbitMQ JavaFX runtime.
 It complements the headless GUI service tests and the focused live RabbitMQ CI
 profile. It is intentionally manual until JavaFX window automation is added.
 
@@ -39,7 +39,7 @@ The helper:
 - starts the Compose RabbitMQ service;
 - starts a RabbitMQ coordinator with an isolated exchange and queue prefix;
 - prepares `target\gui-rabbitmq-smoke\input\sample.txt`;
-- launches the JavaFX GUI in RabbitMQ mode with `Text Analysis` preselected;
+- launches the JavaFX GUI with `Text Analysis` preselected;
 - opens GUI file/save choosers in the smoke input and output directories;
 - prompts you through the manual GUI steps, unless `-AutoRun` is used;
 - in `-AutoRun` mode, submits the prepared text input after the JavaFX GUI

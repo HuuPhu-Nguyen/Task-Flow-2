@@ -112,7 +112,7 @@ function Invoke-NativeCommandWithLog {
     }
 }
 
-function Wait-TcpPort {
+function Wait-NetworkPort {
     param(
         [Parameter(Mandatory = $true)][string]$Address,
         [Parameter(Mandatory = $true)][int]$Port,
@@ -145,7 +145,7 @@ function Wait-RabbitMqReady {
     )
 
     if (-not $UseDockerHealthCheck) {
-        Wait-TcpPort -Address "localhost" -Port 5672 -TimeoutSeconds $TimeoutSeconds
+        Wait-NetworkPort -Address "localhost" -Port 5672 -TimeoutSeconds $TimeoutSeconds
         return
     }
 
@@ -212,7 +212,6 @@ function Start-TaskFlowProcess {
     $lines = @(
         "`$ErrorActionPreference = 'Stop'",
         "Set-Location -LiteralPath $(ConvertTo-SingleQuotedLiteral $RepoRoot)",
-        "`$env:TASKFLOW_TRANSPORT = 'rabbitmq'",
         "`$env:TASKFLOW_RABBITMQ_HOST = 'localhost'",
         "`$env:TASKFLOW_RABBITMQ_PORT = '5672'",
         "`$env:TASKFLOW_RABBITMQ_USERNAME = 'guest'",
@@ -391,7 +390,6 @@ try {
     Write-Host "Submitting image conversion job with $($inputFiles.Count) files..."
     Push-Location $RepoRoot
     try {
-        $env:TASKFLOW_TRANSPORT = "rabbitmq"
         $env:TASKFLOW_RABBITMQ_HOST = "localhost"
         $env:TASKFLOW_RABBITMQ_PORT = "5672"
         $env:TASKFLOW_RABBITMQ_USERNAME = "guest"

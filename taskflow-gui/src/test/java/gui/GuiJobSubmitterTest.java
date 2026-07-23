@@ -3,17 +3,10 @@ package gui;
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
-import protocol.RequesterIdentity;
 
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringWriter;
-import java.io.Writer;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -29,22 +22,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GuiJobSubmitterTest {
     private final ClientJobPlugin plugin = new FakeClientJobPlugin();
-    private final RecordingRequesterTokenStore requesterTokenStore = new RecordingRequesterTokenStore();
-    private final JobSubmissionClient jobSubmissionClient =
-            new TcpJobSubmissionClient("CLIENT", requesterTokenStore);
 
     @Test
     void successfulSubmitTracksActiveJobImmediately() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
-        StringWriter writer = new StringWriter();
-        CoordinatorConnection connection = new TestCoordinatorConnection(new PrintWriter(writer, true));
+        RecordingSubmissionClient client = new RecordingSubmissionClient("job-success");
 
         GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
-                jobSubmissionClient,
+                client,
                 plugin,
                 List.of("payload"),
                 "summary",
-                connection,
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -55,42 +44,28 @@ class GuiJobSubmitterTest {
         assertSame(plugin, submittedJob.plugin());
         assertTrue(submittedJob.activeAfterSend());
         assertTrue(activeJobs.contains(submittedJob.jobId()));
-        assertTrue(writer.toString().contains("TEXT_ANALYSIS"));
+        assertEquals(1, client.submitCalls);
+        assertEquals("TEXT_ANALYSIS", client.taskType);
+        assertEquals(List.of("payload"), client.payloads);
+        assertEquals("summary", client.parameter);
     }
 
     @Test
     void resultArrivingDuringSendRoutesBecauseJobIsAlreadyTracked() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
         AtomicReference<GuiJobResultRouter.Action> routedAction = new AtomicReference<>();
-        JobSubmissionClient immediateResultClient = new JobSubmissionClient() {
-            @Override
-            public String newJobId() {
-                return "job-fast-failure";
-            }
-
-            @Override
-            public void submitJob(String jobId,
-                                  String taskType,
-                                  List<?> payloads,
-                                  String parameter,
-                                  CoordinatorConnection connection) {
-                routedAction.set(GuiJobResultRouter.route(
-                        result(jobId, false, "failed immediately"),
-                        activeJobs).action());
-            }
-
-            @Override
-            public void requestJobResult(String jobId, CoordinatorConnection connection) {
-                throw new AssertionError("result request should not be used during submit");
-            }
-        };
+        RecordingSubmissionClient immediateResultClient =
+                new RecordingSubmissionClient("job-fast-failure");
+        immediateResultClient.onSubmit = () -> routedAction.set(GuiJobResultRouter.route(
+                result("job-fast-failure", false, "failed immediately"),
+                activeJobs).action());
 
         GuiJobSubmitter.SubmittedJob submittedJob = GuiJobSubmitter.submitPreparedPayloads(
                 immediateResultClient,
                 plugin,
                 List.of("payload"),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -106,20 +81,20 @@ class GuiJobSubmitterTest {
     @Test
     void changedConnectionPreventsSubmitWithoutTrackingJob() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
-        StringWriter writer = new StringWriter();
+        RecordingSubmissionClient client = new RecordingSubmissionClient("job-not-sent");
         AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
 
         assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
-                jobSubmissionClient,
+                client,
                 plugin,
                 List.of("payload"),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(writer, true)),
+                new TestCoordinatorConnection(),
                 () -> false,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
 
-        assertTrue(writer.toString().isEmpty());
+        assertEquals(0, client.submitCalls);
         assertTrue(activeJobs.isEmpty());
         assertFalse(sendFailureCallback.get());
     }
@@ -127,21 +102,21 @@ class GuiJobSubmitterTest {
     @Test
     void connectionChangeAfterTrackingRemovesReservedJobWithoutSending() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
-        StringWriter writer = new StringWriter();
+        RecordingSubmissionClient client = new RecordingSubmissionClient("job-connection-changed");
         AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
         AtomicInteger connectionChecks = new AtomicInteger(0);
 
         assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
-                jobSubmissionClient,
+                client,
                 plugin,
                 List.of("payload"),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(writer, true)),
+                new TestCoordinatorConnection(),
                 () -> connectionChecks.incrementAndGet() == 1,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
 
-        assertTrue(writer.toString().isEmpty());
+        assertEquals(0, client.submitCalls);
         assertTrue(activeJobs.isEmpty());
         assertFalse(sendFailureCallback.get());
     }
@@ -150,39 +125,22 @@ class GuiJobSubmitterTest {
     void sendFailureRunsCleanupCallbackWithoutTrackingJob() {
         Set<String> activeJobs = ConcurrentHashMap.newKeySet();
         AtomicBoolean sendFailureCallback = new AtomicBoolean(false);
+        RecordingSubmissionClient client = new RecordingSubmissionClient("job-publish-failed");
+        client.submitFailure = new IllegalStateException("broker publish failed");
 
         assertThrows(IllegalStateException.class, () -> GuiJobSubmitter.submitPreparedPayloads(
-                jobSubmissionClient,
+                client,
                 plugin,
                 List.of("payload"),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new FailingWriter(), true)),
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> sendFailureCallback.set(true),
                 activeJobs));
 
+        assertEquals(1, client.submitCalls);
         assertTrue(activeJobs.isEmpty());
         assertTrue(sendFailureCallback.get());
-    }
-
-    @Test
-    void tcpClientWritesJobResultRequest() {
-        jobSubmissionClient.submitJob(
-                "job-completed",
-                plugin.taskType(),
-                List.of("payload"),
-                "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true))
-        );
-        StringWriter writer = new StringWriter();
-        PrintWriter out = new PrintWriter(writer, true);
-
-        jobSubmissionClient.requestJobResult("job-completed", new TestCoordinatorConnection(out));
-
-        String json = writer.toString();
-        assertTrue(json.contains("\"type\":\"JOB_RESULT_REQUEST\""));
-        assertTrue(json.contains("\"jobId\":\"job-completed\""));
-        assertTrue(json.contains("\"requesterToken\":\"token-job-completed\""));
     }
 
     private static JobResultMessage result(String jobId, boolean successful, String errorMessage) {
@@ -194,6 +152,42 @@ class GuiJobSubmitterTest {
                 successful,
                 List.of(),
                 errorMessage);
+    }
+
+    private static final class RecordingSubmissionClient implements JobSubmissionClient {
+        private final String jobId;
+        private int submitCalls;
+        private String taskType;
+        private List<?> payloads = List.of();
+        private String parameter;
+        private Runnable onSubmit = () -> {
+        };
+        private RuntimeException submitFailure;
+
+        private RecordingSubmissionClient(String jobId) {
+            this.jobId = jobId;
+        }
+
+        @Override
+        public String newJobId() {
+            return jobId;
+        }
+
+        @Override
+        public void submitJob(String jobId,
+                              String taskType,
+                              List<?> payloads,
+                              String parameter,
+                              CoordinatorConnection connection) {
+            submitCalls++;
+            this.taskType = taskType;
+            this.payloads = List.copyOf(payloads);
+            this.parameter = parameter;
+            onSubmit.run();
+            if (submitFailure != null) {
+                throw submitFailure;
+            }
+        }
     }
 
     private static final class FakeClientJobPlugin implements ClientJobPlugin {
@@ -229,49 +223,6 @@ class GuiJobSubmitterTest {
 
         @Override
         public void saveResults(List<Object> results, Path outputDir) {
-        }
-    }
-
-    private static final class FailingWriter extends Writer {
-        @Override
-        public void write(char[] cbuf, int off, int len) throws IOException {
-            throw new IOException("closed");
-        }
-
-        @Override
-        public void flush() throws IOException {
-            throw new IOException("closed");
-        }
-
-        @Override
-        public void close() {
-        }
-    }
-
-    private static final class RecordingRequesterTokenStore implements GuiRequesterTokenStore {
-        private final Map<String, String> tokens = new ConcurrentHashMap<>();
-        private final RequesterIdentity.Credentials identity = RequesterIdentity.newCredentials();
-
-        @Override
-        public RequesterIdentity.Credentials requesterIdentity() {
-            return identity;
-        }
-
-        @Override
-        public String createTokenForJob(String jobId) {
-            String token = "token-" + jobId;
-            tokens.put(jobId, token);
-            return token;
-        }
-
-        @Override
-        public Optional<String> tokenForJob(String jobId) {
-            return Optional.ofNullable(tokens.get(jobId));
-        }
-
-        @Override
-        public void forgetToken(String jobId) {
-            tokens.remove(jobId);
         }
     }
 }

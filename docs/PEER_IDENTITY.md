@@ -1,82 +1,62 @@
 # Participant Identity (`peer` Compatibility Names)
 
-This document records the current participant identity contract for TaskFlow.
-The existing peer-ID, `nodeId`, registry, route, and configuration names are
-retained compatibility names. On assignment and result paths they identify the
-participant acting in the executor role; they do not confer coordinator
-authority. The tracked protocol and schema currently use `peerId`, `nodeId`,
-and `assigned_peer_id` rather than a literal `workerId`; this terminology task
-does not rename persisted or wire identity fields. This document does not add
-authentication guarantees; requester tokens and requester signatures are
-covered separately in `docs/EXECUTION_GUARANTEES.md`.
+This document records TaskFlow's participant identity contract. Existing
+`peerId`, `nodeId`, registry, route, and configuration names are retained wire,
+schema, and artifact compatibility names. On assignment/result paths they
+identify the participant acting in the executor role; they do not confer
+coordinator authority.
+
+This identity is routing metadata, not user/account authentication. Requester
+tokens and signatures are covered in `docs/EXECUTION_GUARANTEES.md`.
 
 ## Current Contract
 
-TaskFlow participants use explicit peer IDs across TCP, RabbitMQ, command-line
-participants, and JavaFX GUI participants.
+All supported participants use explicit peer IDs over RabbitMQ.
 
-- `TASKFLOW_PEER_ID` is the shared configuration variable for stable peer IDs.
-- Peer IDs are normalized through the shared `protocol.PeerIdentity` helper.
-- Safe peer IDs contain letters, digits, hyphens, and underscores. Other
-  characters are converted to underscores, repeated unsafe separators collapse,
-  and leading or trailing separators are removed.
-- If `TASKFLOW_PEER_ID` is unset, each runtime generates a safe unique
-  process-scoped fallback ID with a role prefix such as `TCP_PEER`,
-  `RABBITMQ_PEER`, or `GUI_PEER`.
-- Generated fallback IDs are intentionally runtime-scoped, not restart-stable.
-  Set `TASKFLOW_PEER_ID` for a stable identity across restarts, logs, broker
-  routes, and peer-scoped job IDs.
+- `TASKFLOW_PEER_ID` configures a stable ID.
+- `protocol.PeerIdentity` normalizes and validates IDs.
+- Safe IDs contain letters, digits, hyphens, and underscores. Unsafe character
+  runs become underscores, and leading/trailing separators are removed.
+- If `TASKFLOW_PEER_ID` is unset, the command-line runtime generates a unique
+  process-scoped ID with `RABBITMQ_PEER`; JavaFX uses `GUI_PEER`.
+- Generated IDs are intentionally not stable across restart. Configure a stable
+  ID for durable log correlation, broker routes, and peer-scoped job IDs.
 
-Generated runtime IDs keep local demos and concurrent ad-hoc participants from
-colliding by default. A persistent locally generated ID store is deferred until
-local identity, duplicate detection, restarts, and concurrent participants have a
-clearer user-facing policy.
+## RabbitMQ Routing
 
-## TCP Behavior
+Participants publish heartbeats and peer-routed messages with the same explicit
+ID. The coordinator rejects a heartbeat when the broker envelope sender and the
+inner protocol `nodeId` disagree. Scheduler job submission also requires the
+outer sender and inner `nodeId` to match before replay responses can be routed.
 
-The TCP coordinator no longer identifies participants by server-side socket address.
-It sends an initial `PING`, and updated participants answer with a `PONG` whose
-`nodeId` is their explicit peer ID. The first `PONG`, `JOB_SUBMIT`, or
-`TASK_RESULT` from a connection establishes the connection peer ID.
+Task-assignment and final-result queues are keyed by peer ID. Two active
+participants with the same ID are an invalid deployment: RabbitMQ cannot
+disambiguate ownership of that route. Give every concurrently active process a
+unique `TASKFLOW_PEER_ID`.
 
-After registration, later messages on that connection must keep the same
-nonblank `nodeId`. A message that tries to switch identity closes the
-connection.
-
-Active duplicate TCP peer IDs are rejected by the coordinator registry. The
-duplicate connection is closed without replacing the existing participant
-record and without emitting a scheduler peer-disconnect event for the existing
-participant.
-
-## RabbitMQ Behavior
-
-RabbitMQ participants publish heartbeats and peer-routed messages with the same
-explicit peer ID. The coordinator rejects heartbeats whose broker envelope
-sender and protocol `nodeId` disagree; scheduler job submissions also require
-the outer sender and inner `nodeId` to match before any replay response can be
-routed.
-
-Current RabbitMQ routing uses peer-specific queues keyed by peer ID. Two active
-RabbitMQ participants configured with the same peer ID are an invalid deployment
-configuration because the broker cannot disambiguate which process should own
-that peer route. Configure unique `TASKFLOW_PEER_ID` values for concurrent
-RabbitMQ participants.
+The coordinator's in-memory registry treats heartbeat presence as live
+membership. A missing heartbeat beyond the configured timeout removes the
+participant, persists its disconnected status when available, and emits the
+scheduler unavailability event.
 
 ## Persisted Metadata
 
-When SQLite persistence is available, the coordinator records durable
-last-known participant metadata keyed by peer ID:
+When SQLite persistence is available, the coordinator stores last-known
+participant metadata keyed by peer ID:
 
 - runtime type and transport;
-- supported task types from heartbeat metadata;
+- advertised task capabilities;
 - first-seen, last-heartbeat, and last-disconnect timestamps;
-- connected or disconnected status;
-- scheduler metric snapshots such as completed attempts, failed attempts,
-  heartbeat latency, and task-duration EWMA.
+- connected/disconnected status;
+- completed/failed attempt counts, heartbeat latency, and task-duration EWMA.
 
-Runtime connection handles, sockets, RabbitMQ consumers, and broker channels are
-not persisted. They remain in the in-memory registry for the active coordinator
-process.
+Broker consumers, channels, and connections are process-local and are not
+stored in the participant registry.
+
+Rows written before the sole-transport migration can contain an obsolete
+transport value. The loader preserves their runtime label for operator history
+but exposes an unrecognized transport as `UNKNOWN`; it cannot recreate a
+runtime path.
 
 ## Job IDs
 
@@ -86,37 +66,33 @@ GUI and command-line submitters generate job IDs through `protocol.JobIds`:
 JOB_<sanitized-peer-id>_<epoch-millis>_<full-uuid>
 ```
 
-The generated shape is safe for logs, SQLite keys, task IDs, and output folder
-names. The peer ID segment makes submitted jobs traceable to the submitting
-participant, while the full UUID suffix avoids relying on a short random fragment.
+The shape is safe for logs, SQLite keys, task IDs, and output folders. The peer
+segment aids routing and traceability; the UUID supplies collision resistance.
 
-The scheduler treats the submitted job ID as an idempotency key scoped to the
-requester token hash and optional verified public key. The peer-ID segment is a
-routing/traceability aid, not ownership: the same owner can replay an exact
-request after reconnect under a different valid route, while a changed owner or
-request is rejected. SQLite schema-v12 request hashes preserve that decision
-across coordinator restart.
+The scheduler treats `jobId` as an idempotency key scoped to the requester token
+hash and optional verified public key. The peer segment is not ownership. The
+same owner can replay an exact request through another valid route, while a
+changed owner or canonical request is rejected. SQLite schema v12 preserves
+that decision across coordinator restart.
 
-## Deferred Work
+## Limits
 
-- RabbitMQ does not yet have a control route to reject or disconnect a duplicate
-  participant process after it has started consuming a shared peer queue.
-- Peer IDs are not user/account authentication.
+- RabbitMQ has no separate control route that can disconnect a duplicate process
+  after both processes begin consuming the same peer queue.
+- Generated fallback IDs are not persisted across participant restart.
+- Peer IDs are not user/account identities or authorization principals.
 
 ## Evidence
 
-Focused tests cover:
+Focused tests include:
 
-- `PeerIdentityTest` for safe ID normalization and generated fallback IDs.
-- `JobIdsTest` for peer-scoped, collision-resistant generated job IDs.
-- `PingHandlerTest` for explicit TCP heartbeat responses.
-- `InMemoryPeerRegistryTest` for duplicate active peer rejection and peer
-  metadata persistence hooks.
-- `DatabaseManagerTest` for SQLite peer metadata persistence, heartbeat
-  capability updates, disconnect state, restart reload, duplicate peer-id
+- `PeerIdentityTest` for normalization and generated fallback IDs;
+- `JobIdsTest` for peer-scoped, collision-resistant job IDs;
+- `RabbitMqCoordinatorConnectionTest` and `RabbitMqJobSubmissionClientTest` for
+  JavaFX heartbeat, route, submission, and job-ID use;
+- `PeerNodeTest` for command-line identity, submission, and result behavior;
+- `InMemoryPeerRegistryTest` for duplicate active ID rejection and persistence
+  hooks;
+- `DatabaseManagerTest` for current RabbitMQ metadata, historical-value
+  degradation, heartbeat updates, disconnect state, restart reload, duplicate
   upsert behavior, and coexistence with task retry state.
-- `PeerHandlerTest` for TCP explicit-ID registration and duplicate rejection.
-- `TcpCoordinatorConnectionTest` for JavaFX TCP heartbeat identity.
-- `PeerNodeTest`, `TcpJobSubmissionClientTest`,
-  `RabbitMqCoordinatorConnectionTest`, and `RabbitMqJobSubmissionClientTest`
-  for command-line and GUI peer ID and job ID usage.

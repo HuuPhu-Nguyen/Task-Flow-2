@@ -28,9 +28,8 @@ The supported architecture is deliberately narrow:
   requester role, the executor role, or both roles.
 - Embarrassingly parallel jobs whose tasks have no inter-task dependencies.
 - SQLite as the coordinator's authoritative state store.
-- RabbitMQ as the target supported runtime transport. On the current baseline,
-  RabbitMQ is the default but remains transitional, and TCP remains a deprecated
-  compatibility/demo path until Phase 3 removes or quarantines it.
+- RabbitMQ as the sole supported runtime transport. Its current implementation
+  remains transitional rather than production-ready.
 - MinIO/S3-compatible object storage for large payloads is part of the frozen
   target scope after Phase 5. The current baseline still has documented inline
   and local-file-reference limitations.

@@ -127,7 +127,8 @@ server.plugins.example.ExampleTaskPlugin
 
 Server validation is the authority for accepting a submission. Client-side
 validation improves local UX, but the coordinator must still reject invalid
-requests because TCP and RabbitMQ submitters can send raw protocol messages.
+requests because RabbitMQ submitters can send protocol messages independently
+of the client-side UI or plugin validation path.
 
 Jobs should extend `EmbarrassinglyParallelJob<T, R>` when the work can be split
 into independent tasks. A job should:

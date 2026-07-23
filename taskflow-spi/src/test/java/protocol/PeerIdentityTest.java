@@ -40,8 +40,8 @@ class PeerIdentityTest {
 
     @Test
     void generatedPeerIdsAreUniqueAndSafe() {
-        String first = PeerIdentity.generated("tcp peer");
-        String second = PeerIdentity.generated("tcp peer");
+        String first = PeerIdentity.generated("participant");
+        String second = PeerIdentity.generated("participant");
 
         assertNotEquals(first, second);
         assertTrue(first.matches("[A-Za-z0-9_-]+"));

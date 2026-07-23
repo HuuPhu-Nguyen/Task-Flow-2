@@ -19,7 +19,6 @@ import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
-import java.io.PrintWriter;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
@@ -81,11 +80,6 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
         thread.setDaemon(true);
         startupThread = thread;
         thread.start();
-    }
-
-    @Override
-    public PrintWriter writer() {
-        return null;
     }
 
     @Override

@@ -232,7 +232,7 @@ public class RabbitMqPeerNode {
                             Map<String, ClientJobPlugin> clientPlugins) throws Exception {
         if (args.length < 4) {
             throw new IllegalArgumentException("""
-                    Usage: TASKFLOW_TRANSPORT=rabbitmq peer.PeerNode submit <image|video|task-type> <target-format> <file> [file...]
+                    Usage: peer.PeerNode submit <image|video|task-type> <target-format> <file> [file...]
                     Example: .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="submit image png sample.jpg"
                     """);
         }

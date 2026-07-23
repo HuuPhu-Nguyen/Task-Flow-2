@@ -121,7 +121,8 @@ Covered behavior:
 - A `FINALIZING` job is reconstructed from its ordered durable task snapshots;
   plugin aggregation must be deterministic for those inputs. Successful
   terminal state, semantic payload, and the RabbitMQ final-result outbox row
-  then commit atomically. Direct output commits terminal state before send.
+  then commit atomically. The non-outbox fallback commits terminal state before
+  publication.
 - Schema-v10 `RUNNING` jobs with an exact fully completed, result-bearing task
   set migrate to `FINALIZING`; incomplete legacy snapshots do not.
 - A schema-v12 submission replay is classified from the stored token hash,

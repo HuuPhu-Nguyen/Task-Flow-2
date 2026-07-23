@@ -27,12 +27,6 @@ public class TaskScheduler implements Runnable {
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
-                         JobStateStore db) {
-        this(mailbox, registry, db, new PeerRegistrySchedulerOutput(registry), SchedulerConfig.fromEnvironment());
-    }
-
-    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
-                         PeerRegistry registry,
                          JobStateStore db,
                          SchedulerOutput output) {
         this(mailbox, registry, db, output, SchedulerConfig.fromEnvironment());

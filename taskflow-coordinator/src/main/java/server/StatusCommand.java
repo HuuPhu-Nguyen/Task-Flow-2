@@ -22,7 +22,6 @@ final class StatusCommand {
     private static final int DEFAULT_LIMIT = 20;
     private static final int SUMMARY_OUTBOX_LIMIT = 1_000;
     private static final int BODY_PREVIEW_CHARACTERS = 160;
-    private static final String TRANSPORT_ENV = "TASKFLOW_TRANSPORT";
 
     private StatusCommand() {
     }
@@ -36,16 +35,14 @@ final class StatusCommand {
                 args,
                 out,
                 DatabaseStatusDataSource::new,
-                DefaultRabbitMqStatusClient::new,
-                System.getenv()
+                DefaultRabbitMqStatusClient::new
         );
     }
 
     static void run(String[] args,
                     PrintStream out,
                     StatusDataSourceFactory dataSourceFactory,
-                    RabbitMqStatusClientFactory rabbitMqStatusClientFactory,
-                    Map<String, String> environment) throws Exception {
+                    RabbitMqStatusClientFactory rabbitMqStatusClientFactory) throws Exception {
         StatusOptions options = parse(args);
         if (options.help()) {
             out.println(usage());
@@ -53,7 +50,7 @@ final class StatusCommand {
         }
 
         switch (options.view()) {
-            case SUMMARY -> printSummary(out, dataSourceFactory, rabbitMqStatusClientFactory, environment, options.limit());
+            case SUMMARY -> printSummary(out, dataSourceFactory, rabbitMqStatusClientFactory, options.limit());
             case JOBS -> printJobs(out, dataSourceFactory, options.limit());
             case PEERS -> printPeers(out, dataSourceFactory, options.limit());
             case OUTBOX -> printOutbox(out, dataSourceFactory, options.limit());
@@ -66,7 +63,7 @@ final class StatusCommand {
         return String.join(System.lineSeparator(),
                 "Usage: java -jar taskflow-coordinator-<version>-coordinator-runtime.jar status [summary|jobs|peers|outbox|queues|dlq] [count]",
                 "Views:",
-                "  summary  SQLite jobs/tasks/attempts/peers/outbox plus RabbitMQ summary unless TASKFLOW_TRANSPORT=tcp",
+                "  summary  SQLite jobs/tasks/attempts/peers/outbox plus RabbitMQ summary",
                 "  jobs     Recent persisted jobs with task, retry, and lease counts",
                 "  peers    Last-known persisted participant rows (peer registry compatibility view)",
                 "  outbox   Pending coordinator RabbitMQ outbox rows",
@@ -77,7 +74,6 @@ final class StatusCommand {
     private static void printSummary(PrintStream out,
                                      StatusDataSourceFactory dataSourceFactory,
                                      RabbitMqStatusClientFactory rabbitMqStatusClientFactory,
-                                     Map<String, String> environment,
                                      int limit) {
         out.println("TaskFlow coordinator status");
         try (StatusDataSource source = dataSourceFactory.open()) {
@@ -114,12 +110,7 @@ final class StatusCommand {
             printDatabaseUnavailable(out, e);
         }
 
-        if (isRabbitMqSelected(environment)) {
-            printRabbitMqSummary(out, rabbitMqStatusClientFactory, limit);
-        } else {
-            out.printf("rabbitmq status=not_selected transport=%s%n",
-                    value(environment.getOrDefault(TRANSPORT_ENV, "rabbitmq")));
-        }
+        printRabbitMqSummary(out, rabbitMqStatusClientFactory, limit);
     }
 
     private static void printJobs(PrintStream out,
@@ -352,19 +343,6 @@ final class StatusCommand {
         return peers.stream()
                 .filter(peer -> peer.status() == status)
                 .count();
-    }
-
-    private static boolean isRabbitMqSelected(Map<String, String> environment) {
-        String configured = environment.get(TRANSPORT_ENV);
-        if (configured == null || configured.isBlank()) {
-            return true;
-        }
-        return switch (configured.trim().toLowerCase(Locale.ROOT)) {
-            case "rabbitmq" -> true;
-            case "tcp" -> false;
-            default -> throw new IllegalArgumentException(
-                    TRANSPORT_ENV + " must be either tcp or rabbitmq, not '" + configured + "'.");
-        };
     }
 
     private static StatusOptions parse(String[] args) {

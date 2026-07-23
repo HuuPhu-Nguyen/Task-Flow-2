@@ -4,8 +4,8 @@ Status: Accepted
 
 Date: 2026-07-22
 
-Scope: Frozen end-state for Phases 0–8; migration is incomplete until TF-0301
-removes or quarantines the deprecated TCP compatibility path.
+Scope: Frozen end-state for Phases 0–8; the TF-0301 transport migration is
+complete.
 
 ## Context
 
@@ -14,10 +14,10 @@ routing, backpressure, outage recovery, and outbox guarantees ambiguous. The
 coordinator-mediated architecture needs one delivery contract that expects
 duplicates and integrates with durable publication intent.
 
-RabbitMQ already provides the project's default broker path, publisher confirms,
-manual acknowledgements, prefetch, peer-targeted compatibility routes, dead
-lettering, and coordinator outbox replay. TCP remains in the current tree only
-as a deprecated compatibility/demo path and does not define the target contract.
+RabbitMQ provides publisher confirms, manual acknowledgements, prefetch,
+peer-targeted compatibility routes, dead lettering, and coordinator outbox
+replay. Before TF-0301, a deprecated socket path remained beside that broker
+contract and made the supported failure semantics ambiguous.
 
 ## Decision
 
@@ -26,10 +26,10 @@ All supported assignment, task-result, submission, and final-result delivery
 semantics are defined against RabbitMQ acknowledgement, redelivery, routing,
 retry/quarantine, and reconnect behavior.
 
-TF-0301 must either remove TCP or isolate it in a legacy module excluded from
-default builds and releases. Until that task passes, documentation must say
-that RabbitMQ is the default but transitional and that TCP is deprecated; it
-must not claim that the sole-transport migration is already complete.
+TF-0301 removed the legacy socket source, tests, selector, scripts, documentation,
+and package surface. Coordinator, command-line participant, and JavaFX entry
+points now start RabbitMQ directly. Historical peer-registry values remain
+readable as unknown transport metadata only and cannot activate a runtime.
 
 RabbitMQ carries control messages and small bounded inline payloads. It is not
 the large binary data plane.
@@ -56,8 +56,8 @@ the large binary data plane.
   prerequisites for supported distributed operation.
 - Publisher confirms do not mean consumer processing or exactly-once delivery;
   duplicates remain normal and must be classified safely.
-- TCP-specific configuration, packaging, tests, and claims leave the supported
-  surface when TF-0301 completes.
+- Legacy socket configuration, packaging, tests, and claims are absent from the
+  supported surface.
 - Full broker outage/restart, bounded poison handling, and acknowledgement crash
   windows must pass before production-strength RabbitMQ claims are made.
 
@@ -79,6 +79,8 @@ not invalidate the decision.
 - [RabbitMQ scope](../RABBITMQ_SCOPE.md)
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
+- `RabbitMqOnlyRuntimeArchitectureTest`
+- `TaskCoordinatorServerTest`, `PeerNodeTest`, and `PeerAppLauncherTest`
 - `taskflow-transport-rabbitmq`
 
 ## Related Documents

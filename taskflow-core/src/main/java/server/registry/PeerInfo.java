@@ -1,10 +1,7 @@
 package server.registry;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import protocol.PeerIdentity;
 import server.scheduler.SchedulerConfig;
-import transport.TransportConnection;
 
 import java.util.Collection;
 import java.util.Locale;
@@ -14,10 +11,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class PeerInfo {
 
-    private static final Logger LOGGER = LoggerFactory.getLogger(PeerInfo.class);
-
     private final String nodeId;
-    private final TransportConnection connection;
     private final SchedulerConfig config;
     private final PeerTransport transport;
     private final String runtimeType;
@@ -33,55 +27,30 @@ public class PeerInfo {
     private final AtomicLong failedTasks = new AtomicLong(0);
 
     public PeerInfo(String nodeId) {
-        this(nodeId, new NoopTransportConnection(nodeId), SchedulerConfig.defaults(), Set.of());
-    }
-
-    public PeerInfo(String nodeId, TransportConnection connection) {
-        this(nodeId, connection, SchedulerConfig.defaults(), Set.of());
+        this(nodeId, SchedulerConfig.defaults(), Set.of());
     }
 
     public PeerInfo(String nodeId, SchedulerConfig config) {
-        this(nodeId, new NoopTransportConnection(nodeId), config, Set.of());
+        this(nodeId, config, Set.of());
     }
 
     public PeerInfo(String nodeId, SchedulerConfig config, Collection<String> supportedTaskTypes) {
-        this(nodeId, new NoopTransportConnection(nodeId), config, supportedTaskTypes);
-    }
-
-    public PeerInfo(String nodeId, TransportConnection connection, SchedulerConfig config) {
-        this(nodeId, connection, config, Set.of());
-    }
-
-    public PeerInfo(String nodeId,
-                    TransportConnection connection,
-                    SchedulerConfig config,
-                    Collection<String> supportedTaskTypes) {
-        this(nodeId, connection, config, supportedTaskTypes, PeerTransport.UNKNOWN);
+        this(nodeId, config, supportedTaskTypes, PeerTransport.UNKNOWN);
     }
 
     public PeerInfo(String nodeId,
                     SchedulerConfig config,
                     Collection<String> supportedTaskTypes,
                     PeerTransport transport) {
-        this(nodeId, new NoopTransportConnection(nodeId), config, supportedTaskTypes, transport);
+        this(nodeId, config, supportedTaskTypes, transport, null);
     }
 
     public PeerInfo(String nodeId,
-                    TransportConnection connection,
-                    SchedulerConfig config,
-                    Collection<String> supportedTaskTypes,
-                    PeerTransport transport) {
-        this(nodeId, connection, config, supportedTaskTypes, transport, null);
-    }
-
-    public PeerInfo(String nodeId,
-                    TransportConnection connection,
                     SchedulerConfig config,
                     Collection<String> supportedTaskTypes,
                     PeerTransport transport,
                     String runtimeType) {
         this.nodeId = PeerIdentity.require(nodeId);
-        this.connection = connection;
         this.config = config == null ? SchedulerConfig.defaults() : config;
         this.transport = transport == null ? PeerTransport.UNKNOWN : transport;
         this.runtimeType = normalizeRuntimeType(runtimeType, this.transport);
@@ -90,26 +59,8 @@ public class PeerInfo {
         this.lastHeartbeatReceivedAtMillis = new AtomicLong(firstSeenAtMillis);
     }
 
-    public boolean send(protocol.Message message) {
-        if (connection != null && connection.isOpen()) {
-            return connection.send(message);
-        }
-        LOGGER.warn("event=peer_send_skipped peer_id={} reason=no_open_sender", nodeId);
-        return false;
-    }
-
     public String getNodeId() {
         return nodeId;
-    }
-
-    public boolean isConnected() {
-        return connection != null && connection.isOpen();
-    }
-
-    public void closeConnection() {
-        if (connection != null) {
-            connection.close();
-        }
     }
 
     public long getLastHeartbeatReceivedAtMillis() {return lastHeartbeatReceivedAtMillis.get();}
@@ -227,36 +178,9 @@ public class PeerInfo {
             return runtimeType.trim();
         }
         return switch (transport == null ? PeerTransport.UNKNOWN : transport) {
-            case TCP -> "TCP_PEER";
             case RABBITMQ -> "RABBITMQ_PEER";
             case UNKNOWN -> "PEER";
         };
     }
 
-    private static class NoopTransportConnection implements TransportConnection {
-        private final String nodeId;
-
-        NoopTransportConnection(String nodeId) {
-            this.nodeId = PeerIdentity.require(nodeId);
-        }
-
-        @Override
-        public String nodeId() {
-            return nodeId;
-        }
-
-        @Override
-        public boolean isOpen() {
-            return true;
-        }
-
-        @Override
-        public boolean send(protocol.Message message) {
-            return true;
-        }
-
-        @Override
-        public void close() {
-        }
-    }
 }

@@ -27,7 +27,7 @@ below.
 | `JOB_RESULT_REQUEST` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before authorization. |
 | `JOB_RESULT` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before requester/result-handler dispatch. |
 | `PEER_DISCONNECTED` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
-| `TASK_ASSIGN` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it, and TCP drops it before execution. |
+| `TASK_ASSIGN` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it. |
 | `TASK_RESULT` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
 
 The unchanged message types keep legacy compatibility because their semantics
@@ -49,10 +49,10 @@ from the hash.
 
 An exact duplicate therefore may carry a new time and a re-signed node ID after
 reconnect while still resolving to the original running status or terminal
-result. The RabbitMQ envelope `fromNodeId` or TCP registered peer ID must match
-the inner submission's `nodeId`, preventing a captured submission from routing
-the replay response elsewhere. The durable owner remains the token hash plus
-optional public key, not the routing ID.
+result. The RabbitMQ envelope `fromNodeId` must match the inner submission's
+`nodeId`, preventing a captured submission from routing the replay response
+elsewhere. The durable owner remains the token hash plus optional public key,
+not the routing ID.
 
 SQLite schema v12 persists the derived hash atomically with new job/task rows.
 Rows migrated from older schemas have no derivable original-submission hash and
@@ -93,22 +93,14 @@ scheduler logs. The task-protocol codes introduced with version `2` are:
 - `unsupported_protocol_version` when a message object bypasses parser-level
   version checks.
 
-TCP `MessageFactory` validation drops incompatible task messages before they
-enter the scheduler or worker engine. RabbitMQ codec failures are logged with
-`action=reject` and settled using reject-without-requeue; when TaskFlow DLQ
-routing is enabled, RabbitMQ can quarantine the rejected body there. The
-scheduler repeats validation as a defense in depth and rejects a broker
-acknowledgement without requeue if an incompatible result is injected directly.
+RabbitMQ codec failures are logged with `action=reject` and settled using
+reject-without-requeue; when TaskFlow DLQ routing is enabled, RabbitMQ can place
+the rejected body in the dead-letter queue for operator review. The scheduler
+repeats validation as defense in depth and rejects a broker delivery without
+requeue if an incompatible result is injected directly.
 
 These permanent compatibility failures are distinct from temporary scheduler
 mailbox saturation, which still requeues a broker delivery for backpressure.
-
-## TCP Messages
-
-TCP messages carry `protocolVersion` on the root JSON object alongside `type`,
-`nodeId`, and `time`. `messaging.MessageFactory` checks the supported numeric
-range before looking up the registered parser, then calls the shared validator
-to enforce the message-type matrix and field rules.
 
 ## RabbitMQ Envelopes
 
@@ -175,8 +167,8 @@ which identity it sends to which external key. Paired server/executor artifacts
 must declare the same value; the coordinator uses the server-side mirror for
 pre-acceptance policy validation.
 
-Plugins must not construct RabbitMQ envelopes or bypass transport codecs. New
-transports must emit the current version, apply the per-message compatibility
-matrix, call the shared validator after parsing, and give permanent validation
-failures a terminal non-requeue disposition. A transport-specific envelope
-should be versioned separately from its inner TaskFlow message.
+Plugins must not construct RabbitMQ envelopes or bypass transport codecs.
+RabbitMQ transport code emits the current version, applies the per-message
+compatibility matrix, calls the shared validator after parsing, and gives
+permanent validation failures a terminal non-requeue disposition. The broker
+envelope is versioned separately from its inner TaskFlow message.

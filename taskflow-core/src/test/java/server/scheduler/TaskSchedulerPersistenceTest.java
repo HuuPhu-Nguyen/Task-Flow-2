@@ -336,7 +336,7 @@ class TaskSchedulerPersistenceTest {
                     List.of("TEST_TASK")
             ));
             mailbox.put(new MessageEnvelope(
-                    new protocol.PeerDisconnectedMessage("peer-1", "2026-07-01T00:00:00Z", "tcp_disconnect"),
+                    new protocol.PeerDisconnectedMessage("peer-1", "2026-07-01T00:00:00Z", "heartbeat_timeout"),
                     "peer-1"
             ));
 
@@ -353,7 +353,7 @@ class TaskSchedulerPersistenceTest {
             JobStateStore.TaskAttemptRecord released = attempts.getFirst();
             assertEquals("peer-1", released.peerId());
             assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, released.outcome());
-            assertEquals("tcp_disconnect", released.failureReason());
+            assertEquals("heartbeat_timeout", released.failureReason());
 
             JobStateStore.TaskAttemptRecord accepted = attempts.get(1);
             assertEquals("peer-2", accepted.peerId());

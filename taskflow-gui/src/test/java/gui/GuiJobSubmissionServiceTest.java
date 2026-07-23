@@ -3,8 +3,6 @@ package gui;
 import client.ClientJobPlugin;
 import org.junit.jupiter.api.Test;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
@@ -30,7 +28,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -62,7 +60,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -90,7 +88,7 @@ class GuiJobSubmissionServiceTest {
                 plugin,
                 List.of(Path.of("note.txt")),
                 "summary",
-                new TestCoordinatorConnection(new PrintWriter(new StringWriter(), true)),
+                new TestCoordinatorConnection(),
                 () -> true,
                 () -> {
                     throw new AssertionError("send failure callback should not run");
@@ -127,10 +125,6 @@ class GuiJobSubmissionServiceTest {
             this.parameter = parameter;
         }
 
-        @Override
-        public void requestJobResult(String jobId, CoordinatorConnection connection) {
-            throw new AssertionError("result request should not be used during submit");
-        }
     }
 
     private static final class RecordingPlugin implements ClientJobPlugin {

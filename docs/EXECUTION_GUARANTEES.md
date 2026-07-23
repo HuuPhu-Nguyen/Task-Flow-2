@@ -96,25 +96,22 @@ nodes may enable the requester role, executor role, or both.
 
 ## Participant Requester and Result Handling
 
-- Participants may combine requester and executor roles depending on their runtime profile and transport; receiving and handling results belongs to the requester role.
-- TCP, RabbitMQ, command-line participants, and JavaFX participants use explicit sanitized peer IDs as compatibility identifiers. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
-- TCP coordinator registration uses the participant's declared peer ID from its heartbeat or first message, not the server-side socket address. Active duplicate TCP peer IDs are rejected without replacing the existing participant.
+- Participants may combine requester and executor roles depending on their runtime profile; receiving and handling results belongs to the requester role.
+- RabbitMQ command-line and JavaFX participants use explicit sanitized peer IDs as compatibility identifiers. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
 - Current RabbitMQ participant routes are keyed by peer ID; duplicate active participants with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
-- When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Live sockets, connection handles, broker consumers, and channels are not persisted.
+- When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Broker consumers, connections, and channels are not persisted.
 - Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling. Conversion submitters inline Base64 by default and can use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
-- The JavaFX GUI is the supported participant UI for TCP requester/executor behavior, and it has service-level RabbitMQ support for live submit, execute, result routing, and save flows.
+- The JavaFX GUI is the supported participant UI and has RabbitMQ service-level support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
-- The legacy TCP command-line participant can execute assigned work and has a low-level signed submit helper, but it does not provide a supported final-result saving workflow.
 - `docs/PEER_LIFECYCLE.md` records the current lifecycle, evidence, and shared-service candidates.
 - `docs/PEER_IDENTITY.md` records the peer identity contract, sanitization, duplicate-ID behavior, and generated fallback limits.
 
 ## Runtime Direction
 
-- RabbitMQ is the default runtime for the coordinator, command-line participants, and JavaFX GUI participants when `TASKFLOW_TRANSPORT` is unset or blank.
-- TCP is deprecated as the legacy local compatibility/demo path and remains available only through explicit `TASKFLOW_TRANSPORT=tcp` until a later removal slice.
+- RabbitMQ is the sole supported runtime transport for the coordinator, command-line participants, and JavaFX GUI participants. Entry points start it directly and do not read a transport selector.
 - RabbitMQ live broker tests remain opt-in for local runs, and RabbitMQ is still transitional until its remaining documented support-promotion gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
-- `docs/RUNTIME_STRATEGY.md` records the support-promotion, TCP-deprecation, and TCP-removal gates.
+- `docs/RUNTIME_STRATEGY.md` records the sole-transport decision, migration boundary, and remaining production-readiness gates.
 
 ## RabbitMQ Publication
 
@@ -126,7 +123,7 @@ nodes may enable the requester role, executor role, or both.
 - Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
 - Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance is fenced by the complete persisted assignment identity, and terminal job completion is persisted once.
 - Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
-- RabbitMQ remains a transitional adapter; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it the primary supported runtime.
+- RabbitMQ remains transitional; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it production-ready.
 
 ## RabbitMQ Connection Recovery
 
@@ -148,8 +145,8 @@ nodes may enable the requester role, executor role, or both.
 
 ## JavaFX GUI Transport Scope
 
-- The JavaFX GUI uses RabbitMQ by default and selects deprecated TCP only when `TASKFLOW_TRANSPORT=tcp` is set before launch.
-- GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and the executor-specific `GuiWorkerRuntime` compatibility boundary for both TCP and RabbitMQ.
+- The JavaFX GUI uses RabbitMQ as its only runtime transport.
+- GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and the executor-specific `GuiWorkerRuntime` boundary.
 - RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI participant publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
 - RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.
 - JavaFX RabbitMQ coverage includes service-level tests plus an automated desktop smoke helper for the text-analysis submit/execute/result/save path. Broader CI-grade JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
@@ -157,7 +154,6 @@ nodes may enable the requester role, executor role, or both.
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
-- TCP `PeerHandler` compatibility components wait for bounded scheduler-mailbox capacity before admitting `JOB_SUBMIT` and `TASK_RESULT` messages, applying socket-level backpressure instead of dropping those messages.
 - RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
 - Broker deliveries use manual acknowledgement.
@@ -231,7 +227,7 @@ nodes may enable the requester role, executor role, or both.
   J1 aggregates only the ordered committed task results and atomically stores
   `COMPLETED`, the semantic final payload, and (for RabbitMQ) one exact outbox
   envelope. Crash or duplicate invocation replays this protocol from SQLite.
-- Direct-output J1/J2 commits before final-result delivery. A terminal write
+- Non-outbox J1/J2 commits before final-result delivery. A terminal write
   failure retains the pending active job and suppresses delivery; after commit,
   bounded delivery exhaustion removes only the already-terminal projection.
 - RabbitMQ J1/J2 additionally commits the final `JOB_RESULT` outbox row in the
@@ -343,7 +339,7 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - Jobs submitted with a requester public key are identity-bound: result requests must include the same public key and a valid signature over the request fields.
 - Requests with a missing or wrong token, missing identity signature, mismatched public key, or invalid signature return a failed `JOB_RESULT` instead of task results.
 - Running jobs without a persisted requester token hash are treated as non-resumable at startup because ownership cannot be verified after restart.
-- JavaFX submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file. TCP result requests can use those tokens across later GUI processes; RabbitMQ GUI result-request replay is not implemented. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
+- JavaFX submissions persist raw requester tokens and a requester identity keypair in a local user-profile token file so exact duplicate submissions can reuse ownership after uncertain publication. RabbitMQ GUI `JOB_RESULT_REQUEST` replay is not implemented. The default path is `<user-home>/.taskflow/gui-requester-tokens.properties`, overrideable with `TASKFLOW_GUI_REQUESTER_TOKEN_STORE`.
 - On POSIX-compatible filesystems, TaskFlow attempts to restrict that token file to owner read/write and its parent directory to owner read/write/execute. On Windows or unsupported filesystems, token-file protection depends on the normal user-profile and filesystem access controls.
 - This is a per-job token plus local-signing-key ownership model, not full user/account authentication, login sessions, authorization roles, replay prevention, or a credential vault.
 
@@ -396,8 +392,10 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 
 ## Heartbeat and Participant Liveness
 
-- Coordinator sends periodic `PING` and expects `PONG`.
-- TCP participants answer `PING` with their explicit peer ID and supported task types.
+- RabbitMQ participants periodically publish `PONG` heartbeat messages with
+  their explicit peer ID and supported task types.
+- The coordinator accepts a heartbeat only when the broker envelope sender and
+  inner message identity agree.
 - Missing heartbeats beyond timeout mark the participant stale, remove it from the
   live registry, and persist a disconnected last-known participant status when the
   peer registry store is available.

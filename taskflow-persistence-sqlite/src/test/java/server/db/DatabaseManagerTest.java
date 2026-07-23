@@ -1749,7 +1749,7 @@ class DatabaseManagerTest {
     }
 
     @Test
-    void persistsPeerRegistryMetadataAcrossRestart() throws Exception {
+    void mapsHistoricalTcpPeerRegistryTransportToUnknownAcrossRestart() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-peer-registry-restart-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
 
@@ -1757,7 +1757,7 @@ class DatabaseManagerTest {
             assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
                     "peer-1",
                     "TCP_PEER",
-                    PeerTransport.TCP,
+                    PeerTransport.UNKNOWN,
                     Set.of("image_conversion", "text_analysis"),
                     100L,
                     150L,
@@ -1769,6 +1769,13 @@ class DatabaseManagerTest {
             db.close();
         }
 
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement statement = connection.createStatement()) {
+            assertEquals(1, statement.executeUpdate(
+                    "UPDATE peer_registry SET transport='TCP' WHERE peer_id='peer-1'"
+            ));
+        }
+
         DatabaseManager reopened = new DatabaseManager(dbPath.toString());
         try {
             List<PeerRegistryRecord> peers = reopened.loadPeerRecords();
@@ -1776,7 +1783,7 @@ class DatabaseManagerTest {
             PeerRegistryRecord peer = peers.getFirst();
             assertEquals("peer-1", peer.peerId());
             assertEquals("TCP_PEER", peer.runtimeType());
-            assertEquals(PeerTransport.TCP, peer.transport());
+            assertEquals(PeerTransport.UNKNOWN, peer.transport());
             assertEquals(Set.of("IMAGE_CONVERSION", "TEXT_ANALYSIS"), peer.supportedTaskTypes());
             assertEquals(100L, peer.firstSeenAtMillis());
             assertEquals(150L, peer.lastHeartbeatAtMillis());
@@ -1796,8 +1803,8 @@ class DatabaseManagerTest {
         try {
             assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
                     "peer-1",
-                    "TCP_PEER",
-                    PeerTransport.TCP,
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
                     Set.of("image_conversion"),
                     100L,
                     150L,
@@ -1807,8 +1814,8 @@ class DatabaseManagerTest {
             )));
             assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
                     "peer-1",
-                    "TCP_PEER",
-                    PeerTransport.TCP,
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
                     Set.of("text_analysis"),
                     999L,
                     300L,
@@ -1875,8 +1882,8 @@ class DatabaseManagerTest {
         try {
             assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
                     "peer-1",
-                    "TCP_PEER",
-                    PeerTransport.TCP,
+                    "PEER",
+                    PeerTransport.UNKNOWN,
                     Set.of("image_conversion"),
                     100L,
                     150L,
@@ -1916,8 +1923,8 @@ class DatabaseManagerTest {
         try {
             assertTrue(db.upsertPeerRecord(new PeerRegistryRecord(
                     "peer-lease",
-                    "TCP_PEER",
-                    PeerTransport.TCP,
+                    "RABBITMQ_PEER",
+                    PeerTransport.RABBITMQ,
                     Set.of("test_task"),
                     100L,
                     150L,

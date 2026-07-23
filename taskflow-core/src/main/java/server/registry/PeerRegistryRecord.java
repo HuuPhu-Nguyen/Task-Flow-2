@@ -67,7 +67,6 @@ public record PeerRegistryRecord(String peerId,
         }
         PeerTransport normalizedTransport = transport == null ? PeerTransport.UNKNOWN : transport;
         return switch (normalizedTransport) {
-            case TCP -> "TCP_PEER";
             case RABBITMQ -> "RABBITMQ_PEER";
             case UNKNOWN -> "PEER";
         };

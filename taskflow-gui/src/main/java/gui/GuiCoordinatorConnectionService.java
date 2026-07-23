@@ -29,10 +29,6 @@ final class GuiCoordinatorConnectionService {
     private volatile CoordinatorConnection currentConnection;
     private volatile boolean stopping;
 
-    GuiCoordinatorConnectionService(GuiWorkerRuntime workerRuntime) {
-        this(workerRuntime, TcpCoordinatorConnection::new);
-    }
-
     GuiCoordinatorConnectionService(GuiWorkerRuntime workerRuntime, ConnectionFactory connectionFactory) {
         this.workerRuntime = Objects.requireNonNull(workerRuntime, "workerRuntime");
         this.connectionFactory = Objects.requireNonNull(connectionFactory, "connectionFactory");

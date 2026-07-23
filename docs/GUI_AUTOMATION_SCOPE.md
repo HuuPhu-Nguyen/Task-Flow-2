@@ -4,64 +4,51 @@ This document records the current JavaFX GUI automation decision.
 
 ## Current Automated Coverage
 
-The CI workflow runs `bash ./mvnw --batch-mode --no-transfer-progress test` on
-`ubuntu-latest` without a configured desktop session, Xvfb, TestFX, Monocle, or
-another JavaFX UI automation harness.
+The main unit-test job runs without a configured desktop session, Xvfb, TestFX,
+Monocle, or another JavaFX window-driving harness. Stable CI coverage is
+therefore headless and service-level:
 
-The stable automated GUI coverage is therefore service-level and headless:
-
-- TCP coordinator connection behavior;
-- job submission state handling;
-- fast result routing;
-- failed result routing;
-- result saving;
-- input staging;
-- download-save controller behavior;
-- background task runner behavior;
+- broker connection lifecycle and startup failure;
+- job submission state and fast-result routing;
+- failed and successful result routing;
+- plugin-owned result saving;
+- input staging and download-save behavior;
+- background task execution;
 - local requester-token and requester-identity persistence;
 - job-history formatting and refresh behavior;
-- RabbitMQ GUI job submission publish behavior;
-- RabbitMQ GUI task assignment execution, task-result publish acknowledgement,
-  result routing, and startup failure behavior.
+- RabbitMQ submission and publisher-confirm failure;
+- RabbitMQ assignment execution, task-result publication and acknowledgement;
+- live final-result routing and malformed-delivery rejection.
 
-The local RabbitMQ desktop smoke helper can also launch the JavaFX GUI and drive
-one text-analysis submit/execute/result/save path with
-`scripts/smoke-rabbitmq-gui.ps1 -AutoRun`. That helper records desktop smoke
-evidence, but it is not yet a CI gate because the CI environment still lacks a
-stable JavaFX display backend.
+The broker-backed CI job runs the focused RabbitMQ integration gates. The local
+desktop helper can also launch the JavaFX GUI and drive one text-analysis
+submit/execute/result/save path:
 
-## Required Manual Gate
+```powershell
+.\scripts\smoke-rabbitmq-gui.ps1 -AutoRun
+```
 
-`docs/GUI_MANUAL_SMOKE.md` remains the required desktop smoke gate for the
-deprecated explicit TCP JavaFX path. It covers:
+That helper records desktop evidence but is not a CI window-driving gate.
 
-- connection refusal;
-- successful TCP job submit, execute, result receive, and save;
-- job history refresh;
-- coordinator disconnect alert.
+## Required Desktop Gate
 
-RabbitMQ GUI behavior has headless service coverage and a local automated
-desktop smoke helper. Use `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` for the
-RabbitMQ desktop smoke procedure before promoting RabbitMQ as the primary
-supported GUI runtime.
+Use `docs/GUI_RABBITMQ_DESKTOP_SMOKE.md` before making GUI support-promotion
+claims. It covers GUI startup, broker connection, submission, assigned-task
+execution, live `JOB_RESULT` reception, plugin-backed save, and broker-failure
+handling.
 
-## Deferred CI End-To-End UI Smoke
+## Deferred CI End-to-End UI Smoke
 
-Automated JavaFX end-to-end smoke is deferred because the current CI environment
-does not provide the desktop automation prerequisites needed to run the actual
-JavaFX window reliably.
+Automated JavaFX window driving remains deferred because the CI environment does
+not provide the prerequisites needed to run the actual UI reliably.
 
-Do not make a JavaFX window-driving test a required CI gate until the workflow
-includes:
+Do not make it a required CI gate until the workflow includes:
 
 - a stable display backend such as Xvfb or a supported headless JavaFX stack;
-- a UI automation library and lifecycle rule for JavaFX application startup and
-  shutdown;
-- deterministic file chooser or save-dialog handling;
-- a timeout and cleanup strategy for coordinator and GUI processes;
-- a local deprecated-TCP submit-to-save scenario that passes repeatedly in CI;
-- a RabbitMQ-backed GUI submit-to-save scenario based on the current local
-  smoke helper.
+- a UI automation library and lifecycle rule for JavaFX startup and shutdown;
+- deterministic file chooser and save-dialog handling;
+- timeouts and cleanup for broker, coordinator, participant, and GUI processes;
+- a RabbitMQ-backed submit-to-save scenario that passes repeatedly in CI.
 
-Until those prerequisites exist, keep JavaFX end-to-end smoke out of CI and keep
-CI coverage focused on the GUI services behind the JavaFX presentation layer.
+Until then, keep CI focused on GUI services and broker contracts behind the
+JavaFX presentation layer.

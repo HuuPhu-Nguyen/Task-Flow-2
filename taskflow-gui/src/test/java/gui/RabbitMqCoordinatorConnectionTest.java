@@ -15,7 +15,6 @@ import transport.TransportMessageHandler;
 import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransportConfig;
 
-import java.io.PrintWriter;
 import java.time.Instant;
 import java.util.EnumMap;
 import java.util.List;
@@ -485,11 +484,6 @@ class RabbitMqCoordinatorConnectionTest {
         }
 
         @Override
-        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
-            throw new AssertionError("TCP submitTask should not be used by RabbitMQ connection");
-        }
-
-        @Override
         public void shutdown() {
         }
 
@@ -508,11 +502,6 @@ class RabbitMqCoordinatorConnectionTest {
         @Override
         public CompletableFuture<TaskResultMessage> executeTask(TaskAssignMessage task) {
             return CompletableFuture.failedFuture(new IllegalStateException("processor failed"));
-        }
-
-        @Override
-        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
-            throw new AssertionError("TCP submitTask should not be used by RabbitMQ connection");
         }
 
         @Override
@@ -545,11 +534,6 @@ class RabbitMqCoordinatorConnectionTest {
         @Override
         public AssignmentExecution executeAssignment(TaskAssignMessage task) {
             return execution;
-        }
-
-        @Override
-        public CompletableFuture<Boolean> submitTask(TaskAssignMessage task, PrintWriter out) {
-            throw new AssertionError("TCP submitTask should not be used by RabbitMQ connection");
         }
 
         @Override
