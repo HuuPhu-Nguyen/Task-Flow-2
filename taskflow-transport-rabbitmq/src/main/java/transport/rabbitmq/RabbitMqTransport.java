@@ -31,6 +31,7 @@ import java.util.concurrent.TimeoutException;
 public class RabbitMqTransport implements BrokerTransport {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTransport.class);
     private static final long MANDATORY_RETURN_WAIT_MILLIS = 250L;
+    private static final int PERSISTENT_DELIVERY_MODE = 2;
 
     private final RabbitMqTransportConfig config;
     private final RabbitMqTopology topology;
@@ -155,7 +156,7 @@ public class RabbitMqTransport implements BrokerTransport {
                 .messageId(messageId)
                 .contentType("application/json")
                 .contentEncoding(StandardCharsets.UTF_8.name())
-                .deliveryMode(config.durable() ? 2 : 1)
+                .deliveryMode(PERSISTENT_DELIVERY_MODE)
                 .timestamp(Date.from(Instant.now()))
                 .headers(Map.of(
                         RabbitMqRetryHeaders.DELIVERY_ATTEMPT,

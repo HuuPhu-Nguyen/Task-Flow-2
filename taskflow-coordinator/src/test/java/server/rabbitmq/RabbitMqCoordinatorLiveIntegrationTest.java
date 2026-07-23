@@ -3,6 +3,7 @@ package server.rabbitmq;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.GetResponse;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,6 +32,7 @@ import transport.rabbitmq.RabbitMqRuntimeDefaults;
 import transport.rabbitmq.RabbitMqTopology;
 
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -38,11 +40,14 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -181,6 +186,193 @@ class RabbitMqCoordinatorLiveIntegrationTest {
     }
 
     @Test
+    void confirmedPersistentWorkerAssignmentMarksOutboxPublished() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "outbox-confirm-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+        String peerQueue = topology.peerQueueName(TransportRoute.TASK_ASSIGN, peerId);
+
+        try {
+            cleanup(config, topology, peerId);
+
+            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+                 RabbitMqTransport coordinatorTransport = new RabbitMqTransport(config);
+                 Connection peerConnection = connectionFactory(config)
+                         .newConnection("taskflow-rabbitmq-live-outbox-confirm-peer");
+                 Channel peerChannel = peerConnection.createChannel()) {
+                coordinatorTransport.declareTopology();
+                peerChannel.queueDeclare(peerQueue, false, true, true, topology.queueArguments());
+                peerChannel.queueBind(
+                        peerQueue,
+                        topology.exchangeName(),
+                        topology.peerRoutingKey(TransportRoute.TASK_ASSIGN, peerId)
+                );
+
+                RabbitMqSchedulerOutput output = new RabbitMqSchedulerOutput(coordinatorTransport);
+                assertTrue(db.enqueueBrokerOutbox(output.taskAssignmentOutboxMessage(
+                        new PeerInfo(peerId),
+                        outboxAssignment(jobId)
+                )).isPresent());
+
+                try (RabbitMqOutboxReplayer replayer =
+                             new RabbitMqOutboxReplayer(db, output, 10, 1_000L)) {
+                    assertEquals(1, replayer.replayOnce());
+                }
+
+                GetResponse delivered = peerChannel.basicGet(peerQueue, false);
+                assertNotNull(delivered, "Confirmed assignment was not present on its routed peer queue.");
+                assertEquals(2, delivered.getProps().getDeliveryMode());
+                assertEquals(
+                        topology.peerRoutingKey(TransportRoute.TASK_ASSIGN, peerId),
+                        delivered.getEnvelope().getRoutingKey()
+                );
+                peerChannel.basicAck(delivered.getEnvelope().getDeliveryTag(), false);
+                assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+            }
+        } finally {
+            cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
+    void connectionLossDuringWorkerAssignmentPublishLeavesOutboxReplayable() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "outbox-connection-loss-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, peerId);
+
+            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+                 RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
+                RabbitMqTransport disconnectedCoordinator = new RabbitMqTransport(config);
+                disconnectedCoordinator.declareTopology();
+
+                BlockingQueue<TaskAssignMessage> assignments = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> assignmentFailure = new AtomicReference<>();
+                peerTransport.subscribePeer(TransportRoute.TASK_ASSIGN, peerId, delivery -> {
+                    try {
+                        assignments.add(captureAssignment(peerId, jobId, delivery));
+                    } catch (Throwable e) {
+                        assignmentFailure.set(e);
+                        throw e;
+                    }
+                });
+
+                RabbitMqSchedulerOutput disconnectedOutput =
+                        new RabbitMqSchedulerOutput(disconnectedCoordinator);
+                assertTrue(db.enqueueBrokerOutbox(disconnectedOutput.taskAssignmentOutboxMessage(
+                        new PeerInfo(peerId),
+                        outboxAssignment(jobId)
+                )).isPresent());
+                disconnectedCoordinator.close();
+
+                try (RabbitMqOutboxReplayer failedReplay =
+                             new RabbitMqOutboxReplayer(db, disconnectedOutput, 10, 1_000L)) {
+                    assertEquals(0, failedReplay.replayOnce());
+                }
+
+                List<BrokerOutboxStore.OutboxRecord> pendingAfterConnectionLoss =
+                        db.loadPendingBrokerOutbox(10);
+                assertEquals(1, pendingAfterConnectionLoss.size());
+                assertEquals(1, pendingAfterConnectionLoss.getFirst().attemptCount());
+                assertFalse(pendingAfterConnectionLoss.getFirst().lastError().isBlank());
+
+                try (RabbitMqTransport recoveredCoordinator = new RabbitMqTransport(config)) {
+                    RabbitMqSchedulerOutput recoveredOutput =
+                            new RabbitMqSchedulerOutput(recoveredCoordinator);
+                    try (RabbitMqOutboxReplayer recoveredReplay =
+                                 new RabbitMqOutboxReplayer(db, recoveredOutput, 10, 1_000L)) {
+                        assertEquals(1, recoveredReplay.replayOnce());
+                    }
+                }
+
+                TaskAssignMessage delivered =
+                        awaitQueue(assignments, assignmentFailure, "assignment replay after connection loss");
+                assertEquals("task-" + jobId + "-0", delivered.getTaskId());
+                assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+            }
+        } finally {
+            cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
+    void unroutableWorkerAssignmentLeavesOutboxReplayable() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "outbox-unroutable-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, peerId);
+
+            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+                 RabbitMqTransport coordinatorTransport = new RabbitMqTransport(config)) {
+                coordinatorTransport.declareTopology();
+                RabbitMqSchedulerOutput output = new RabbitMqSchedulerOutput(coordinatorTransport);
+                assertTrue(db.enqueueBrokerOutbox(output.taskAssignmentOutboxMessage(
+                        new PeerInfo(peerId),
+                        outboxAssignment(jobId)
+                )).isPresent());
+
+                try (RabbitMqOutboxReplayer unroutableReplay =
+                             new RabbitMqOutboxReplayer(db, output, 10, 1_000L)) {
+                    assertEquals(0, unroutableReplay.replayOnce());
+                }
+
+                List<BrokerOutboxStore.OutboxRecord> pendingAfterReturn =
+                        db.loadPendingBrokerOutbox(10);
+                assertEquals(1, pendingAfterReturn.size());
+                assertEquals(1, pendingAfterReturn.getFirst().attemptCount());
+                assertEquals(
+                        "publish_unconfirmed_or_unroutable",
+                        pendingAfterReturn.getFirst().lastError()
+                );
+
+                try (RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
+                    BlockingQueue<TaskAssignMessage> assignments = new LinkedBlockingQueue<>();
+                    AtomicReference<Throwable> assignmentFailure = new AtomicReference<>();
+                    peerTransport.subscribePeer(TransportRoute.TASK_ASSIGN, peerId, delivery -> {
+                        try {
+                            assignments.add(captureAssignment(peerId, jobId, delivery));
+                        } catch (Throwable e) {
+                            assignmentFailure.set(e);
+                            throw e;
+                        }
+                    });
+
+                    try (RabbitMqOutboxReplayer routedReplay =
+                                 new RabbitMqOutboxReplayer(db, output, 10, 1_000L)) {
+                        assertEquals(1, routedReplay.replayOnce());
+                    }
+                    TaskAssignMessage delivered =
+                            awaitQueue(assignments, assignmentFailure, "assignment replay after peer route appeared");
+                    assertEquals("task-" + jobId + "-0", delivered.getTaskId());
+                }
+
+                assertEquals(List.of(), db.loadPendingBrokerOutbox(10));
+            }
+        } finally {
+            cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
     void replaysSeededPendingOutboxRowsThroughLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
@@ -265,7 +457,7 @@ class RabbitMqCoordinatorLiveIntegrationTest {
     }
 
     @Test
-    void replayedTaskAssignmentDoesNotCreateDuplicateAcceptedResults() throws Exception {
+    void outboxMarkFailureReplaysDuplicateAssignmentWithoutDuplicateAcceptedResult() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
@@ -279,7 +471,10 @@ class RabbitMqCoordinatorLiveIntegrationTest {
         try {
             cleanup(config, topology, peerId);
 
-            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+            try (FailFirstPublishedMarkDatabaseManager db =
+                         new FailFirstPublishedMarkDatabaseManager(
+                                 tempDir.resolve(token + ".db").toString()
+                         );
                  RabbitMqTransport coordinatorTransport = new RabbitMqTransport(config);
                  RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
                 coordinatorTransport.declareTopology();
@@ -292,8 +487,7 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                         List.of(TestTaskPlugin.TASK_TYPE)
                 ));
 
-                CrashAfterTaskAssignmentPublishOutput output =
-                        new CrashAfterTaskAssignmentPublishOutput(coordinatorTransport);
+                RabbitMqSchedulerOutput output = new RabbitMqSchedulerOutput(coordinatorTransport);
                 TaskScheduler scheduler = new TaskScheduler(
                         schedulerMailbox,
                         registry,
@@ -351,12 +545,12 @@ class RabbitMqCoordinatorLiveIntegrationTest {
 
                 TaskAssignMessage firstAssignment =
                         awaitQueue(assignments, assignmentFailure, "initial task assignment");
-                output.awaitTaskAssignmentPublishAttempt();
-                List<BrokerOutboxStore.OutboxRecord> pendingAfterSimulatedCrash =
+                db.awaitFirstPublishedMarkAttempt();
+                List<BrokerOutboxStore.OutboxRecord> pendingAfterMarkFailure =
                         db.loadPendingBrokerOutbox(10);
-                assertEquals(1, pendingAfterSimulatedCrash.size());
-                assertEquals(TransportRoute.TASK_ASSIGN, pendingAfterSimulatedCrash.getFirst().message().route());
-                assertEquals(1, output.taskAssignmentPublishAttempts());
+                assertEquals(1, pendingAfterMarkFailure.size());
+                assertEquals(TransportRoute.TASK_ASSIGN, pendingAfterMarkFailure.getFirst().message().route());
+                assertEquals(1, db.publishedMarkAttempts());
 
                 RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(
                         db,
@@ -620,6 +814,21 @@ class RabbitMqCoordinatorLiveIntegrationTest {
             }
             cleanup(config, topology, peerId);
         }
+    }
+
+    private static TaskAssignMessage outboxAssignment(String jobId) {
+        return new TaskAssignMessage(
+                "COORDINATOR",
+                Instant.now().toString(),
+                "task-" + jobId + "-0",
+                jobId,
+                TestTaskPlugin.TASK_TYPE,
+                1,
+                "550e8400-e29b-41d4-a716-446655440000",
+                1_780_000_000_000L,
+                "alpha",
+                ""
+        );
     }
 
     private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> schedulerMailbox,
@@ -1040,32 +1249,31 @@ class RabbitMqCoordinatorLiveIntegrationTest {
         }
     }
 
-    private static class CrashAfterTaskAssignmentPublishOutput extends RabbitMqSchedulerOutput {
-        private final CountDownLatch taskAssignmentPublishAttempted = new CountDownLatch(1);
-        private int taskAssignmentPublishAttempts;
+    private static final class FailFirstPublishedMarkDatabaseManager extends DatabaseManager {
+        private final CountDownLatch firstPublishedMarkAttempted = new CountDownLatch(1);
+        private final AtomicInteger publishedMarkAttempts = new AtomicInteger();
 
-        private CrashAfterTaskAssignmentPublishOutput(RabbitMqTransport transport) {
-            super(transport);
+        private FailFirstPublishedMarkDatabaseManager(String dbPath) throws SQLException {
+            super(dbPath);
         }
 
         @Override
-        public boolean publishOutbox(BrokerOutboxStore.OutboxRecord record) throws Exception {
-            boolean published = super.publishOutbox(record);
-            if (record.message().route() == TransportRoute.TASK_ASSIGN) {
-                taskAssignmentPublishAttempts++;
-                taskAssignmentPublishAttempted.countDown();
+        public boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
+            int attempt = publishedMarkAttempts.incrementAndGet();
+            firstPublishedMarkAttempted.countDown();
+            if (attempt == 1) {
                 return false;
             }
-            return published;
+            return super.markBrokerOutboxPublished(outboxId, publishedAt);
         }
 
-        private void awaitTaskAssignmentPublishAttempt() throws InterruptedException {
-            assertTrue(taskAssignmentPublishAttempted.await(10, TimeUnit.SECONDS),
-                    "Timed out waiting for simulated task-assignment publish attempt.");
+        private void awaitFirstPublishedMarkAttempt() throws InterruptedException {
+            assertTrue(firstPublishedMarkAttempted.await(10, TimeUnit.SECONDS),
+                    "Timed out waiting for the injected SQLite outbox sent-mark failure.");
         }
 
-        private int taskAssignmentPublishAttempts() {
-            return taskAssignmentPublishAttempts;
+        private int publishedMarkAttempts() {
+            return publishedMarkAttempts.get();
         }
     }
 }

@@ -209,6 +209,42 @@ class RabbitMqSchedulerOutputTest {
         assertEquals("requester-1", transport.peerNodeId);
     }
 
+    @Test
+    void rejectsPeerlessOutboxRecordInsteadOfPublishingWithoutMandatoryRouting() {
+        CapturingBrokerTransport transport = new CapturingBrokerTransport();
+        RabbitMqSchedulerOutput output = new RabbitMqSchedulerOutput(transport);
+        BrokerOutboxStore.OutboxRecord record = new BrokerOutboxStore.OutboxRecord(
+                3L,
+                new BrokerOutboxStore.OutboxMessage(
+                        TransportRoute.JOB_RESULT,
+                        "",
+                        RabbitMqRuntimeDefaults.COORDINATOR_NODE_ID,
+                        new JobResultMessage(
+                                "COORDINATOR",
+                                "2026-06-04T00:00:00Z",
+                                "job-1",
+                                "IMAGE_CONVERSION",
+                                true,
+                                List.of()
+                        )
+                ),
+                100L,
+                0,
+                0L,
+                ""
+        );
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> output.publishOutbox(record)
+        );
+
+        assertEquals(
+                "Coordinator broker outbox publications require a peer route",
+                error.getMessage()
+        );
+    }
+
     private static class CapturingBrokerTransport implements BrokerTransport {
         private final boolean peerPublishRoutable;
         private TransportRoute peerRoute;

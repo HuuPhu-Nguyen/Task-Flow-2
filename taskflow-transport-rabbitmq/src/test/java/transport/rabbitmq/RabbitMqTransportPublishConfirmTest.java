@@ -15,6 +15,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -74,6 +76,43 @@ class RabbitMqTransportPublishConfirmTest {
     }
 
     @Test
+    void publishesPersistentMessagesEvenWhenTopologyDurabilityIsDisabled() throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+
+        try (RabbitMqTransport transport = transport(fakeChannel, config(false))) {
+            assertTrue(transport.publish(message(TransportRoute.HEARTBEAT)));
+        }
+
+        assertEquals(2, fakeChannel.properties.getDeliveryMode());
+    }
+
+    @Test
+    void declaresConfiguredTopologyDurableButKeepsPeerEndpointEphemeral() throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        RabbitMqTransportConfig config = config(true);
+
+        try (RabbitMqTransport transport = transport(fakeChannel, config)) {
+            transport.declareTopology();
+
+            assertFalse(fakeChannel.exchangeDurability.isEmpty());
+            assertTrue(fakeChannel.exchangeDurability.stream().allMatch(Boolean::booleanValue));
+            assertFalse(fakeChannel.queueDeclarations.isEmpty());
+            assertTrue(fakeChannel.queueDeclarations.stream().allMatch(QueueDeclaration::durable));
+
+            transport.declarePeerEndpoint(TransportRoute.TASK_ASSIGN, "peer-1");
+        }
+
+        QueueDeclaration peerEndpoint = fakeChannel.queueDeclarations.getLast();
+        assertEquals(
+                new RabbitMqTopology(config).peerQueueName(TransportRoute.TASK_ASSIGN, "peer-1"),
+                peerEndpoint.name()
+        );
+        assertFalse(peerEndpoint.durable());
+        assertTrue(peerEndpoint.exclusive());
+        assertTrue(peerEndpoint.autoDelete());
+    }
+
+    @Test
     void publishReturnsFalseWhenBrokerDoesNotConfirm() throws Exception {
         FakeChannel fakeChannel = new FakeChannel();
         fakeChannel.confirmResult = false;
@@ -107,6 +146,28 @@ class RabbitMqTransportPublishConfirmTest {
     }
 
     @Test
+    void peerPublishThrowsWhenConnectionIsLostAfterWriteBeforeConfirm() throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        fakeChannel.failConfirmWait = true;
+
+        try (RabbitMqTransport transport = transport(fakeChannel)) {
+            IllegalStateException error = assertThrows(
+                    IllegalStateException.class,
+                    () -> transport.publishToPeer(
+                            TransportRoute.TASK_ASSIGN,
+                            "peer-1",
+                            message(TransportRoute.TASK_ASSIGN)
+                    )
+            );
+
+            assertEquals("broker connection lost before confirm", error.getMessage());
+        }
+
+        assertTrue(fakeChannel.mandatory);
+        assertNotNull(fakeChannel.body);
+    }
+
+    @Test
     void peerPublishReturnsFalseWhenMandatoryMessageIsReturned() throws Exception {
         FakeChannel fakeChannel = new FakeChannel();
         fakeChannel.returnMandatoryPublish = true;
@@ -124,9 +185,14 @@ class RabbitMqTransportPublishConfirmTest {
     }
 
     private static RabbitMqTransport transport(FakeChannel fakeChannel) throws Exception {
+        return transport(fakeChannel, config());
+    }
+
+    private static RabbitMqTransport transport(FakeChannel fakeChannel,
+                                               RabbitMqTransportConfig config) throws Exception {
         Channel channel = fakeChannel.proxy();
         return new RabbitMqTransport(
-                config(),
+                config,
                 new RabbitMqMessageCodec(),
                 connection(channel),
                 channel
@@ -134,6 +200,10 @@ class RabbitMqTransportPublishConfirmTest {
     }
 
     private static RabbitMqTransportConfig config() {
+        return config(RabbitMqTransportConfig.localDefaults().durable());
+    }
+
+    private static RabbitMqTransportConfig config(boolean durable) {
         RabbitMqTransportConfig defaults = RabbitMqTransportConfig.localDefaults();
         return new RabbitMqTransportConfig(
                 defaults.host(),
@@ -143,7 +213,7 @@ class RabbitMqTransportPublishConfirmTest {
                 defaults.virtualHost(),
                 defaults.exchangeName(),
                 defaults.queuePrefix(),
-                defaults.durable(),
+                durable,
                 defaults.prefetchCount(),
                 25L,
                 defaults.deadLetterEnabled(),
@@ -191,6 +261,7 @@ class RabbitMqTransportPublishConfirmTest {
         private boolean returnMandatoryPublish;
         private boolean failConfirmSelect;
         private boolean failPublish;
+        private boolean failConfirmWait;
         private String routingKey;
         private boolean mandatory;
         private AMQP.BasicProperties properties;
@@ -198,6 +269,8 @@ class RabbitMqTransportPublishConfirmTest {
         private long confirmTimeoutMillis;
         private int closeCount;
         private ReturnCallback returnCallback;
+        private final List<Boolean> exchangeDurability = new ArrayList<>();
+        private final List<QueueDeclaration> queueDeclarations = new ArrayList<>();
 
         private Channel proxy() {
             return (Channel) Proxy.newProxyInstance(
@@ -248,8 +321,25 @@ class RabbitMqTransportPublishConfirmTest {
                     }
                     yield null;
                 }
+                case "exchangeDeclare" -> {
+                    exchangeDurability.add((Boolean) args[2]);
+                    yield null;
+                }
+                case "queueDeclare" -> {
+                    queueDeclarations.add(new QueueDeclaration(
+                            (String) args[0],
+                            (Boolean) args[1],
+                            (Boolean) args[2],
+                            (Boolean) args[3]
+                    ));
+                    yield null;
+                }
+                case "queueBind" -> null;
                 case "waitForConfirms" -> {
                     confirmTimeoutMillis = (Long) args[0];
+                    if (failConfirmWait) {
+                        throw new IllegalStateException("broker connection lost before confirm");
+                    }
                     if (confirmTimeout) {
                         throw new TimeoutException("confirm timed out");
                     }
@@ -263,6 +353,12 @@ class RabbitMqTransportPublishConfirmTest {
                 default -> defaultValue(method.getReturnType());
             };
         }
+    }
+
+    private record QueueDeclaration(String name,
+                                    boolean durable,
+                                    boolean exclusive,
+                                    boolean autoDelete) {
     }
 
     private static final class FakeConnection implements InvocationHandler {

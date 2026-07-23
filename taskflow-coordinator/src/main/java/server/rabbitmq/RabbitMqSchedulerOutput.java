@@ -80,11 +80,9 @@ public class RabbitMqSchedulerOutput implements SchedulerOutput, BrokerOutboxPub
 
     private boolean publishOutboxMessage(BrokerOutboxStore.OutboxMessage message) throws Exception {
         if (message.peerNodeId() == null || message.peerNodeId().isBlank()) {
-            return transport.publish(new OutboundTransportMessage(
-                    message.route(),
-                    message.fromNodeId(),
-                    message.message()
-            ));
+            throw new IllegalArgumentException(
+                    "Coordinator broker outbox publications require a peer route"
+            );
         }
         return transport.publishToPeer(
                 message.route(),

@@ -61,16 +61,22 @@ The current RabbitMQ path includes:
   sends heartbeats, consumes peer-specific task assignments and job results,
   publishes task results, and routes successful final results through
   `ClientJobPlugin.handleResult(...)`.
+- Persistent delivery mode for all application-message publishes. Configured
+  durability applies to shared, retry, dead-letter, and quarantine
+  exchanges/queues; peer endpoints are intentionally exclusive, auto-delete,
+  and non-durable.
 - Publisher confirms for broker publishes.
 - Mandatory-return detection for unroutable peer-targeted publishes.
 - SQLite-backed coordinator broker outbox rows for `TASK_ASSIGN` and final
   `JOB_RESULT` publications. Task assignment state and terminal job state are
   committed transactionally with the corresponding outbound row, pending rows
-  replay on coordinator startup and retry periodically, and confirmed publishes
-  mark rows sent. For `TASK_ASSIGN`, SQLite also owns the persisted-generation
-  increment and assignment UUID; the scheduler publishes the exact envelope
-  returned by that transaction, so a publish retry cannot create a replacement
-  identity.
+  replay on coordinator startup and retry periodically, and only a persistent,
+  confirmed, mandatory-routed peer publish may proceed to the conditional
+  SQLite sent mark. Connection failure, nack, timeout, mandatory return, or sent
+  mark failure leaves the exact row pending. For `TASK_ASSIGN`, SQLite also owns
+  the persisted-generation increment and assignment UUID; the scheduler
+  publishes the exact envelope returned by that transaction, so a publish retry
+  cannot create a replacement identity.
 - One typed consumer-settlement contract: `ACK_SUCCESS`,
   `ACK_DUPLICATE_OR_STALE`, `RETRY_TRANSIENT`, `REJECT_INVALID`, and
   `QUARANTINE_POISON`. Scheduler-level tests prove duplicate/stale task-result
@@ -117,11 +123,13 @@ The current RabbitMQ path includes:
   deterministic-handler quarantine after the configured exact attempt bound,
   preserved retry metadata/manual quarantine redrive, ordinary DLQ
   redrive/quarantine behavior, prefetch behavior, broker-side
-  connection-close recovery, coordinator job completion, seeded pending outbox
-  replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
-  publish-before-sent-marking, and duplicate task-result rejection after
-  replayed task assignments, plus same-participant ABA fencing across failure,
-  reassignment, obsolete result delivery, and current result commitment.
+  connection-close recovery, coordinator job completion, persistent confirmed
+  assignment publication, seeded pending outbox replay for `TASK_ASSIGN` and
+  `JOB_RESULT`, pending-row preservation after connection loss and unroutable
+  assignment, exact duplicate replay after an injected SQLite sent-mark
+  failure, and duplicate task-result rejection after replayed task assignments,
+  plus same-participant ABA fencing across failure, reassignment, obsolete
+  result delivery, and current result commitment.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
   transport/coordinator gates plus command-line participant and JavaFX GUI
@@ -147,12 +155,14 @@ TaskFlow does not yet provide:
 - Participant-side durable `TASK_RESULT` outbox persistence. Executor roles
   instead defer assignment acknowledgement until `TASK_RESULT` publication is
   confirmed.
-- Guaranteed retry return after a peer-specific auto-delete queue disappears.
-  Retry TTL expiry preserves the peer routing key, but RabbitMQ dead-letter
-  forwarding is not mandatory; if that ephemeral binding no longer exists, the
-  broker can drop the unroutable return. Shared coordinator routes and
-  continuously bound peer routes have the tested finite quarantine behavior;
-  TF-0306 owns participant-outage recovery.
+- Durable peer-specific endpoints. Those queues remain exclusive, auto-delete,
+  and non-durable, so persistent message metadata does not make a routed peer
+  delivery survive participant disconnect or broker restart. Retry TTL expiry
+  preserves the peer routing key, but RabbitMQ dead-letter forwarding is not
+  mandatory; if that ephemeral binding no longer exists, the broker can drop
+  the unroutable return. Shared coordinator routes and continuously bound peer
+  routes have the tested finite quarantine behavior; TF-0306 owns
+  participant-outage recovery.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
 - Native RabbitMQ TLS/certificate configuration. Current configuration exposes

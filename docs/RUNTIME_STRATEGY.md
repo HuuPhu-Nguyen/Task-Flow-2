@@ -35,8 +35,13 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   immediately into the ordinary dead-letter workflow;
 - coordinator `TASK_ASSIGN` and final `JOB_RESULT` publication intent is stored
   in SQLite outbox rows before publication when persistence is available;
-- publisher confirms and mandatory-return detection decide whether an outbound
-  row can be marked sent; replay can therefore duplicate delivery.
+- application messages use persistent RabbitMQ delivery mode, while configured
+  topology durability applies to shared/retry/dead-letter resources and not the
+  exclusive auto-delete peer endpoints;
+- publisher confirms and mandatory-return detection decide whether a
+  peer-routed coordinator publish can proceed to its conditional SQLite sent
+  mark. Any failure, including the sent mark itself, leaves the row replayable,
+  so delivery can be duplicated.
 
 At-least-once delivery and execution remain explicit. Publisher confirmation is
 not consumer completion, and exactly-once delivery is not claimed.

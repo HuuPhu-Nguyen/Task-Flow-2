@@ -59,6 +59,44 @@ class RabbitMqOutboxReplayerTest {
     }
 
     @Test
+    void connectionLossAfterPublishWriteRecordsFailureAndLeavesRowPending() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(3L)));
+        RecordingPublisher publisher = new RecordingPublisher(
+                new IllegalStateException("broker connection lost before confirm")
+        );
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 10, 100L);
+
+        int published = replayer.replayOnce();
+
+        assertEquals(0, published);
+        assertEquals(List.of(3L), publisher.publishedIds);
+        assertEquals(Set.of(), store.publishedIds);
+        assertEquals(List.of(3L), store.failedIds);
+        assertEquals(1, store.loadPendingBrokerOutbox(10).size());
+        replayer.close();
+    }
+
+    @Test
+    void failedSentMarkLeavesConfirmedMessagePendingForIdenticalReplay() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(4L)), 1);
+        RecordingPublisher publisher = new RecordingPublisher(true);
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 10, 100L);
+
+        assertEquals(0, replayer.replayOnce());
+        assertEquals(List.of(4L), publisher.publishedIds);
+        assertEquals(1, store.loadPendingBrokerOutbox(10).size());
+
+        assertEquals(1, replayer.replayOnce());
+        assertEquals(List.of(4L, 4L), publisher.publishedIds);
+        assertEquals(
+                publisher.publishedRecords.get(0).message(),
+                publisher.publishedRecords.get(1).message()
+        );
+        assertEquals(List.of(), store.loadPendingBrokerOutbox(10));
+        replayer.close();
+    }
+
+    @Test
     void replayPublishesOriginalDatabaseCommittedAssignmentIdentity() throws Exception {
         Path dbPath = tempDir.resolve("assignment-replay.db");
         BrokerOutboxStore.CommittedTaskAssignment committed;
@@ -137,11 +175,18 @@ class RabbitMqOutboxReplayerTest {
 
     private static final class RecordingPublisher implements BrokerOutboxPublisher {
         private final boolean publishResult;
+        private final RuntimeException publishFailure;
         private final List<Long> publishedIds = new ArrayList<>();
         private final List<BrokerOutboxStore.OutboxRecord> publishedRecords = new ArrayList<>();
 
         private RecordingPublisher(boolean publishResult) {
             this.publishResult = publishResult;
+            this.publishFailure = null;
+        }
+
+        private RecordingPublisher(RuntimeException publishFailure) {
+            this.publishResult = false;
+            this.publishFailure = publishFailure;
         }
 
         @Override
@@ -162,6 +207,9 @@ class RabbitMqOutboxReplayerTest {
         public boolean publishOutbox(BrokerOutboxStore.OutboxRecord record) {
             publishedIds.add(record.outboxId());
             publishedRecords.add(record);
+            if (publishFailure != null) {
+                throw publishFailure;
+            }
             return publishResult;
         }
     }
@@ -170,9 +218,16 @@ class RabbitMqOutboxReplayerTest {
         private final List<OutboxRecord> records;
         private final Set<Long> publishedIds = new LinkedHashSet<>();
         private final List<Long> failedIds = new ArrayList<>();
+        private int failedPublishedMarksRemaining;
 
         private RecordingOutboxStore(List<OutboxRecord> records) {
+            this(records, 0);
+        }
+
+        private RecordingOutboxStore(List<OutboxRecord> records,
+                                     int failedPublishedMarksRemaining) {
             this.records = new ArrayList<>(records);
+            this.failedPublishedMarksRemaining = failedPublishedMarksRemaining;
         }
 
         @Override
@@ -216,6 +271,10 @@ class RabbitMqOutboxReplayerTest {
 
         @Override
         public boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
+            if (failedPublishedMarksRemaining > 0) {
+                failedPublishedMarksRemaining--;
+                return false;
+            }
             publishedIds.add(outboxId);
             return true;
         }

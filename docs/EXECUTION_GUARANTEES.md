@@ -116,12 +116,37 @@ nodes may enable the requester role, executor role, or both.
 ## RabbitMQ Publication
 
 - RabbitMQ transport channels enable publisher-confirm mode during startup.
+- Application envelopes use RabbitMQ persistent delivery mode
+  (`deliveryMode=2`) even when a test or operator selects non-durable topology.
+  `TASKFLOW_RABBITMQ_DURABLE` controls applicable shared, retry, dead-letter,
+  and quarantine resources. Peer-specific queues remain non-durable,
+  exclusive, and auto-delete by design.
 - `publish` and `publishToPeer` return success only after RabbitMQ confirms the publish within `TASKFLOW_RABBITMQ_PUBLISH_CONFIRM_TIMEOUT_MS`.
 - A broker nack or publisher-confirm timeout is reported as a failed publish.
 - Peer-targeted publishes also use RabbitMQ mandatory-return detection; an unroutable peer-targeted publish is reported as failed.
+- Coordinator outbox publication requires a nonblank peer route and therefore
+  always uses the mandatory peer-targeted path; it cannot fall back to an
+  unroutable shared publish that lacks return detection.
 - With SQLite persistence available, SQLite owns the conditional RabbitMQ assignment transaction: it reads a `PENDING` task, advances the persisted generation, validates the scheduler-supplied assignment UUID candidate, and stores task state, attempt audit, and the exact serialized `TASK_ASSIGN` envelope in one transaction. The last committed task result stores a replayable `FINALIZING` intent; final `JOB_RESULT` publications are then stored transactionally with the corresponding terminal job-state update.
-- Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
-- Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance is fenced by the complete persisted assignment identity, and terminal job completion is persisted once.
+- Pending outbox rows are replayed when the RabbitMQ coordinator starts and
+  retried periodically while it runs. The order is persistent broker write,
+  publisher confirmation, mandatory-return routing determination, then the
+  conditional SQLite sent mark. Only success at all four boundaries removes the
+  row from the pending set.
+- A connection exception, broker nack, confirm timeout, mandatory return, or
+  failed SQLite sent mark leaves the exact row pending. Failed/unconfirmed
+  broker attempts record attempt metadata; a sent-mark failure is logged and
+  deliberately leaves the pre-existing pending row unchanged.
+- Replay can duplicate a task assignment or final job result if RabbitMQ
+  accepts a publish but SQLite does not record the sent mark. Scheduler
+  task-result acceptance is fenced by the complete persisted assignment
+  identity, and terminal job completion is persisted once.
+- Focused adapter evidence covers
+  [persistent delivery mode and durable-versus-ephemeral topology](../taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqTransportPublishConfirmTest.java),
+  while the
+  [coordinator live suite](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqCoordinatorLiveIntegrationTest.java)
+  covers confirmed success, connection loss, mandatory return, failed sent
+  marking, and identical duplicate replay against RabbitMQ and SQLite.
 - Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so a transient publish failure schedules the assignment through the bounded broker retry topology.
 - RabbitMQ remains transitional; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it production-ready.
 
