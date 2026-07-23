@@ -40,6 +40,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -605,6 +606,262 @@ class RabbitMqCoordinatorLiveIntegrationTest {
     }
 
     @Test
+    void deliveryBeforeAcknowledgementIsRedeliveredAfterCoordinatorConnectionCloses() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "pre-ack-redelivery-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+        RabbitMqTransport firstCoordinator = null;
+
+        try {
+            cleanup(config, topology, peerId);
+            firstCoordinator = new RabbitMqTransport(config);
+            firstCoordinator.declareTopology();
+
+            CountDownLatch firstDeliveryDeferred = new CountDownLatch(1);
+            AtomicReference<Throwable> firstDeliveryFailure = new AtomicReference<>();
+            firstCoordinator.subscribe(TransportRoute.JOB_SUBMIT, delivery -> {
+                assertDelivery(firstDeliveryDeferred, firstDeliveryFailure, () -> {
+                    JobSubmitMessage submit = assertInstanceOf(
+                            JobSubmitMessage.class,
+                            delivery.message()
+                    );
+                    assertEquals(jobId, submit.getJobId());
+                    assertNotNull(delivery.acknowledgement());
+                    delivery.acknowledgement().defer();
+                });
+            });
+
+            try (RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
+                assertTrue(peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.JOB_SUBMIT,
+                        peerId,
+                        jobSubmission(peerId, jobId, List.of("alpha"))
+                )));
+                awaitDelivery(
+                        firstDeliveryDeferred,
+                        firstDeliveryFailure,
+                        "deferred pre-ack job submission"
+                );
+            }
+
+            firstCoordinator.close();
+            firstCoordinator = null;
+
+            CountDownLatch redelivered = new CountDownLatch(1);
+            AtomicReference<Throwable> redeliveryFailure = new AtomicReference<>();
+            try (Connection connection = connectionFactory(config)
+                    .newConnection("taskflow-rabbitmq-live-pre-ack-redelivery");
+                 Channel channel = connection.createChannel()) {
+                channel.basicConsume(
+                        topology.queueName(TransportRoute.JOB_SUBMIT),
+                        false,
+                        (tag, delivery) -> assertDelivery(redelivered, redeliveryFailure, () -> {
+                            assertTrue(
+                                    delivery.getEnvelope().isRedeliver(),
+                                    "RabbitMQ did not mark the unacknowledged delivery as redelivered."
+                            );
+                            InboundTransportMessage decoded = new transport.rabbitmq.RabbitMqMessageCodec()
+                                    .decode(delivery.getBody(), TransportRoute.JOB_SUBMIT, null);
+                            JobSubmitMessage submit = assertInstanceOf(
+                                    JobSubmitMessage.class,
+                                    decoded.message()
+                            );
+                            assertEquals(jobId, submit.getJobId());
+                            channel.basicAck(delivery.getEnvelope().getDeliveryTag(), false);
+                        }),
+                        tag -> {
+                        }
+                );
+                awaitDelivery(redelivered, redeliveryFailure, "pre-ack broker redelivery");
+            }
+
+            assertQueueDrained(config, topology.queueName(TransportRoute.JOB_SUBMIT));
+        } finally {
+            closeQuietly(firstCoordinator);
+            cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
+    void durableCommitBeforeLostAcknowledgementRedeliversAsHarmlessDuplicate() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
+
+        String token = "post-commit-redelivery-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String jobId = "job-" + token;
+        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+        RabbitMqTransport firstCoordinator = null;
+        RabbitMqTransport replacementCoordinator = null;
+        Thread schedulerThread = null;
+
+        try {
+            cleanup(config, topology, peerId);
+
+            try (DatabaseManager db = new DatabaseManager(tempDir.resolve(token + ".db").toString());
+                 RabbitMqTransport peerTransport = new RabbitMqTransport(config)) {
+                firstCoordinator = new RabbitMqTransport(config);
+                firstCoordinator.declareTopology();
+
+                BlockingQueue<MessageEnvelope> schedulerMailbox = new LinkedBlockingQueue<>();
+                InMemoryPeerRegistry registry = new InMemoryPeerRegistry(db);
+                PeerInfo peer = new PeerInfo(
+                        peerId,
+                        SchedulerConfig.defaults(),
+                        List.of(TestTaskPlugin.TASK_TYPE)
+                );
+                registry.register(peerId, peer);
+                TaskScheduler scheduler = new TaskScheduler(
+                        schedulerMailbox,
+                        registry,
+                        db,
+                        new RabbitMqSchedulerOutput(firstCoordinator),
+                        SchedulerConfig.defaults()
+                );
+                schedulerThread = new Thread(
+                        scheduler,
+                        "rabbitmq-post-commit-redelivery-live-test-scheduler"
+                );
+                schedulerThread.start();
+
+                BlockingQueue<TaskAssignMessage> assignments = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> assignmentFailure = new AtomicReference<>();
+                peerTransport.subscribePeer(TransportRoute.TASK_ASSIGN, peerId, delivery -> {
+                    try {
+                        TaskAssignMessage assignment = assertInstanceOf(
+                                TaskAssignMessage.class,
+                                delivery.message()
+                        );
+                        assertEquals(peerId, assignment.getNodeId());
+                        assertEquals(jobId, assignment.getJobId());
+                        assertEquals(TestTaskPlugin.TASK_TYPE, assignment.getTaskType());
+                        assertTrue(List.of("alpha", "beta").contains(assignment.getPayload()));
+                        assignments.add(assignment);
+                    } catch (Throwable e) {
+                        assignmentFailure.set(e);
+                        throw e;
+                    }
+                });
+
+                CountDownLatch acknowledgementLost = new CountDownLatch(1);
+                AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+                AtomicReference<String> attemptedDisposition = new AtomicReference<>();
+                RabbitMqTransport coordinatorToClose = firstCoordinator;
+                firstCoordinator.subscribe(TransportRoute.TASK_RESULT, delivery -> {
+                    TaskResultMessage result = assertInstanceOf(
+                            TaskResultMessage.class,
+                            delivery.message()
+                    );
+                    TransportAcknowledgement acknowledgement = delivery.acknowledgement();
+                    assertNotNull(acknowledgement);
+                    acknowledgement.defer();
+                    schedulerMailbox.put(new MessageEnvelope(
+                            result,
+                            delivery.fromNodeId(),
+                            new CloseBeforeAcknowledgement(
+                                    acknowledgement,
+                                    coordinatorToClose,
+                                    acknowledgementLost,
+                                    closeFailure,
+                                    attemptedDisposition
+                            )
+                    ));
+                });
+
+                schedulerMailbox.put(new MessageEnvelope(
+                        jobSubmission(peerId, jobId, List.of("alpha", "beta")),
+                        peerId
+                ));
+
+                TaskAssignMessage first = awaitQueue(
+                        assignments,
+                        assignmentFailure,
+                        "first assignment before post-commit acknowledgement loss"
+                );
+                TaskAssignMessage second = awaitQueue(
+                        assignments,
+                        assignmentFailure,
+                        "second assignment before post-commit acknowledgement loss"
+                );
+                assertNotEquals(first.getTaskId(), second.getTaskId());
+                TaskAssignMessage committedAssignment = "alpha".equals(first.getPayload())
+                        ? first
+                        : second;
+
+                assertTrue(peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(peerId, committedAssignment, "committed-once", true, null)
+                )));
+                awaitDelivery(
+                        acknowledgementLost,
+                        closeFailure,
+                        "connection close at the post-commit/pre-ack failpoint"
+                );
+                firstCoordinator = null;
+                assertEquals("ACK", attemptedDisposition.get());
+
+                DatabaseManager.TaskRecord committedTask = db.getTasksForJob(jobId).stream()
+                        .filter(task -> committedAssignment.getTaskId().equals(task.taskId()))
+                        .findFirst()
+                        .orElseThrow();
+                assertEquals("COMPLETED", committedTask.status());
+                assertEquals(1, scheduler.getMetricsSnapshot().successCount());
+                assertEquals(0, scheduler.getMetricsSnapshot().duplicateResultCount());
+                assertEquals(1L, db.loadTaskAttempts(jobId).stream()
+                        .filter(attempt -> attempt.outcome() == JobStateStore.TaskAttemptOutcome.SUCCEEDED)
+                        .count());
+
+                BlockingQueue<ResultSettlement> duplicateSettlements = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> duplicateSettlementFailure = new AtomicReference<>();
+                replacementCoordinator = new RabbitMqTransport(config);
+                replacementCoordinator.subscribe(TransportRoute.TASK_RESULT,
+                        delivery -> enqueueTaskResultForScheduler(
+                                schedulerMailbox,
+                                delivery,
+                                duplicateSettlements,
+                                duplicateSettlementFailure
+                        ));
+
+                ResultSettlement duplicateSettlement = awaitQueue(
+                        duplicateSettlements,
+                        duplicateSettlementFailure,
+                        "duplicate result acknowledgement after connection recovery"
+                );
+                assertAcknowledged(duplicateSettlement, committedAssignment);
+
+                DatabaseManager.TaskRecord afterDuplicate = db.getTasksForJob(jobId).stream()
+                        .filter(task -> committedAssignment.getTaskId().equals(task.taskId()))
+                        .findFirst()
+                        .orElseThrow();
+                assertEquals(committedTask, afterDuplicate);
+                assertEquals(1, scheduler.getMetricsSnapshot().successCount());
+                assertEquals(1, scheduler.getMetricsSnapshot().duplicateResultCount());
+                assertEquals(1L, db.loadTaskAttempts(jobId).stream()
+                        .filter(attempt -> attempt.outcome() == JobStateStore.TaskAttemptOutcome.SUCCEEDED)
+                        .count());
+                assertEquals(1, peer.getActiveTasks());
+                assertEquals(1L, peer.getCompletedTasks());
+                assertQueueDrained(config, topology.queueName(TransportRoute.TASK_RESULT));
+            }
+        } finally {
+            if (schedulerThread != null) {
+                schedulerThread.interrupt();
+                schedulerThread.join(2_000L);
+            }
+            closeQuietly(replacementCoordinator);
+            closeQuietly(firstCoordinator);
+            cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
     void sameWorkerAbaResultCannotCommitThroughLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
@@ -828,6 +1085,20 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 1_780_000_000_000L,
                 "alpha",
                 ""
+        );
+    }
+
+    private static JobSubmitMessage jobSubmission(String peerId,
+                                                  String jobId,
+                                                  List<Object> payloads) {
+        return new JobSubmitMessage(
+                peerId,
+                Instant.now().toString(),
+                jobId,
+                TestTaskPlugin.TASK_TYPE,
+                payloads,
+                "",
+                "token-" + jobId
         );
     }
 
@@ -1116,6 +1387,16 @@ class RabbitMqCoordinatorLiveIntegrationTest {
         }
     }
 
+    private static void closeQuietly(AutoCloseable closeable) {
+        if (closeable == null) {
+            return;
+        }
+        try {
+            closeable.close();
+        } catch (Exception ignored) {
+        }
+    }
+
     private static class ObservedSchedulerOutput implements SchedulerOutput {
         private final SchedulerOutput delegate;
         private final CountDownLatch jobResultSendCompleted;
@@ -1245,6 +1526,64 @@ class RabbitMqCoordinatorLiveIntegrationTest {
             } catch (Exception e) {
                 settlementFailure.compareAndSet(null, e);
                 throw e;
+            }
+        }
+    }
+
+    private static final class CloseBeforeAcknowledgement implements TransportAcknowledgement {
+        private final TransportAcknowledgement delegate;
+        private final AutoCloseable coordinatorTransport;
+        private final CountDownLatch acknowledgementLost;
+        private final AtomicReference<Throwable> closeFailure;
+        private final AtomicReference<String> attemptedDisposition;
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private CloseBeforeAcknowledgement(TransportAcknowledgement delegate,
+                                           AutoCloseable coordinatorTransport,
+                                           CountDownLatch acknowledgementLost,
+                                           AtomicReference<Throwable> closeFailure,
+                                           AtomicReference<String> attemptedDisposition) {
+            this.delegate = delegate;
+            this.coordinatorTransport = coordinatorTransport;
+            this.acknowledgementLost = acknowledgementLost;
+            this.closeFailure = closeFailure;
+            this.attemptedDisposition = attemptedDisposition;
+        }
+
+        @Override
+        public void ack() throws Exception {
+            attemptedDisposition.compareAndSet(null, "ACK");
+            closeBeforeBrokerSettlement();
+        }
+
+        @Override
+        public void requeue() throws Exception {
+            attemptedDisposition.compareAndSet(null, "REQUEUE");
+            delegate.requeue();
+        }
+
+        @Override
+        public void reject() throws Exception {
+            attemptedDisposition.compareAndSet(null, "REJECT");
+            delegate.reject();
+        }
+
+        @Override
+        public void defer() {
+            delegate.defer();
+        }
+
+        private void closeBeforeBrokerSettlement() throws Exception {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                coordinatorTransport.close();
+            } catch (Exception e) {
+                closeFailure.compareAndSet(null, e);
+                throw e;
+            } finally {
+                acknowledgementLost.countDown();
             }
         }
     }

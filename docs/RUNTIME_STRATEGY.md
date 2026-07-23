@@ -28,6 +28,10 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   the dead-letter workflow;
 - duplicate or stale scheduler outcomes are acknowledged without changing
   authoritative state;
+- coordinator submissions and task results stay unacknowledged until bounded
+  mailbox admission and scheduler/store classification; connection loss before
+  settlement returns broker ownership, and a post-commit redelivery is a typed
+  harmless duplicate;
 - scheduler-mailbox saturation and explicitly transient handler/storage
   failures use `RETRY_TRANSIENT` under the documented bounded TTL schedule;
 - deterministic processing failures use the same bounded schedule and enter
@@ -42,6 +46,10 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   peer-routed coordinator publish can proceed to its conditional SQLite sent
   mark. Any failure, including the sent mark itself, leaves the row replayable,
   so delivery can be duplicated.
+- coordinator shutdown closes intake before consumer cancellation, drains
+  already admitted envelopes within a fixed bound, closes the broker channel
+  to return unsettled deliveries, and closes SQLite only after database-using
+  background components stop.
 
 At-least-once delivery and execution remain explicit. Publisher confirmation is
 not consumer completion, and exactly-once delivery is not claimed.
@@ -70,7 +78,9 @@ authoritative.
   exact duplicate submission replay and live `JOB_RESULT` delivery are the
   available paths.
 - Live broker tests, broker-backed CI, Docker Compose, and the JavaFX desktop
-  smoke helper exercise the supported runtime.
+  smoke helper exercise the supported runtime. The coordinator live gates
+  include pre-ack redelivery, post-commit/pre-ack duplicate classification,
+  and pre-stop/post-stop shutdown delivery ownership.
 
 ## Legacy Data
 

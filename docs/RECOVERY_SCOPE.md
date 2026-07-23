@@ -28,6 +28,14 @@ an empty hash and remain non-replayable as original submissions because task
 snapshots may be plugin-transformed rather than the original submitted values.
 PostgreSQL/Flyway is not implemented.
 
+Coordinator shutdown now stops RabbitMQ intake before draining the bounded
+scheduler mailbox. A delivery that was admitted drains to its typed
+scheduler/store disposition; a delivery that reaches the closed ingress gate
+remains unacknowledged and returns to RabbitMQ when the channel closes.
+SQLite closes only after the scheduler, peer monitor, and outbox replayer stop.
+This is healthy-broker connection-close recovery, not proof of broker-process
+restart; TF-0306 owns the latter.
+
 ## Decision
 
 - Explicit attempt history: implemented for the SQLite state store.
@@ -157,6 +165,8 @@ Public docs may claim SQLite-backed task leases for assigned work, unexpired
 lease preservation on startup, expired-lease release, and stale-result rejection
 after reassignment. They may also claim replayable single-coordinator job
 finalization from durable ordered task results and atomic terminal/outbox
-commit, but not exactly-once broker delivery. They should not claim
+commit, plus broker redelivery of unsettled coordinator deliveries after
+connection close, but not exactly-once broker delivery or full broker-restart
+recovery. They should not claim
 multi-coordinator locking, PostgreSQL/Flyway storage, or an operator-managed
 external database until those are implemented and tested.

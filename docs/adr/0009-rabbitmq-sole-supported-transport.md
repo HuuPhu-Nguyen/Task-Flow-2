@@ -59,8 +59,10 @@ the large binary data plane.
   duplicates remain normal and must be classified safely.
 - Legacy socket configuration, packaging, tests, and claims are absent from the
   supported surface.
-- Full broker outage/restart and acknowledgement crash windows must pass before
-  production-strength RabbitMQ claims are made.
+- Healthy-broker acknowledgement crash windows now have live pre-ack,
+  post-commit/pre-ack, and shutdown-ownership evidence. Full broker
+  outage/restart recovery and the broader Phase 7 process-kill matrix must pass
+  before production-strength RabbitMQ claims are made.
 
 ## Conditions That Would Invalidate This Decision
 

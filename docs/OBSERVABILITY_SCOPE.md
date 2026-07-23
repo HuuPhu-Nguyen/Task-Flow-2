@@ -33,6 +33,9 @@ Queue pressure and scheduler health:
   RabbitMQ queue depths, and DLQ inspection summaries.
 - `scheduler_ingress_retry_requested reason=mailbox_full` records the bounded
   RabbitMQ retry disposition when the scheduler mailbox is full.
+- `scheduler_ingress_stopped action=broker_requeue_on_transport_close` records
+  a delivery that reached the closed coordinator ingress gate and was
+  deliberately left unsettled for RabbitMQ ownership recovery.
 
 Job lifecycle:
 
@@ -154,6 +157,17 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 - `rabbitmq_outbox_published`, `rabbitmq_outbox_publish_deferred`,
   `rabbitmq_outbox_publish_failed`, `rabbitmq_outbox_publish_mark_failed`, and
   `rabbitmq_outbox_replay` record coordinator outbox replay activity.
+- `rabbitmq_coordinator_shutdown_started` records consumer count and the
+  scheduler drain bound. `rabbitmq_coordinator_shutdown_drain_timeout` records
+  the forced interrupt/channel-close fallback.
+- `rabbitmq_coordinator_shutdown_action_failed`,
+  `rabbitmq_coordinator_consumer_cancel_failed`, and
+  `rabbitmq_coordinator_shutdown_close_failed` identify a lifecycle component
+  that did not stop cleanly.
+- `rabbitmq_coordinator_shutdown_database_close_deferred` records the
+  scheduler, peer-monitor, outbox-replayer, and transport stop outcomes when
+  SQLite cannot be closed safely. `rabbitmq_coordinator_shutdown_completed`
+  reports the same final booleans.
 - `scheduler_message_validation_failed` and
   `scheduler_message_processing_failed` include stable `reason_code` and
   `disposition` fields. `scheduler_delivery_disposed` records every non-success

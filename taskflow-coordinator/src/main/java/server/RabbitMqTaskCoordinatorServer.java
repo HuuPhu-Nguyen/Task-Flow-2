@@ -47,6 +47,7 @@ public class RabbitMqTaskCoordinatorServer {
         TaskFlowClock clock = SystemTaskFlowClock.INSTANCE;
         AssignmentIdGenerator assignmentIdGenerator = UuidAssignmentIdGenerator.INSTANCE;
         BlockingQueue<MessageEnvelope> inboundMailbox = SchedulerMailbox.create(schedulerConfig);
+        SchedulerMailbox.BrokerIngress brokerIngress = SchedulerMailbox.brokerIngress(inboundMailbox);
 
         DatabaseManager db = null;
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
@@ -101,30 +102,28 @@ public class RabbitMqTaskCoordinatorServer {
                 peer -> enqueuePeerUnavailable(inboundMailbox, peer, "heartbeat_timeout")
         );
 
-        transport.subscribe(TransportRoute.JOB_SUBMIT,
-                delivery -> enqueueForScheduler(inboundMailbox, delivery));
-        transport.subscribe(TransportRoute.TASK_RESULT,
-                delivery -> enqueueForScheduler(inboundMailbox, delivery));
-        transport.subscribe(TransportRoute.HEARTBEAT,
+        String jobSubmitConsumerTag = transport.subscribe(TransportRoute.JOB_SUBMIT,
+                delivery -> enqueueForScheduler(brokerIngress, delivery));
+        String taskResultConsumerTag = transport.subscribe(TransportRoute.TASK_RESULT,
+                delivery -> enqueueForScheduler(brokerIngress, delivery));
+        String heartbeatConsumerTag = transport.subscribe(TransportRoute.HEARTBEAT,
                 delivery -> handleHeartbeat(registry, schedulerConfig, delivery));
 
         DatabaseManager finalDb = db;
         RabbitMqOutboxReplayer finalOutboxReplayer = outboxReplayer;
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("event=rabbitmq_coordinator_shutdown");
-            schedulerThread.interrupt();
-            monitor.shutdown();
-            if (finalOutboxReplayer != null) {
-                finalOutboxReplayer.close();
-            }
-            if (finalDb != null) {
-                finalDb.close();
-            }
-            try {
-                transport.close();
-            } catch (Exception ignored) {
-            }
-        }));
+        RabbitMqCoordinatorShutdown shutdown = new RabbitMqCoordinatorShutdown(
+                brokerIngress::stopIntake,
+                transport,
+                List.of(jobSubmitConsumerTag, taskResultConsumerTag, heartbeatConsumerTag),
+                monitor::shutdown,
+                finalOutboxReplayer,
+                schedulerLogic::requestShutdownAfterDrain,
+                schedulerThread,
+                finalDb
+        );
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(shutdown, "rabbitmq-coordinator-shutdown")
+        );
 
         monitor.start();
         schedulerThread.start();
@@ -135,14 +134,18 @@ public class RabbitMqTaskCoordinatorServer {
         Thread.currentThread().join();
     }
 
-    private static void enqueueForScheduler(BlockingQueue<MessageEnvelope> inboundMailbox,
+    private static void enqueueForScheduler(SchedulerMailbox.BrokerIngress brokerIngress,
                                             InboundTransportMessage delivery) throws Exception {
-        boolean queued = SchedulerMailbox.offerBrokerDelivery(inboundMailbox, delivery);
-        if (!queued) {
+        SchedulerMailbox.BrokerOfferOutcome outcome = brokerIngress.offer(delivery);
+        if (outcome == SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY) {
             LOGGER.warn("event=scheduler_ingress_retry_requested reason=mailbox_full route={} from_node_id={} queue_depth={}",
                     delivery.route(),
                     delivery.fromNodeId(),
-                    inboundMailbox.size());
+                    brokerIngress.queueDepth());
+        } else if (outcome == SchedulerMailbox.BrokerOfferOutcome.INTAKE_STOPPED_UNACKNOWLEDGED) {
+            LOGGER.info("event=scheduler_ingress_stopped route={} from_node_id={} action=broker_requeue_on_transport_close",
+                    delivery.route(),
+                    delivery.fromNodeId());
         }
     }
 

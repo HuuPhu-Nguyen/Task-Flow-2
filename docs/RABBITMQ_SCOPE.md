@@ -86,6 +86,21 @@ The current RabbitMQ path includes:
   coverage also proves an obsolete attempt-1/X result from a participant
   reassigned under attempt-2/Y is acknowledged as stale without changing Y,
   and only Y commits.
+- Coordinator `JOB_SUBMIT` and `TASK_RESULT` deliveries are deferred before
+  bounded-mailbox admission and settle only after scheduler/store
+  classification. Closing the consumer connection before acknowledgement
+  produces RabbitMQ redelivery. If SQLite committed the result before that
+  connection loss, the next delivery is typed as a duplicate, acknowledged,
+  and cannot increment authoritative success or close the attempt twice.
+- Coordinator shutdown stops the synchronized ingress gate, cancels all three
+  consumers, stops the peer monitor and outbox replayer, requests a bounded
+  scheduler drain, then closes the RabbitMQ transport before SQLite. Admitted
+  envelopes drain normally. A delivery observed after intake closure remains
+  unacknowledged, so channel close restores broker ownership. Drain timeout
+  interrupts the scheduler and closes the channel; SQLite closes only after
+  the scheduler, auxiliary database users, and transport have stopped. The
+  initial outbox replay runs on the same executor that shutdown terminates and
+  awaits, rather than escaping that lifecycle boundary on the startup thread.
 - Bounded executor-side assignment deduplication shared by command-line and
   JavaFX RabbitMQ adapters. A duplicate running delivery is acknowledged
   without another processor invocation; a completed cached assignment
@@ -128,8 +143,11 @@ The current RabbitMQ path includes:
   `JOB_RESULT`, pending-row preservation after connection loss and unroutable
   assignment, exact duplicate replay after an injected SQLite sent-mark
   failure, and duplicate task-result rejection after replayed task assignments,
-  plus same-participant ABA fencing across failure, reassignment, obsolete
-  result delivery, and current result commitment.
+  connection-close redelivery before acknowledgement, harmless duplicate
+  classification after durable commit but before acknowledgement, ordered
+  shutdown ownership for pre-stop and post-stop deliveries, plus
+  same-participant ABA fencing across failure, reassignment, obsolete result
+  delivery, and current result commitment.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
   transport/coordinator gates plus command-line participant and JavaFX GUI
@@ -164,7 +182,10 @@ TaskFlow does not yet provide:
   routes have the tested finite quarantine behavior; TF-0306 owns
   participant-outage recovery.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
-  publish failures or coordinator restart.
+  publish failures or coordinator restart. The acknowledgement tests close
+  healthy client connections against a running broker; they do not prove
+  topology, publisher, consumer, and active-job recovery across a broker
+  process restart, which remains TF-0306.
 - Native RabbitMQ TLS/certificate configuration. Current configuration exposes
   host, port, username, password, vhost, and topology settings; use a trusted
   network or verified TLS-terminating tunnel/proxy until direct TLS support is

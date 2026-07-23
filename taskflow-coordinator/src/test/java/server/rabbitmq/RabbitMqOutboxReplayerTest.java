@@ -16,8 +16,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -149,6 +154,49 @@ class RabbitMqOutboxReplayerTest {
         }
     }
 
+    @Test
+    void closeInterruptsAndWaitsForInitialDatabaseWorkToStop() throws Exception {
+        BlockingFirstLoadStore store = new BlockingFirstLoadStore();
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(
+                store,
+                new RecordingPublisher(true),
+                10,
+                1L
+        );
+        Thread startThread = new Thread(replayer::start, "rabbitmq-outbox-test-starter");
+        startThread.start();
+        assertTrue(
+                store.loadStarted.await(2, TimeUnit.SECONDS),
+                "Timed out waiting for initial outbox database work."
+        );
+
+        replayer.close();
+        startThread.join(2_000L);
+
+        assertFalse(startThread.isAlive(), "Outbox start remained blocked after shutdown.");
+        assertTrue(store.loadInterrupted.get());
+    }
+
+    @Test
+    void closeInterruptsAndWaitsForScheduledDatabaseWorkToStop() throws Exception {
+        BlockingSecondLoadStore store = new BlockingSecondLoadStore();
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(
+                store,
+                new RecordingPublisher(true),
+                10,
+                1L
+        );
+        replayer.start();
+        assertTrue(
+                store.scheduledLoadStarted.await(2, TimeUnit.SECONDS),
+                "Timed out waiting for scheduled outbox database work."
+        );
+
+        replayer.close();
+
+        assertTrue(store.scheduledLoadInterrupted.get());
+    }
+
     private static BrokerOutboxStore.OutboxRecord outboxRecord(long id) {
         JobResultMessage result = new JobResultMessage(
                 "COORDINATOR",
@@ -214,7 +262,7 @@ class RabbitMqOutboxReplayerTest {
         }
     }
 
-    private static final class RecordingOutboxStore implements BrokerOutboxStore {
+    private static class RecordingOutboxStore implements BrokerOutboxStore {
         private final List<OutboxRecord> records;
         private final Set<Long> publishedIds = new LinkedHashSet<>();
         private final List<Long> failedIds = new ArrayList<>();
@@ -283,6 +331,52 @@ class RabbitMqOutboxReplayerTest {
         public boolean markBrokerOutboxPublishFailed(long outboxId, String error, long attemptedAt) {
             failedIds.add(outboxId);
             return true;
+        }
+    }
+
+    private static final class BlockingFirstLoadStore extends RecordingOutboxStore {
+        private final CountDownLatch loadStarted = new CountDownLatch(1);
+        private final AtomicBoolean loadInterrupted = new AtomicBoolean();
+
+        private BlockingFirstLoadStore() {
+            super(List.of());
+        }
+
+        @Override
+        public List<OutboxRecord> loadPendingBrokerOutbox(int limit) {
+            loadStarted.countDown();
+            try {
+                new CountDownLatch(1).await();
+            } catch (InterruptedException e) {
+                loadInterrupted.set(true);
+                Thread.currentThread().interrupt();
+            }
+            return List.of();
+        }
+    }
+
+    private static final class BlockingSecondLoadStore extends RecordingOutboxStore {
+        private final AtomicInteger loadCalls = new AtomicInteger();
+        private final CountDownLatch scheduledLoadStarted = new CountDownLatch(1);
+        private final AtomicBoolean scheduledLoadInterrupted = new AtomicBoolean();
+
+        private BlockingSecondLoadStore() {
+            super(List.of());
+        }
+
+        @Override
+        public List<OutboxRecord> loadPendingBrokerOutbox(int limit) {
+            if (loadCalls.incrementAndGet() == 1) {
+                return List.of();
+            }
+            scheduledLoadStarted.countDown();
+            try {
+                new CountDownLatch(1).await();
+            } catch (InterruptedException e) {
+                scheduledLoadInterrupted.set(true);
+                Thread.currentThread().interrupt();
+            }
+            return List.of();
         }
     }
 }

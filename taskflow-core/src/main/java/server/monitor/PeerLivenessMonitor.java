@@ -13,6 +13,7 @@ import java.util.concurrent.TimeUnit;
 public class PeerLivenessMonitor {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(PeerLivenessMonitor.class);
+    private static final long SHUTDOWN_TIMEOUT_MILLIS = 2_000L;
 
     private final PeerRegistry registry;
     private final ScheduledExecutorService scheduler;
@@ -50,5 +51,20 @@ public class PeerLivenessMonitor {
 
     public void shutdown() {
         scheduler.shutdownNow();
+        try {
+            if (!scheduler.awaitTermination(SHUTDOWN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS)) {
+                throw new IllegalStateException(
+                        "Peer liveness monitor did not stop within "
+                                + SHUTDOWN_TIMEOUT_MILLIS
+                                + " ms."
+                );
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Interrupted while stopping the peer liveness monitor.",
+                    e
+            );
+        }
     }
 }

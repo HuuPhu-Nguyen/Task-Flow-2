@@ -8,8 +8,9 @@ adaptive throttling remains deferred.
 - Scheduler ingress is bounded by `inboundQueueCapacity` /
   `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`.
 - RabbitMQ coordinator deliveries for `JOB_SUBMIT` and `TASK_RESULT` remain
-  unacknowledged until scheduler admission. If the mailbox is full, the
-  delivery receives `RETRY_TRANSIENT` and already accepted work is unchanged.
+  unacknowledged through scheduler admission and processing. If the mailbox is
+  full, the delivery receives `RETRY_TRANSIENT` and already accepted work is
+  unchanged.
 - RabbitMQ consumers apply `TASKFLOW_RABBITMQ_PREFETCH`, limiting outstanding
   unacknowledged deliveries per consumer channel.
 - Executor participants defer `TASK_ASSIGN` acknowledgement until the matching
@@ -18,6 +19,11 @@ adaptive throttling remains deferred.
 - Participant liveness events are internal coordinator events. If the bounded
   scheduler mailbox cannot admit one, the coordinator logs an explicit
   dropped-event error instead of claiming it was handled.
+- Coordinator shutdown atomically closes broker ingress before consumer
+  cancellation. Envelopes already admitted to the bounded mailbox drain to a
+  typed settlement; a delivery racing after intake closure remains
+  unacknowledged and returns to RabbitMQ when the transport channel closes.
+  No overflow or shutdown-only in-memory queue is created.
 
 These mechanisms define one broker-facing overload contract. The current
 RabbitMQ adapter maps `RETRY_TRANSIENT` to publisher-confirmed TTL retry queues.
@@ -40,6 +46,13 @@ ephemeral peer route disappears or adaptive capacity management.
 - RabbitMQ coordinator tests cover acknowledgement of successful, duplicate,
   and stale outcomes plus typed delayed retry on retryable scheduler/storage
   failures.
+- `RabbitMqCoordinatorLiveIntegrationTest` closes the coordinator connection
+  before acknowledgement and after a durable result commit. RabbitMQ
+  redelivers in both cases; the latter is classified and acknowledged as a
+  harmless duplicate with one authoritative commit.
+- `RabbitMqCoordinatorShutdownLiveIntegrationTest` proves one pre-stop
+  delivery drains while a post-stop deferred delivery returns to broker
+  ownership after transport close.
 
 ## Deferred Adaptive Behavior
 

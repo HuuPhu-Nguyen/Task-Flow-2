@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,6 +38,7 @@ class SchedulerMailboxTest {
         BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
                 SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
         );
+        SchedulerMailbox.BrokerIngress ingress = SchedulerMailbox.brokerIngress(mailbox);
         RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
         InboundTransportMessage delivery = new InboundTransportMessage(
                 TransportRoute.HEARTBEAT,
@@ -45,7 +47,7 @@ class SchedulerMailboxTest {
                 acknowledgement
         );
 
-        assertTrue(SchedulerMailbox.offerBrokerDelivery(mailbox, delivery));
+        assertEquals(SchedulerMailbox.BrokerOfferOutcome.QUEUED, ingress.offer(delivery));
 
         assertEquals(1, acknowledgement.deferCount());
         assertEquals(0, acknowledgement.requeueCount());
@@ -59,6 +61,7 @@ class SchedulerMailboxTest {
         BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
                 SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
         );
+        SchedulerMailbox.BrokerIngress ingress = SchedulerMailbox.brokerIngress(mailbox);
         assertTrue(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-existing")));
 
         RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
@@ -69,12 +72,39 @@ class SchedulerMailboxTest {
                 acknowledgement
         );
 
-        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, delivery));
+        assertEquals(
+                SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY,
+                ingress.offer(delivery)
+        );
 
         assertEquals(1, acknowledgement.deferCount());
         assertEquals(1, acknowledgement.requeueCount());
         assertEquals(DeliveryDisposition.RETRY_TRANSIENT, acknowledgement.disposition());
         assertEquals(1, mailbox.size());
+    }
+
+    @Test
+    void stoppedIngressLeavesDeliveryDeferredAndUnacknowledgedForBrokerRecovery() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1"))
+        );
+        SchedulerMailbox.BrokerIngress ingress = SchedulerMailbox.brokerIngress(mailbox);
+        RecordingAcknowledgement acknowledgement = new RecordingAcknowledgement();
+        ingress.stopIntake();
+
+        SchedulerMailbox.BrokerOfferOutcome outcome = ingress.offer(
+                brokerDelivery("peer-after-stop", acknowledgement)
+        );
+
+        assertEquals(
+                SchedulerMailbox.BrokerOfferOutcome.INTAKE_STOPPED_UNACKNOWLEDGED,
+                outcome
+        );
+        assertFalse(ingress.isAccepting());
+        assertEquals(1, acknowledgement.deferCount());
+        assertEquals(0, acknowledgement.requeueCount());
+        assertNull(acknowledgement.disposition());
+        assertTrue(mailbox.isEmpty());
     }
 
     @Test
@@ -87,9 +117,16 @@ class SchedulerMailboxTest {
 
         RecordingAcknowledgement firstOverflow = new RecordingAcknowledgement();
         RecordingAcknowledgement secondOverflow = new RecordingAcknowledgement();
+        SchedulerMailbox.BrokerIngress ingress = SchedulerMailbox.brokerIngress(mailbox);
 
-        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, brokerDelivery("peer-overflow-1", firstOverflow)));
-        assertFalse(SchedulerMailbox.offerBrokerDelivery(mailbox, brokerDelivery("peer-overflow-2", secondOverflow)));
+        assertEquals(
+                SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY,
+                ingress.offer(brokerDelivery("peer-overflow-1", firstOverflow))
+        );
+        assertEquals(
+                SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY,
+                ingress.offer(brokerDelivery("peer-overflow-2", secondOverflow))
+        );
 
         assertEquals(1, firstOverflow.deferCount());
         assertEquals(1, firstOverflow.requeueCount());

@@ -173,6 +173,39 @@ nodes may enable the requester role, executor role, or both.
   not mandatory, so that return can be unroutable. TF-0306 owns recovery for
   that participant-outage window.
 
+## Coordinator Consumer Acknowledgement and Shutdown
+
+- `JOB_SUBMIT` and `TASK_RESULT` callbacks defer the RabbitMQ delivery before
+  attempting bounded scheduler-mailbox admission. Admission transfers only a
+  process-local reference; it does not acknowledge the broker delivery.
+- Scheduler processing chooses the typed disposition only after validation and
+  the applicable durable store transition. A matching result is acknowledged
+  after its SQLite commit and projection. Duplicate/stale results are
+  acknowledged without mutation. Storage failure receives bounded transient
+  retry instead of an acknowledgement.
+- Closing the coordinator connection before settlement leaves RabbitMQ as the
+  delivery owner. Live evidence observes the broker's redelivery flag both
+  before any acknowledgement and after SQLite committed a result but before
+  the acknowledgement frame. The post-commit delivery is classified
+  `DUPLICATE_ALREADY_COMPLETED`, acknowledged, and leaves one succeeded attempt
+  and one authoritative result.
+- Graceful shutdown first closes the synchronized ingress gate and cancels
+  consumers. It then stops the peer monitor and outbox replayer, requests a
+  bounded scheduler drain, closes the RabbitMQ transport, and closes SQLite
+  only after every database-using background component has stopped. Work
+  admitted before the gate closed drains to a disposition. A callback that
+  reaches the closed gate is deferred but deliberately unsettled, so transport
+  close returns it to RabbitMQ.
+- The default drain bound is 10 seconds. Timeout interrupts the scheduler and
+  closes the broker channel so unacknowledged deliveries are recoverable. If
+  the scheduler, an auxiliary database user, or the RabbitMQ transport does not
+  stop, SQLite close is deliberately deferred to process exit rather than
+  racing a live callback. The initial outbox replay also runs on the replayer
+  executor, so the same bounded stop owns startup-time database work.
+- These tests use intentional healthy connection/channel close to exercise the
+  acknowledgement windows. Full broker-process outage, topology recovery, and
+  active-job completion after broker restart remain TF-0306.
+
 ## RabbitMQ Connection Recovery
 
 - RabbitMQ client automatic connection recovery is enabled for transport connections.
@@ -216,6 +249,10 @@ nodes may enable the requester role, executor role, or both.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or participant explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
+- Scheduler-mailbox admission and shutdown share one ingress gate: a full
+  mailbox enters the bounded broker retry topology, while stopped intake leaves
+  the delivery unsettled for channel-close redelivery. Neither path allocates
+  an overflow queue.
 - Adaptive backpressure across broker queue depth, executor capacity, and external autoscaling remains future work. `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and the evidence required before adding adaptive throttling.
 
 ## Authoritative Successful-Result Commit

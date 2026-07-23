@@ -221,6 +221,10 @@ public class TaskScheduler implements Runnable {
         loop.run();
     }
 
+    public void requestShutdownAfterDrain() {
+        loop.requestShutdownAfterDrain();
+    }
+
     public SchedulerMetrics.Snapshot getMetricsSnapshot() {
         return metrics.snapshot();
     }

@@ -16,6 +16,7 @@ public final class SchedulerLoop implements Runnable {
 
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final Work work;
+    private volatile boolean shutdownAfterDrain;
 
     public SchedulerLoop(BlockingQueue<MessageEnvelope> inboundMailbox, Work work) {
         this.inboundMailbox = Objects.requireNonNull(inboundMailbox, "inboundMailbox");
@@ -25,12 +26,19 @@ public final class SchedulerLoop implements Runnable {
     @Override
     public void run() {
         while (!Thread.currentThread().isInterrupted()) {
+            if (shutdownAfterDrain && inboundMailbox.isEmpty()) {
+                return;
+            }
             try {
-                runCycle(DEFAULT_POLL_TIMEOUT_MILLIS);
+                runCycle(shutdownAfterDrain ? 0L : DEFAULT_POLL_TIMEOUT_MILLIS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    void requestShutdownAfterDrain() {
+        shutdownAfterDrain = true;
     }
 
     void runCycle(long pollTimeoutMillis) throws InterruptedException {
