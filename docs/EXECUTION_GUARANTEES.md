@@ -28,7 +28,7 @@ nodes may enable the requester role, executor role, or both.
 - A duplicate delivery for a completed cached assignment republishes the exact
   cached `TASK_RESULT`, including its attempt number, assignment ID, timestamp,
   success disposition, and payload. That delivery is acknowledged only after
-  the republish is confirmed; failure requeues it.
+  the republish is confirmed; transient failure schedules bounded broker retry.
 - `TASKFLOW_ASSIGNMENT_CACHE_MAX_ENTRIES` controls the maximum entry count
   (default `4096`). `TASKFLOW_ASSIGNMENT_CACHE_TTL_MS` controls expiry (default
   `900000` ms). Both values must be positive.
@@ -122,7 +122,7 @@ nodes may enable the requester role, executor role, or both.
 - With SQLite persistence available, SQLite owns the conditional RabbitMQ assignment transaction: it reads a `PENDING` task, advances the persisted generation, validates the scheduler-supplied assignment UUID candidate, and stores task state, attempt audit, and the exact serialized `TASK_ASSIGN` envelope in one transaction. The last committed task result stores a replayable `FINALIZING` intent; final `JOB_RESULT` publications are then stored transactionally with the corresponding terminal job-state update.
 - Pending outbox rows are replayed when the RabbitMQ coordinator starts and retried periodically while it runs. Confirmed publishes mark the outbox row sent; unconfirmed or unroutable peer-targeted publishes keep the row pending with a failed-attempt record.
 - Replay can duplicate a task assignment or final job result if the coordinator crashes after RabbitMQ accepts a publish but before SQLite records the outbox row as sent. Scheduler task-result acceptance is fenced by the complete persisted assignment identity, and terminal job completion is persisted once.
-- Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so publish failure requeues the original assignment.
+- Participant-side `TASK_RESULT` publishes are not stored in the coordinator outbox. RabbitMQ executor roles defer acknowledgement of `TASK_ASSIGN` until the corresponding `TASK_RESULT` publish is confirmed, so a transient publish failure schedules the assignment through the bounded broker retry topology.
 - RabbitMQ remains transitional; `docs/RABBITMQ_SCOPE.md` records the gates required before calling it production-ready.
 
 ## RabbitMQ Delivery Disposition
@@ -137,10 +137,16 @@ nodes may enable the requester role, executor role, or both.
 - Explicit transient infrastructure failures and bounded-mailbox pressure retry;
   otherwise-unclassified deterministic processing failures are poison and do
   not enter the generic requeue path.
-- TF-0303 remains responsible for delayed retry queues, delivery-attempt limits,
-  and automatic final-quarantine routing. Until then, `RETRY_TRANSIENT` maps to
-  RabbitMQ requeue while both terminal rejection dispositions use
-  reject-without-requeue and the configured dead-letter workflow.
+- `RETRY_TRANSIENT` and `QUARANTINE_POISON` use explicit TTL retry queues with a
+  configured attempt bound. Retry publications preserve original route and
+  classified reason metadata, and exhaustion publishes once to final
+  quarantine. `REJECT_INVALID` remains immediate reject-without-requeue into
+  the configured ordinary dead-letter workflow.
+- The finite retry/quarantine guarantee assumes that the original routing
+  binding still exists when each TTL expires. A peer-specific auto-delete queue
+  can disappear while its delivery waits; RabbitMQ dead-letter forwarding is
+  not mandatory, so that return can be unroutable. TF-0306 owns recovery for
+  that participant-outage window.
 
 ## RabbitMQ Connection Recovery
 
@@ -151,29 +157,36 @@ nodes may enable the requester role, executor role, or both.
 
 ## RabbitMQ Dead Lettering
 
-- RabbitMQ topology declaration can configure a dead-letter exchange, dead-letter queue, and quarantine queue for normal TaskFlow queues.
+- RabbitMQ topology declaration configures an ordinary dead-letter workflow,
+  explicit per-delay retry queues, and a final quarantine queue.
 - Malformed or validation-failing broker deliveries use `REJECT_INVALID`, while
-  deterministic handler failures use `QUARANTINE_POISON`; both reject without
-  requeue.
+  deterministic handler failures use `QUARANTINE_POISON`. Invalid deliveries
+  reject without requeue; deterministic poison retries only through the bounded
+  TTL schedule.
 - Rejected deliveries are routed by RabbitMQ to the configured dead-letter queue when dead-lettering is enabled.
 - `peer.PeerNode dlq inspect` reads dead-letter metadata and body previews without acknowledging the DLQ entry.
 - `peer.PeerNode dlq redrive` republishes only valid TaskFlow broker envelopes to the original routing key captured in RabbitMQ dead-letter metadata, increments `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after RabbitMQ confirms the publish.
 - Redrive refuses malformed or unknown-route poison messages and leaves them in the DLQ for an explicit quarantine or discard decision.
 - `peer.PeerNode dlq quarantine` republishes a DLQ entry to the configured quarantine queue and acknowledges the original DLQ entry only after publish confirmation.
 - `peer.PeerNode dlq discard` acknowledges and removes the DLQ entry without republishing it.
+- `peer.PeerNode dlq inspect-quarantine` non-destructively exposes automatic
+  quarantine entries, including delivery attempt and failure metadata.
+- `peer.PeerNode dlq redrive-quarantine` republishes a valid quarantined
+  envelope to its original route with a fresh bounded attempt budget and
+  acknowledges the quarantine entry only after publish confirmation.
 
 ## JavaFX GUI Transport Scope
 
 - The JavaFX GUI uses RabbitMQ as its only runtime transport.
 - GUI job submission, live result reception, requester-token persistence, and GUI task execution are implemented behind `JobSubmissionClient`, `CoordinatorConnection`, result-routing, and the executor-specific `GuiWorkerRuntime` boundary.
-- RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI participant publishes the corresponding `TASK_RESULT`; broker publish failure requeues the assignment.
+- RabbitMQ GUI task-assignment acknowledgements are deferred until the GUI participant publishes the corresponding `TASK_RESULT`; a transient broker publish failure schedules the assignment through bounded delayed retry.
 - RabbitMQ GUI `JOB_RESULT` delivery is routed through the existing active-job router and plugin-backed save flow, but `JOB_RESULT_REQUEST` over RabbitMQ is not implemented because there is no broker route for that request yet.
 - JavaFX RabbitMQ coverage includes service-level tests plus an automated desktop smoke helper for the text-analysis submit/execute/result/save path. Broader CI-grade JavaFX desktop automation remains deferred in `docs/GUI_AUTOMATION_SCOPE.md`.
 
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
-- RabbitMQ job submissions and task results are requeued when the scheduler mailbox is full instead of being accepted into process memory.
+- RabbitMQ job submissions and task results receive bounded delayed retry when the scheduler mailbox is full instead of being accepted into process memory.
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or participant explicitly settles them.
@@ -211,8 +224,8 @@ nodes may enable the requester role, executor role, or both.
   mutate task/job/lease/success state and broker deliveries are acknowledged.
 - **Failure and crash behavior:** SQL, serialization, exact audit-update, or
   finalization-intent failure rolls the transaction back and returns
-  `STORAGE_FAILURE`; the scheduler leaves memory assigned and requeues a broker
-  delivery. A crash before commit leaves every row unchanged. A crash after a
+  `STORAGE_FAILURE`; the scheduler leaves memory assigned and schedules bounded
+  broker retry. A crash before commit leaves every row unchanged. A crash after a
   non-last result leaves that task recoverable; a crash after the last result
   leaves `FINALIZING` plus all ordered result snapshots recoverable. Startup
   deterministically rebuilds the plugin job from those inputs and retries J1.

@@ -139,7 +139,7 @@ public class RabbitMqTaskCoordinatorServer {
                                             InboundTransportMessage delivery) throws Exception {
         boolean queued = SchedulerMailbox.offerBrokerDelivery(inboundMailbox, delivery);
         if (!queued) {
-            LOGGER.warn("event=scheduler_ingress_requeued reason=mailbox_full route={} from_node_id={} queue_depth={}",
+            LOGGER.warn("event=scheduler_ingress_retry_requested reason=mailbox_full route={} from_node_id={} queue_depth={}",
                     delivery.route(),
                     delivery.fromNodeId(),
                     inboundMailbox.size());
@@ -166,7 +166,7 @@ public class RabbitMqTaskCoordinatorServer {
                                         InboundTransportMessage delivery) throws Exception {
         Message message = delivery.message();
         if (!(message instanceof PongMessage pong)) {
-            settle(delivery, DeliveryDisposition.REJECT_INVALID);
+            settle(delivery, DeliveryDisposition.REJECT_INVALID, "heartbeat_message_type_invalid");
             return;
         }
         String envelopePeerId = delivery.fromNodeId();
@@ -178,14 +178,14 @@ public class RabbitMqTaskCoordinatorServer {
                 && !PeerIdentity.require(envelopePeerId).equals(PeerIdentity.require(messagePeerId))) {
             LOGGER.warn("event=rabbitmq_heartbeat_identity_mismatch envelope_peer_id={} message_peer_id={}",
                     envelopePeerId, messagePeerId);
-            settle(delivery, DeliveryDisposition.REJECT_INVALID);
+            settle(delivery, DeliveryDisposition.REJECT_INVALID, "heartbeat_identity_mismatch");
             return;
         }
         String peerNodeId = envelopePeerId == null || envelopePeerId.isBlank()
                 ? messagePeerId
                 : envelopePeerId;
         if (peerNodeId == null || peerNodeId.isBlank()) {
-            settle(delivery, DeliveryDisposition.REJECT_INVALID);
+            settle(delivery, DeliveryDisposition.REJECT_INVALID, "heartbeat_peer_id_missing");
             return;
         }
         peerNodeId = PeerIdentity.require(peerNodeId);
@@ -198,13 +198,14 @@ public class RabbitMqTaskCoordinatorServer {
         } else {
             registry.updateHeartbeat(peerNodeId, pong.getSupportedTaskTypes());
         }
-        settle(delivery, DeliveryDisposition.ACK_SUCCESS);
+        settle(delivery, DeliveryDisposition.ACK_SUCCESS, "heartbeat_registered");
     }
 
     private static void settle(InboundTransportMessage delivery,
-                               DeliveryDisposition disposition) throws Exception {
+                               DeliveryDisposition disposition,
+                               String reasonCode) throws Exception {
         if (delivery.acknowledgement() != null) {
-            delivery.acknowledgement().settle(disposition);
+            delivery.acknowledgement().settle(disposition, reasonCode);
         }
     }
 }

@@ -291,7 +291,7 @@ final class StatusCommand {
         for (int i = 0; i < messages.size(); i++) {
             RabbitMqDlqMessage message = messages.get(i);
             out.printf(
-                    "dlq[%d] id=%s route=%s originalRoutingKey=%s deadLetterQueue=%s reason=%s deadLetterCount=%d redriveCount=%d redrivable=%s bodyPreview=%s%n",
+                    "dlq[%d] id=%s route=%s originalRoutingKey=%s deadLetterQueue=%s reason=%s deadLetterCount=%d redriveCount=%d deliveryAttempt=%d failureReason=%s failureDisposition=%s redrivable=%s bodyPreview=%s%n",
                     i + 1,
                     value(message.messageId()),
                     value(message.inferredRoute()),
@@ -300,6 +300,9 @@ final class StatusCommand {
                     value(message.deadLetterReason()),
                     message.deadLetterCount(),
                     message.redriveCount(),
+                    message.deliveryAttempt(),
+                    value(message.failureReason()),
+                    value(message.failureDisposition()),
                     message.redrivable(),
                     quoted(message.bodyPreview(BODY_PREVIEW_CHARACTERS)));
             if (!message.redrivable()) {

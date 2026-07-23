@@ -141,7 +141,11 @@ public class RabbitMqPeerNode {
                             classified.disposition(),
                             failure.getMessage(),
                             failure);
-                    settleQuietly(delivery.acknowledgement(), classified.disposition());
+                    settleQuietly(
+                            delivery.acknowledgement(),
+                            classified.disposition(),
+                            classified.reasonCode()
+                    );
                     return;
                 }
                 try {
@@ -164,7 +168,11 @@ public class RabbitMqPeerNode {
                             classified.disposition(),
                             publishError.getMessage(),
                             publishError);
-                    settleQuietly(delivery.acknowledgement(), classified.disposition());
+                    settleQuietly(
+                            delivery.acknowledgement(),
+                            classified.disposition(),
+                            classified.reasonCode()
+                    );
                 }
             });
         } catch (AssignmentCacheConflictException conflict) {
@@ -175,7 +183,11 @@ public class RabbitMqPeerNode {
                     task.getAssignmentId(),
                     conflict.getMessage()
             );
-            settle(delivery.acknowledgement(), DeliveryDisposition.QUARANTINE_POISON);
+            settle(
+                    delivery.acknowledgement(),
+                    DeliveryDisposition.QUARANTINE_POISON,
+                    "assignment_cache_conflict"
+            );
         } catch (Exception e) {
             ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(e);
             LOGGER.warn("event=task_assignment_handler_failed peer_id={} task_id={} reason_code={} disposition={} error={}",
@@ -185,7 +197,11 @@ public class RabbitMqPeerNode {
                     classified.disposition(),
                     e.getMessage(),
                     e);
-            settle(delivery.acknowledgement(), classified.disposition());
+            settle(
+                    delivery.acknowledgement(),
+                    classified.disposition(),
+                    classified.reasonCode()
+            );
         }
     }
 
@@ -219,7 +235,11 @@ public class RabbitMqPeerNode {
             delivery.acknowledgement().defer();
         }
         if (!jobResults.offer(new ReceivedJobResult(result, delivery.acknowledgement()))) {
-            settle(delivery.acknowledgement(), DeliveryDisposition.RETRY_TRANSIENT);
+            settle(
+                    delivery.acknowledgement(),
+                    DeliveryDisposition.RETRY_TRANSIENT,
+                    "requester_result_mailbox_full"
+            );
             return;
         }
         LOGGER.info("event=job_result_received job_id={} success={}",
@@ -344,7 +364,11 @@ public class RabbitMqPeerNode {
                 return;
             } catch (Exception saveError) {
                 ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(saveError);
-                settle(received.acknowledgement(), classified.disposition());
+                settle(
+                        received.acknowledgement(),
+                        classified.disposition(),
+                        classified.reasonCode()
+                );
                 throw saveError;
             }
         }
@@ -398,21 +422,28 @@ public class RabbitMqPeerNode {
 
     private static void settle(TransportAcknowledgement acknowledgement,
                                DeliveryDisposition disposition) throws Exception {
+        settle(acknowledgement, disposition, disposition.name().toLowerCase(Locale.ROOT));
+    }
+
+    private static void settle(TransportAcknowledgement acknowledgement,
+                               DeliveryDisposition disposition,
+                               String reasonCode) throws Exception {
         if (acknowledgement != null) {
-            acknowledgement.settle(disposition);
+            acknowledgement.settle(disposition, reasonCode);
         }
     }
 
     private static void settleQuietly(TransportAcknowledgement acknowledgement,
-                                      DeliveryDisposition disposition) {
+                                      DeliveryDisposition disposition,
+                                      String reasonCode) {
         try {
-            settle(acknowledgement, disposition);
+            settle(acknowledgement, disposition, reasonCode);
         } catch (Exception settlementError) {
             if (settlementError instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            LOGGER.warn("event=rabbitmq_delivery_settlement_failed disposition={} error={}",
-                    disposition, settlementError.getMessage(), settlementError);
+            LOGGER.warn("event=rabbitmq_delivery_settlement_failed disposition={} reason_code={} error={}",
+                    disposition, reasonCode, settlementError.getMessage(), settlementError);
         }
     }
 

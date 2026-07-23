@@ -208,7 +208,11 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     task.getAssignmentId(),
                     conflict.getMessage()
             );
-            settle(acknowledgement, DeliveryDisposition.QUARANTINE_POISON);
+            settle(
+                    acknowledgement,
+                    DeliveryDisposition.QUARANTINE_POISON,
+                    "assignment_cache_conflict"
+            );
         } catch (Exception e) {
             ClassifiedDeliveryFailure classified = DeliveryFailureClassifier.classify(e);
             LOGGER.warn("event=gui_rabbitmq_task_assignment_handler_failed peer_id={} task_id={} reason_code={} disposition={} error={}",
@@ -218,7 +222,7 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     classified.disposition(),
                     e.getMessage(),
                     e);
-            settle(acknowledgement, classified.disposition());
+            settle(acknowledgement, classified.disposition(), classified.reasonCode());
         }
     }
 
@@ -254,7 +258,11 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     classified.disposition(),
                     failure.getMessage(),
                     failure);
-            settleQuietly(acknowledgement, classified.disposition());
+            settleQuietly(
+                    acknowledgement,
+                    classified.disposition(),
+                    classified.reasonCode()
+            );
             return;
         }
         try {
@@ -284,7 +292,11 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                     classified.disposition(),
                     publishFailure.getMessage(),
                     publishFailure);
-            settleQuietly(acknowledgement, classified.disposition());
+            settleQuietly(
+                    acknowledgement,
+                    classified.disposition(),
+                    classified.reasonCode()
+            );
         }
     }
 
@@ -355,27 +367,35 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                 base.deadLetterEnabled(),
                 base.deadLetterExchangeName(),
                 base.deadLetterQueueName(),
-                base.deadLetterRoutingKey()
+                base.deadLetterRoutingKey(),
+                base.retryDelaysMillis()
         );
     }
 
     private static void settle(TransportAcknowledgement acknowledgement,
                                DeliveryDisposition disposition) throws Exception {
+        settle(acknowledgement, disposition, disposition.name().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static void settle(TransportAcknowledgement acknowledgement,
+                               DeliveryDisposition disposition,
+                               String reasonCode) throws Exception {
         if (acknowledgement != null) {
-            acknowledgement.settle(disposition);
+            acknowledgement.settle(disposition, reasonCode);
         }
     }
 
     private static void settleQuietly(TransportAcknowledgement acknowledgement,
-                                      DeliveryDisposition disposition) {
+                                      DeliveryDisposition disposition,
+                                      String reasonCode) {
         try {
-            settle(acknowledgement, disposition);
+            settle(acknowledgement, disposition, reasonCode);
         } catch (Exception settlementError) {
             if (settlementError instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            LOGGER.warn("event=gui_rabbitmq_delivery_settlement_failed disposition={} error={}",
-                    disposition, settlementError.getMessage(), settlementError);
+            LOGGER.warn("event=gui_rabbitmq_delivery_settlement_failed disposition={} reason_code={} error={}",
+                    disposition, reasonCode, settlementError.getMessage(), settlementError);
         }
     }
 

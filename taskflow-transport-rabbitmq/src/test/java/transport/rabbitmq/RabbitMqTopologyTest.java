@@ -69,6 +69,24 @@ class RabbitMqTopologyTest {
     }
 
     @Test
+    void exposesBoundedRetryQueuesWithTtlAndOriginalRoutingPreservation() {
+        RabbitMqTopology topology = new RabbitMqTopology(RabbitMqTransportConfig.localDefaults());
+
+        assertEquals(3, topology.retryStageCount());
+        assertEquals(4, topology.maxDeliveryAttempts());
+        assertEquals("taskflow.exchange.retry.1.1000ms", topology.retryExchangeName(1));
+        assertEquals("taskflow.retry.1.1000ms", topology.retryQueueName(1));
+        assertEquals(1000L, topology.retryQueueArguments(1).get("x-message-ttl"));
+        assertEquals("taskflow.exchange",
+                topology.retryQueueArguments(1).get("x-dead-letter-exchange"));
+        assertFalse(topology.retryQueueArguments(1).containsKey("x-dead-letter-routing-key"),
+                "The broker must retain the retry publish routing key when the TTL expires");
+
+        assertEquals("taskflow.exchange.retry.3.30000ms", topology.retryExchangeName(3));
+        assertEquals("taskflow.retry.3.30000ms", topology.retryQueueName(3));
+    }
+
+    @Test
     void omitsDeadLetterArgumentsWhenDisabled() {
         RabbitMqTransportConfig defaults = RabbitMqTransportConfig.localDefaults();
         RabbitMqTransportConfig config = new RabbitMqTransportConfig(
@@ -91,5 +109,8 @@ class RabbitMqTopologyTest {
 
         assertFalse(topology.deadLetterEnabled());
         assertTrue(topology.queueArguments().isEmpty());
+        assertEquals("taskflow.exchange.quarantine", topology.quarantineExchangeName());
+        assertEquals("taskflow.quarantine", topology.deadLetterQuarantineQueueName());
+        assertEquals("quarantine", topology.deadLetterQuarantineRoutingKey());
     }
 }

@@ -37,7 +37,9 @@ class PeerNodeTest {
         assertTrue(usage.contains("taskflow-peer-<version>-submitter-runtime.jar"));
         assertTrue(usage.contains("taskflow-peer-<version>-executor-runtime.jar"));
         assertTrue(usage.contains("submit <task-type> <parameter> <file> [file...]"));
-        assertTrue(usage.contains("dlq <inspect|redrive|quarantine|discard> [count]"));
+        assertTrue(usage.contains(
+                "dlq <inspect|inspect-quarantine|redrive|redrive-quarantine|quarantine|discard> [count]"
+        ));
         assertTrue(usage.contains("RabbitMQ participant runtime"));
         assertFalse(usage.contains("TASKFLOW_TRANSPORT"));
         assertFalse(usage.contains("TCP"));
@@ -48,6 +50,14 @@ class PeerNodeTest {
         assertTrue(PeerNode.isHelpRequested(new String[] {"--help"}));
         assertTrue(PeerNode.isHelpRequested(new String[] {"-h"}));
         assertFalse(PeerNode.isHelpRequested(new String[0]));
+    }
+
+    @Test
+    void dlqUsageExposesAutomaticQuarantineInspectionAndRedrive() {
+        String usage = RabbitMqDlqCommand.usage();
+
+        assertTrue(usage.contains("inspect-quarantine"));
+        assertTrue(usage.contains("redrive-quarantine"));
     }
 
     @Test

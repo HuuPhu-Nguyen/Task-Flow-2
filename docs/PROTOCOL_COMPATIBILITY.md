@@ -99,9 +99,9 @@ Every consumed delivery is settled through one of five domain-aware outcomes:
 |---|---|---|
 | `ACK_SUCCESS` | The delivery was handled successfully. | Acknowledge. |
 | `ACK_DUPLICATE_OR_STALE` | The event is already applied, obsolete, or addressed to another current owner. | Acknowledge without changing authoritative state. |
-| `RETRY_TRANSIENT` | Temporary infrastructure unavailability or bounded-ingress pressure prevented handling. | Negative-acknowledge with requeue until TF-0303 supplies delayed, bounded retry queues. |
+| `RETRY_TRANSIENT` | Temporary infrastructure unavailability or bounded-ingress pressure prevented handling. | Publisher-confirmed handoff to the configured bounded TTL retry schedule; exhaustion enters final quarantine. |
 | `REJECT_INVALID` | The envelope/message is malformed, unsupported, or permanently invalid. | Reject without requeue; RabbitMQ dead-letters it when configured. |
-| `QUARANTINE_POISON` | Processing failed deterministically, including assignment-identity cache conflicts. | Reject without requeue into the current dead-letter workflow; TF-0303 will add automatic bounded-attempt quarantine routing. |
+| `QUARANTINE_POISON` | Processing failed deterministically, including assignment-identity cache conflicts. | The same bounded TTL schedule, followed by one publisher-confirmed final-quarantine handoff after exhaustion. |
 
 RabbitMQ codec failures are logged with `reason_code` and
 `disposition=REJECT_INVALID`. The scheduler repeats validation as defense in
@@ -115,6 +115,11 @@ interruption, cancellation, and executor-saturation failures to transient
 retry, and otherwise-unclassified deterministic failures to poison
 quarantine. There is no configurable generic
 `catch (Exception) -> requeue` policy.
+
+Retry publications preserve the original routing key and stable first/current
+failure reason in TaskFlow headers. `x-taskflow-delivery-attempt` starts at 1;
+the default `1000,5000,30000` millisecond schedule therefore permits four
+processing deliveries before quarantine.
 
 These permanent compatibility failures are distinct from temporary scheduler
 mailbox saturation, which receives `RETRY_TRANSIENT` for backpressure.

@@ -59,7 +59,7 @@ class RabbitMqTransportDeliveryDispositionTest {
     }
 
     @Test
-    void transientHandlerFailureIsTheOnlyExceptionCategoryThatRequeues() throws Exception {
+    void transientHandlerFailureSchedulesDelayedRetryWithoutImmediateRequeue() throws Exception {
         RecordingChannel channel = new RecordingChannel();
 
         try (RabbitMqTransport transport = transport(channel)) {
@@ -70,7 +70,11 @@ class RabbitMqTransportDeliveryDispositionTest {
             channel.deliver(validHeartbeat());
         }
 
-        assertSettlement(channel, 0, 1, 0);
+        assertSettlement(channel, 1, 0, 0);
+        assertEquals(1, channel.publishCount);
+        assertEquals("taskflow.exchange.retry.1.1000ms", channel.publishedExchange);
+        assertEquals("transient_infrastructure_failure",
+                channel.publishedProperties.getHeaders().get(RabbitMqRetryHeaders.FAILURE_REASON));
         assertEquals(DeliveryDisposition.RETRY_TRANSIENT, channel.acknowledgement.get().settledDisposition());
     }
 
@@ -91,7 +95,7 @@ class RabbitMqTransportDeliveryDispositionTest {
     }
 
     @Test
-    void deterministicHandlerFailureIsClassifiedAsPoisonWithoutRequeue() throws Exception {
+    void deterministicHandlerFailureUsesTheSameBoundedDelayBeforeQuarantine() throws Exception {
         RecordingChannel channel = new RecordingChannel();
 
         try (RabbitMqTransport transport = transport(channel)) {
@@ -102,7 +106,11 @@ class RabbitMqTransportDeliveryDispositionTest {
             channel.deliver(validHeartbeat());
         }
 
-        assertSettlement(channel, 0, 0, 1);
+        assertSettlement(channel, 1, 0, 0);
+        assertEquals(1, channel.publishCount);
+        assertEquals("taskflow.exchange.retry.1.1000ms", channel.publishedExchange);
+        assertEquals("deterministic_processing_failure",
+                channel.publishedProperties.getHeaders().get(RabbitMqRetryHeaders.FAILURE_REASON));
         assertEquals(
                 DeliveryDisposition.QUARANTINE_POISON,
                 channel.acknowledgement.get().settledDisposition()
@@ -165,6 +173,9 @@ class RabbitMqTransportDeliveryDispositionTest {
         private int ackCount;
         private int nackCount;
         private int rejectCount;
+        private int publishCount;
+        private String publishedExchange;
+        private AMQP.BasicProperties publishedProperties;
         private final AtomicReference<RabbitMqAcknowledgement> acknowledgement = new AtomicReference<>();
 
         private Channel proxy() {
@@ -195,6 +206,13 @@ class RabbitMqTransportDeliveryDispositionTest {
                     assertEquals(false, args[1]);
                     yield null;
                 }
+                case "basicPublish" -> {
+                    publishCount++;
+                    publishedExchange = (String) args[0];
+                    publishedProperties = (AMQP.BasicProperties) args[3];
+                    yield null;
+                }
+                case "waitForConfirms" -> true;
                 case "close", "basicQos", "confirmSelect", "addReturnListener" -> null;
                 case "isOpen" -> true;
                 default -> defaultValue(method.getReturnType());

@@ -66,6 +66,10 @@ class RabbitMqTransportPublishConfirmTest {
         assertFalse(fakeChannel.mandatory);
         assertEquals(25L, fakeChannel.confirmTimeoutMillis);
         assertNotNull(fakeChannel.body);
+        assertEquals(1,
+                fakeChannel.properties.getHeaders().get(RabbitMqRetryHeaders.DELIVERY_ATTEMPT));
+        assertEquals("heartbeats",
+                fakeChannel.properties.getHeaders().get(RabbitMqRetryHeaders.ORIGINAL_ROUTING_KEY));
         assertTrue(new String(fakeChannel.body, StandardCharsets.UTF_8).contains("\"route\":\"HEARTBEAT\""));
     }
 
@@ -189,6 +193,7 @@ class RabbitMqTransportPublishConfirmTest {
         private boolean failPublish;
         private String routingKey;
         private boolean mandatory;
+        private AMQP.BasicProperties properties;
         private byte[] body;
         private long confirmTimeoutMillis;
         private int closeCount;
@@ -226,6 +231,7 @@ class RabbitMqTransportPublishConfirmTest {
                     routingKey = (String) args[1];
                     mandatory = (Boolean) args[2];
                     AMQP.BasicProperties properties = (AMQP.BasicProperties) args[3];
+                    this.properties = properties;
                     body = (byte[]) args[4];
                     if (failPublish) {
                         throw new IOException("broker publish failed");

@@ -845,7 +845,8 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 true,
                 name + ".dlx",
                 name + ".dlq",
-                "dead-letter"
+                "dead-letter",
+                base.retryDelaysMillis()
         );
     }
 
@@ -875,7 +876,17 @@ class RabbitMqCoordinatorLiveIntegrationTest {
             deleteQueue(config, topology.queueName(route));
             deleteQueue(config, topology.peerQueueName(route, peerId));
         }
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            deleteQueue(config, topology.retryQueueName(retryStage));
+        }
+        deleteQueue(config, topology.deadLetterQuarantineQueueName());
         deleteQueue(config, config.deadLetterQueueName());
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            deleteExchange(config, topology.retryExchangeName(retryStage));
+        }
+        if (!topology.quarantineExchangeName().equals(config.deadLetterExchangeName())) {
+            deleteExchange(config, topology.quarantineExchangeName());
+        }
         deleteExchange(config, config.exchangeName());
         deleteExchange(config, config.deadLetterExchangeName());
     }

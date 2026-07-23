@@ -638,7 +638,7 @@ final class SchedulerMessageService {
             return;
         }
         try {
-            envelope.acknowledgement().settle(disposition);
+            envelope.acknowledgement().settle(disposition, reasonCode);
             if (disposition != DeliveryDisposition.ACK_SUCCESS) {
                 events.info("scheduler_delivery_disposed", events.fields(
                         "message_type", messageType(envelope),

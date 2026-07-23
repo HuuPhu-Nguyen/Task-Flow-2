@@ -20,26 +20,32 @@ adaptive throttling remains deferred.
   dropped-event error instead of claiming it was handled.
 
 These mechanisms define one broker-facing overload contract. The current
-RabbitMQ adapter maps `RETRY_TRANSIENT` to immediate broker requeue. It does not
-yet claim adaptive capacity management or the delayed/attempt-bounded retry
-topology owned by TF-0303.
+RabbitMQ adapter maps `RETRY_TRANSIENT` to publisher-confirmed TTL retry queues.
+The default delays are 1, 5, and 30 seconds, with four total processing
+deliveries including the initial one. Persistent failure reaches final
+quarantine instead of spinning on immediate redelivery while the original
+routing binding remains available. This does not claim recovery after an
+ephemeral peer route disappears or adaptive capacity management.
 
 ## Current Evidence
 
 - `SchedulerMailboxTest` covers bounded mailbox creation, accepted broker
   delivery deferral, full-mailbox transient disposition, and repeated overflow
   without replacing already accepted work.
-- `RabbitMqTransportLiveTest` covers prefetch with unacknowledged deliveries.
+- `RabbitMqTransportLiveTest` covers prefetch with unacknowledged deliveries,
+  elapsed delayed-retry timing, the exact configured attempt bound, and final
+  quarantine without immediate-redelivery spin.
 - `RabbitMqCoordinatorConnectionTest` and `WorkerAssignmentDeduplicationIntegrationTest`
   cover deferred assignment acknowledgement and confirmed result publication.
 - RabbitMQ coordinator tests cover acknowledgement of successful, duplicate,
-  and stale outcomes plus requeue on retryable scheduler/storage failures.
+  and stale outcomes plus typed delayed retry on retryable scheduler/storage
+  failures.
 
 ## Deferred Adaptive Behavior
 
 Adaptive broker/participant backpressure remains deferred because no measured
 overload target currently requires dynamic tuning beyond the bounded mailbox,
-broker requeue, deferred acknowledgements, and prefetch controls.
+bounded broker retry, deferred acknowledgements, and prefetch controls.
 
 Do not add adaptive throttling knobs until a reproducible overload test or demo
 shows a specific failure mode these boundaries do not address. Any future

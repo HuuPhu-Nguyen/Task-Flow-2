@@ -106,7 +106,7 @@ Focused coverage includes:
 - `RabbitMqJobSubmissionClientTest` for signed publication, requester-token
   retention, and publisher-confirm failure;
 - `RabbitMqCoordinatorConnectionTest` for heartbeat startup, peer routes,
-  assignment execution, result publication, acknowledgement/requeue, final
+  assignment execution, result publication, acknowledgement/bounded retry, final
   result routing, invalid-message rejection, and startup failure;
 - `PeerNodeTest` and `WorkerAssignmentDeduplicationIntegrationTest` for
   command-line submit/result behavior and executor redelivery handling;

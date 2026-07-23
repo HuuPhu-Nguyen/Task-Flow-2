@@ -2,6 +2,7 @@ package transport.rabbitmq;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,6 +26,8 @@ class RabbitMqTransportConfigTest {
         assertEquals("taskflow.dead-letter.exchange", config.deadLetterExchangeName());
         assertEquals("taskflow.dead-letter", config.deadLetterQueueName());
         assertEquals("dead-letter", config.deadLetterRoutingKey());
+        assertEquals(List.of(1000L, 5000L, 30000L), config.retryDelaysMillis());
+        assertEquals(4, config.maxDeliveryAttempts());
     }
 
     @Test
@@ -43,7 +46,8 @@ class RabbitMqTransportConfigTest {
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", "true"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", "tf.dlx"),
                 Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", "tf.dlq"),
-                Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", "tf.dead")
+                Map.entry("TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", "tf.dead"),
+                Map.entry("TASKFLOW_RABBITMQ_RETRY_DELAYS_MS", "25, 100,250")
         ));
 
         assertEquals("broker", config.host());
@@ -60,6 +64,8 @@ class RabbitMqTransportConfigTest {
         assertEquals("tf.dlx", config.deadLetterExchangeName());
         assertEquals("tf.dlq", config.deadLetterQueueName());
         assertEquals("tf.dead", config.deadLetterRoutingKey());
+        assertEquals(List.of(25L, 100L, 250L), config.retryDelaysMillis());
+        assertEquals(4, config.maxDeliveryAttempts());
     }
 
     @Test
@@ -116,5 +122,61 @@ class RabbitMqTransportConfigTest {
         ));
 
         assertEquals("publisherConfirmTimeoutMillis must be positive", error.getMessage());
+    }
+
+    @Test
+    void rejectsMissingOrNonPositiveRetryDelays() {
+        RabbitMqTransportConfig defaults = RabbitMqTransportConfig.localDefaults();
+
+        IllegalArgumentException empty = assertThrows(
+                IllegalArgumentException.class,
+                () -> configWithRetryDelays(defaults, List.of())
+        );
+        assertEquals("retryDelaysMillis must contain at least one delay", empty.getMessage());
+
+        IllegalArgumentException nonPositive = assertThrows(
+                IllegalArgumentException.class,
+                () -> configWithRetryDelays(defaults, List.of(100L, 0L))
+        );
+        assertEquals("retryDelaysMillis values must be positive", nonPositive.getMessage());
+    }
+
+    @Test
+    void rejectsMalformedRetryDelayEnvironmentValue() {
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> RabbitMqTransportConfig.fromEnvironment(Map.of(
+                        "TASKFLOW_RABBITMQ_RETRY_DELAYS_MS",
+                        "100,,300"
+                ))
+        );
+
+        assertEquals(
+                "TASKFLOW_RABBITMQ_RETRY_DELAYS_MS must be a comma-separated list of positive integers",
+                error.getMessage()
+        );
+    }
+
+    private static RabbitMqTransportConfig configWithRetryDelays(
+            RabbitMqTransportConfig defaults,
+            List<Long> retryDelaysMillis
+    ) {
+        return new RabbitMqTransportConfig(
+                defaults.host(),
+                defaults.port(),
+                defaults.username(),
+                defaults.password(),
+                defaults.virtualHost(),
+                defaults.exchangeName(),
+                defaults.queuePrefix(),
+                defaults.durable(),
+                defaults.prefetchCount(),
+                defaults.publisherConfirmTimeoutMillis(),
+                defaults.deadLetterEnabled(),
+                defaults.deadLetterExchangeName(),
+                defaults.deadLetterQueueName(),
+                defaults.deadLetterRoutingKey(),
+                retryDelaysMillis
+        );
     }
 }

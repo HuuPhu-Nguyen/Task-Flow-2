@@ -30,6 +30,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -171,36 +172,72 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void rejectsDeterministicHandlerFailureToDeadLetterQueueAgainstLiveBroker() throws Exception {
+    void poisonMessageQuarantinesAfterBoundedAttempts() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTransportConfig config = liveConfig(token, List.of(500L, 900L));
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
             cleanup(config, topology, "peer-live");
 
-            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+            try (RabbitMqTransport transport = new RabbitMqTransport(config);
+                 RabbitMqDlqClient dlqClient = new RabbitMqDlqClient(config)) {
                 transport.declareTopology();
+                dlqClient.declareTopology();
 
-                CountDownLatch deliveryAttempted = new CountDownLatch(1);
+                CountDownLatch deliveryAttempts = new CountDownLatch(config.maxDeliveryAttempts());
+                List<Long> attemptTimes = new CopyOnWriteArrayList<>();
+                AtomicInteger attemptCount = new AtomicInteger();
                 String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
-                    deliveryAttempted.countDown();
+                    attemptTimes.add(System.nanoTime());
+                    attemptCount.incrementAndGet();
+                    deliveryAttempts.countDown();
                     throw new IllegalStateException("expected live-test handler failure");
                 });
-                transport.publish(new OutboundTransportMessage(
-                        TransportRoute.HEARTBEAT,
-                        "peer-live",
-                        new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
-                ));
+                publishHeartbeat(transport);
 
-                assertTrue(deliveryAttempted.await(10, TimeUnit.SECONDS),
-                        "Timed out waiting for failed HEARTBEAT delivery");
+                assertTrue(deliveryAttempts.await(10, TimeUnit.SECONDS),
+                        "Timed out waiting for bounded poison delivery attempts");
                 waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
-                waitForQueueCount(config, config.deadLetterQueueName(), 1);
+                waitForQueueCount(config, topology.deadLetterQuarantineQueueName(), 1);
+                assertEquals(config.maxDeliveryAttempts(), attemptCount.get());
+                assertEquals(config.maxDeliveryAttempts(), attemptTimes.size());
+                assertElapsedAtLeast(attemptTimes.get(0), attemptTimes.get(1), 450L);
+                assertElapsedAtLeast(attemptTimes.get(1), attemptTimes.get(2), 850L);
+                for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+                    waitForQueueToDrain(config, topology.retryQueueName(retryStage));
+                }
                 transport.cancel(consumer);
+
+                List<RabbitMqDlqMessage> quarantined = dlqClient.inspectQuarantine(1);
+                assertEquals(1, quarantined.size());
+                RabbitMqDlqMessage poison = quarantined.getFirst();
+                assertEquals(config.maxDeliveryAttempts(), poison.deliveryAttempt());
+                assertEquals("deterministic_processing_failure", poison.failureReason());
+                assertEquals(
+                        "deterministic_processing_failure",
+                        RabbitMqRetryHeaders.stringValue(
+                                poison.headers(),
+                                RabbitMqRetryHeaders.FIRST_FAILURE_REASON
+                        )
+                );
+                assertEquals("QUARANTINE_POISON", poison.failureDisposition());
+                assertEquals(TransportRoute.HEARTBEAT.routingKey(), poison.originalRoutingKey());
+                assertTrue(poison.redrivable());
+
+                CountDownLatch redriven = new CountDownLatch(1);
+                AtomicReference<Throwable> redriveFailure = new AtomicReference<>();
+                String healthyConsumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery ->
+                        assertDelivery(redriven, redriveFailure, () -> assertHeartbeatDelivery(delivery)));
+                RabbitMqDlqDecisionResult redriveResult = dlqClient.redriveQuarantineNext();
+                assertEquals(RabbitMqDlqDecisionResult.Status.REDRIVEN, redriveResult.status());
+                assertEquals("redrive-quarantine", redriveResult.decision());
+                awaitDelivery(redriven, redriveFailure, "manually redriven quarantined HEARTBEAT");
+                waitForQueueToDrain(config, topology.deadLetterQuarantineQueueName());
+                transport.cancel(healthyConsumer);
             }
         } finally {
             cleanup(config, topology, "peer-live");
@@ -208,7 +245,7 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void inspectsAndRedrivesDeadLetteredDeterministicHandlerFailureAgainstLiveBroker() throws Exception {
+    void inspectsAndRedrivesRejectedInvalidHandlerFailureAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
@@ -227,7 +264,7 @@ class RabbitMqTransportLiveTest {
                 CountDownLatch failedDelivery = new CountDownLatch(1);
                 String failingConsumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
                     failedDelivery.countDown();
-                    throw new IllegalStateException("expected live-test handler failure before redrive");
+                    throw new IllegalArgumentException("expected invalid live-test delivery before redrive");
                 });
                 publishHeartbeat(transport);
                 assertTrue(failedDelivery.await(10, TimeUnit.SECONDS),
@@ -303,12 +340,12 @@ class RabbitMqTransportLiveTest {
     }
 
     @Test
-    void requeuesTransientHandlerFailuresAgainstLiveBroker() throws Exception {
+    void delaysTransientHandlerRetryWithoutImmediateRedeliverySpinAgainstLiveBroker() throws Exception {
         Assumptions.assumeTrue(liveTestEnabled(),
                 "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV + "=true to run live RabbitMQ tests.");
 
         String token = "it-" + UUID.randomUUID().toString().replace("-", "");
-        RabbitMqTransportConfig config = liveConfig(token);
+        RabbitMqTransportConfig config = liveConfig(token, List.of(500L));
         RabbitMqTopology topology = new RabbitMqTopology(config);
 
         try {
@@ -319,11 +356,13 @@ class RabbitMqTransportLiveTest {
 
                 CountDownLatch redelivered = new CountDownLatch(1);
                 AtomicReference<Throwable> failure = new AtomicReference<>();
-                java.util.concurrent.atomic.AtomicInteger attempts = new java.util.concurrent.atomic.AtomicInteger();
+                AtomicInteger attempts = new AtomicInteger();
+                List<Long> attemptTimes = new CopyOnWriteArrayList<>();
                 String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                    attemptTimes.add(System.nanoTime());
                     int attempt = attempts.incrementAndGet();
                     if (attempt == 1) {
-                        throw new IOException("expected transient live-test requeue");
+                        throw new IOException("expected transient live-test delayed retry");
                     }
                     assertDelivery(redelivered, failure, () -> assertHeartbeatDelivery(delivery));
                 });
@@ -333,10 +372,14 @@ class RabbitMqTransportLiveTest {
                         new PongMessage("peer-live", Instant.now().toString(), List.of("TEXT_ANALYSIS"))
                 ));
 
-                awaitDelivery(redelivered, failure, "requeued HEARTBEAT redelivery");
-                assertTrue(attempts.get() >= 2, "Expected at least one failed attempt and one redelivery");
+                awaitDelivery(redelivered, failure, "delayed HEARTBEAT retry");
+                assertEquals(2, attempts.get(), "Expected one initial delivery and one delayed retry");
+                assertEquals(2, attemptTimes.size());
+                assertElapsedAtLeast(attemptTimes.get(0), attemptTimes.get(1), 450L);
                 waitForQueueToDrain(config, topology.queueName(TransportRoute.HEARTBEAT));
+                waitForQueueToDrain(config, topology.retryQueueName(1));
                 waitForQueueCount(config, config.deadLetterQueueName(), 0);
+                waitForQueueCount(config, topology.deadLetterQuarantineQueueName(), 0);
                 transport.cancel(consumer);
             }
         } finally {
@@ -497,6 +540,17 @@ class RabbitMqTransportLiveTest {
         }
     }
 
+    private static void assertElapsedAtLeast(long startedAtNanos,
+                                             long completedAtNanos,
+                                             long minimumMillis) {
+        long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(completedAtNanos - startedAtNanos);
+        assertTrue(
+                elapsedMillis >= minimumMillis,
+                "Expected at least " + minimumMillis + " ms between deliveries but observed "
+                        + elapsedMillis + " ms"
+        );
+    }
+
     @FunctionalInterface
     private interface CheckedAssertion {
         void run() throws Exception;
@@ -528,6 +582,10 @@ class RabbitMqTransportLiveTest {
     }
 
     private static RabbitMqTransportConfig liveConfig(String token) {
+        return liveConfig(token, RabbitMqTransportConfig.fromEnvironment().retryDelaysMillis());
+    }
+
+    private static RabbitMqTransportConfig liveConfig(String token, List<Long> retryDelaysMillis) {
         RabbitMqTransportConfig base = RabbitMqTransportConfig.fromEnvironment();
         String name = "taskflow.live." + token;
         return new RabbitMqTransportConfig(
@@ -544,7 +602,8 @@ class RabbitMqTransportLiveTest {
                 true,
                 name + ".dlx",
                 name + ".dlq",
-                "dead-letter"
+                "dead-letter",
+                retryDelaysMillis
         );
     }
 
@@ -574,8 +633,17 @@ class RabbitMqTransportLiveTest {
             deleteQueue(config, topology.queueName(route));
         }
         deleteQueue(config, topology.peerQueueName(TransportRoute.JOB_RESULT, peerId));
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            deleteQueue(config, topology.retryQueueName(retryStage));
+        }
         deleteQueue(config, topology.deadLetterQuarantineQueueName());
         deleteQueue(config, config.deadLetterQueueName());
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            deleteExchange(config, topology.retryExchangeName(retryStage));
+        }
+        if (!topology.quarantineExchangeName().equals(config.deadLetterExchangeName())) {
+            deleteExchange(config, topology.quarantineExchangeName());
+        }
         deleteExchange(config, config.exchangeName());
         deleteExchange(config, config.deadLetterExchangeName());
     }

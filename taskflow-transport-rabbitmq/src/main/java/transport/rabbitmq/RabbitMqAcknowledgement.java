@@ -9,13 +9,18 @@ import java.util.Objects;
 class RabbitMqAcknowledgement implements TransportAcknowledgement {
     private final Channel channel;
     private final long deliveryTag;
+    private final RabbitMqDeliveryRetry deliveryRetry;
     private boolean settled;
     private boolean deferred;
     private DeliveryDisposition settledDisposition;
+    private String settledReasonCode;
 
-    RabbitMqAcknowledgement(Channel channel, long deliveryTag) {
+    RabbitMqAcknowledgement(Channel channel,
+                            long deliveryTag,
+                            RabbitMqDeliveryRetry deliveryRetry) {
         this.channel = channel;
         this.deliveryTag = deliveryTag;
+        this.deliveryRetry = Objects.requireNonNull(deliveryRetry, "deliveryRetry");
     }
 
     @Override
@@ -35,13 +40,28 @@ class RabbitMqAcknowledgement implements TransportAcknowledgement {
 
     @Override
     public synchronized void settle(DeliveryDisposition disposition) throws Exception {
+        settle(disposition, null);
+    }
+
+    @Override
+    public synchronized void settle(DeliveryDisposition disposition, String reasonCode) throws Exception {
         DeliveryDisposition required = Objects.requireNonNull(disposition, "disposition");
+        String effectiveReason = reasonCode == null || reasonCode.isBlank()
+                ? required.name().toLowerCase(java.util.Locale.ROOT)
+                : reasonCode;
         if (required.acknowledges()) {
-            settleOnce(required, () -> channel.basicAck(deliveryTag, false));
-        } else if (required.retries()) {
-            settleOnce(required, () -> channel.basicNack(deliveryTag, false, true));
+            settleOnce(required, effectiveReason, () -> channel.basicAck(deliveryTag, false));
+        } else if (required.retries() || required == DeliveryDisposition.QUARANTINE_POISON) {
+            settleOnce(required, effectiveReason, () -> {
+                boolean published = deliveryRetry.publishRetryOrQuarantine(required, effectiveReason);
+                if (published) {
+                    channel.basicAck(deliveryTag, false);
+                } else {
+                    channel.basicReject(deliveryTag, false);
+                }
+            });
         } else {
-            settleOnce(required, () -> channel.basicReject(deliveryTag, false));
+            settleOnce(required, effectiveReason, () -> channel.basicReject(deliveryTag, false));
         }
     }
 
@@ -64,7 +84,13 @@ class RabbitMqAcknowledgement implements TransportAcknowledgement {
         return settledDisposition;
     }
 
-    private void settleOnce(DeliveryDisposition disposition, SettlementOperation operation) throws Exception {
+    synchronized String settledReasonCode() {
+        return settledReasonCode;
+    }
+
+    private void settleOnce(DeliveryDisposition disposition,
+                            String reasonCode,
+                            SettlementOperation operation) throws Exception {
         if (settled) {
             return;
         }
@@ -74,6 +100,7 @@ class RabbitMqAcknowledgement implements TransportAcknowledgement {
         settled = true;
         deferred = false;
         settledDisposition = disposition;
+        settledReasonCode = reasonCode;
     }
 
     @FunctionalInterface

@@ -11,6 +11,14 @@ public interface TransportAcknowledgement {
         }
     }
 
+    /**
+     * Settles a delivery while carrying a stable, machine-readable reason when
+     * the transport supports settlement metadata.
+     */
+    default void settle(DeliveryDisposition disposition, String reasonCode) throws Exception {
+        settle(disposition);
+    }
+
     void ack() throws Exception;
 
     void requeue() throws Exception;

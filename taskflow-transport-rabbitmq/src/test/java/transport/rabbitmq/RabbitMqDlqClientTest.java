@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -45,7 +46,32 @@ class RabbitMqDlqClientTest {
 
         assertTrue(fakeChannel.declaredQueues.contains("taskflow.dead-letter"));
         assertTrue(fakeChannel.declaredQueues.contains("taskflow.dead-letter.quarantine"));
+        assertTrue(fakeChannel.declaredQueues.contains("taskflow.retry.1.1000ms"));
+        assertTrue(fakeChannel.declaredQueues.contains("taskflow.retry.2.5000ms"));
+        assertTrue(fakeChannel.declaredQueues.contains("taskflow.retry.3.30000ms"));
         assertTrue(fakeChannel.bindings.contains("taskflow.dead-letter.quarantine|taskflow.dead-letter.exchange|dead-letter.quarantine"));
+        assertTrue(fakeChannel.bindings.contains(
+                "taskflow.retry.1.1000ms|taskflow.exchange.retry.1.1000ms|#"
+        ));
+    }
+
+    @Test
+    void declareTopologyKeepsBoundedRetryAndFinalQuarantineWhenOrdinaryDlqIsDisabled()
+            throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        RabbitMqTransportConfig config = configWithoutOrdinaryDlq();
+
+        try (RabbitMqDlqClient client = client(fakeChannel, config)) {
+            client.declareTopology();
+        }
+
+        assertFalse(fakeChannel.declaredQueues.contains("taskflow.dead-letter"));
+        assertTrue(fakeChannel.declaredExchanges.contains("taskflow.exchange.quarantine"));
+        assertTrue(fakeChannel.declaredQueues.contains("taskflow.quarantine"));
+        assertTrue(fakeChannel.declaredQueues.contains("taskflow.retry.1.1000ms"));
+        assertTrue(fakeChannel.bindings.contains(
+                "taskflow.quarantine|taskflow.exchange.quarantine|quarantine"
+        ));
     }
 
     @Test
@@ -67,6 +93,7 @@ class RabbitMqDlqClientTest {
         assertEquals("taskflow.heartbeats", message.deadLetterQueue());
         assertEquals("rejected", message.deadLetterReason());
         assertEquals(2L, message.deadLetterCount());
+        assertEquals(1, message.deliveryAttempt());
         assertEquals(TransportRoute.HEARTBEAT, message.inferredRoute());
         assertTrue(message.redrivable());
         assertArrayEquals(body, message.body());
@@ -82,6 +109,10 @@ class RabbitMqDlqClientTest {
         for (TransportRoute route : TransportRoute.values()) {
             fakeChannel.passiveQueues.put(topology.queueName(route), declareOk(topology.queueName(route), 0, 1));
         }
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            String retryQueue = topology.retryQueueName(retryStage);
+            fakeChannel.passiveQueues.put(retryQueue, declareOk(retryQueue, retryStage, 0));
+        }
         fakeChannel.passiveQueues.put(topology.deadLetterQueueName(), declareOk(topology.deadLetterQueueName(), 3, 0));
         fakeChannel.passiveQueues.put(
                 topology.deadLetterQuarantineQueueName(),
@@ -93,7 +124,7 @@ class RabbitMqDlqClientTest {
             statuses = client.inspectQueueStatus();
         }
 
-        assertEquals(7, statuses.size());
+        assertEquals(10, statuses.size());
         assertEquals("JOB_SUBMIT", statuses.getFirst().role());
         assertEquals("taskflow.jobs", statuses.getFirst().queueName());
         assertEquals(0L, statuses.getFirst().messageCount());
@@ -105,7 +136,7 @@ class RabbitMqDlqClientTest {
         assertEquals(3L, dlq.messageCount());
         assertTrue(dlq.available());
         RabbitMqQueueStatus quarantine = statuses.stream()
-                .filter(status -> "DLQ_QUARANTINE".equals(status.role()))
+                .filter(status -> "QUARANTINE".equals(status.role()))
                 .findFirst()
                 .orElseThrow();
         assertEquals(1L, quarantine.messageCount());
@@ -115,6 +146,9 @@ class RabbitMqDlqClientTest {
                 "taskflow.task-results",
                 "taskflow.job-results",
                 "taskflow.heartbeats",
+                "taskflow.retry.1.1000ms",
+                "taskflow.retry.2.5000ms",
+                "taskflow.retry.3.30000ms",
                 "taskflow.dead-letter",
                 "taskflow.dead-letter.quarantine"
         ), fakeChannel.passiveDeclareNames);
@@ -146,6 +180,7 @@ class RabbitMqDlqClientTest {
         assertEquals("redrive", fakeChannel.publishedProperties.getHeaders().get("x-taskflow-dlq-decision"));
         assertEquals(2, fakeChannel.publishedProperties.getHeaders().get("x-taskflow-redrive-count"));
         assertEquals("heartbeats", fakeChannel.publishedProperties.getHeaders().get("x-taskflow-original-routing-key"));
+        assertNull(fakeChannel.publishedProperties.getExpiration());
     }
 
     @Test
@@ -203,7 +238,70 @@ class RabbitMqDlqClientTest {
         assertTrue(fakeChannel.publishedMandatory);
         assertArrayEquals(body, fakeChannel.publishedBody);
         assertEquals("quarantine", fakeChannel.publishedProperties.getHeaders().get("x-taskflow-dlq-decision"));
+        assertNull(fakeChannel.publishedProperties.getExpiration());
         assertEquals(List.of(11L), fakeChannel.ackedTags);
+    }
+
+    @Test
+    void quarantinedMessageCanBeInspectedAndManuallyRedrivenWithFreshAttemptBudget()
+            throws Exception {
+        FakeChannel fakeChannel = new FakeChannel();
+        Map<String, Object> retryHeaders = Map.of(
+                RabbitMqRetryHeaders.ORIGINAL_ROUTING_KEY,
+                "heartbeats",
+                RabbitMqRetryHeaders.DELIVERY_ATTEMPT,
+                4,
+                RabbitMqRetryHeaders.FAILURE_REASON,
+                "deterministic_processing_failure",
+                RabbitMqRetryHeaders.FAILURE_DISPOSITION,
+                "QUARANTINE_POISON",
+                RabbitMqRetryHeaders.RETRY_EXHAUSTED,
+                true
+        );
+        fakeChannel.deliveries.add(response(
+                12L,
+                heartbeatBody(),
+                properties("msg-auto-quarantine", "heartbeats", 3L, retryHeaders)
+        ));
+
+        List<RabbitMqDlqMessage> inspected;
+        try (RabbitMqDlqClient client = client(fakeChannel)) {
+            inspected = client.inspectQuarantine(1);
+        }
+
+        assertEquals(
+                List.of("taskflow.dead-letter.quarantine"),
+                fakeChannel.basicGetQueues
+        );
+        RabbitMqDlqMessage message = inspected.getFirst();
+        assertEquals(4, message.deliveryAttempt());
+        assertEquals("deterministic_processing_failure", message.failureReason());
+        assertEquals("QUARANTINE_POISON", message.failureDisposition());
+        assertTrue(message.redrivable());
+
+        fakeChannel.deliveries.add(response(
+                13L,
+                heartbeatBody(),
+                properties("msg-auto-quarantine", "heartbeats", 3L, retryHeaders)
+        ));
+        RabbitMqDlqDecisionResult result;
+        try (RabbitMqDlqClient client = client(fakeChannel)) {
+            result = client.redriveQuarantineNext();
+        }
+
+        assertEquals(RabbitMqDlqDecisionResult.Status.REDRIVEN, result.status());
+        assertEquals("redrive-quarantine", result.decision());
+        assertEquals("taskflow.exchange", fakeChannel.publishedExchange);
+        assertEquals("heartbeats", fakeChannel.publishedRoutingKey);
+        assertEquals(1,
+                fakeChannel.publishedProperties.getHeaders()
+                        .get(RabbitMqRetryHeaders.DELIVERY_ATTEMPT));
+        assertFalse(fakeChannel.publishedProperties.getHeaders()
+                .containsKey(RabbitMqRetryHeaders.RETRY_EXHAUSTED));
+        assertEquals("deterministic_processing_failure",
+                fakeChannel.publishedProperties.getHeaders()
+                        .get(RabbitMqRetryHeaders.FAILURE_REASON));
+        assertEquals(List.of(13L), fakeChannel.ackedTags);
     }
 
     @Test
@@ -230,9 +328,14 @@ class RabbitMqDlqClientTest {
     }
 
     private static RabbitMqDlqClient client(FakeChannel fakeChannel) throws Exception {
+        return client(fakeChannel, config());
+    }
+
+    private static RabbitMqDlqClient client(FakeChannel fakeChannel,
+                                            RabbitMqTransportConfig config) throws Exception {
         Channel channel = fakeChannel.proxy();
         return new RabbitMqDlqClient(
-                config(),
+                config,
                 new RabbitMqMessageCodec(),
                 connection(channel),
                 channel
@@ -256,6 +359,27 @@ class RabbitMqDlqClientTest {
                 defaults.deadLetterExchangeName(),
                 defaults.deadLetterQueueName(),
                 defaults.deadLetterRoutingKey()
+        );
+    }
+
+    private static RabbitMqTransportConfig configWithoutOrdinaryDlq() {
+        RabbitMqTransportConfig defaults = config();
+        return new RabbitMqTransportConfig(
+                defaults.host(),
+                defaults.port(),
+                defaults.username(),
+                defaults.password(),
+                defaults.virtualHost(),
+                defaults.exchangeName(),
+                defaults.queuePrefix(),
+                defaults.durable(),
+                defaults.prefetchCount(),
+                defaults.publisherConfirmTimeoutMillis(),
+                false,
+                defaults.exchangeName() + ".quarantine",
+                "",
+                "",
+                defaults.retryDelaysMillis()
         );
     }
 
@@ -290,6 +414,7 @@ class RabbitMqDlqClientTest {
         return new AMQP.BasicProperties.Builder()
                 .messageId(messageId)
                 .contentType("application/json")
+                .expiration("1")
                 .headers(headers)
                 .build();
     }
@@ -342,9 +467,11 @@ class RabbitMqDlqClientTest {
 
     private static final class FakeChannel implements InvocationHandler {
         private final Queue<GetResponse> deliveries = new ArrayDeque<>();
+        private final List<String> declaredExchanges = new ArrayList<>();
         private final List<String> declaredQueues = new ArrayList<>();
         private final Map<String, AMQP.Queue.DeclareOk> passiveQueues = new LinkedHashMap<>();
         private final List<String> passiveDeclareNames = new ArrayList<>();
+        private final List<String> basicGetQueues = new ArrayList<>();
         private final List<String> bindings = new ArrayList<>();
         private final List<Long> ackedTags = new ArrayList<>();
         private final List<Long> nackedTags = new ArrayList<>();
@@ -378,7 +505,10 @@ class RabbitMqDlqClientTest {
                     }
                     yield null;
                 }
-                case "exchangeDeclare" -> null;
+                case "exchangeDeclare" -> {
+                    declaredExchanges.add((String) args[0]);
+                    yield null;
+                }
                 case "queueDeclare" -> {
                     declaredQueues.add((String) args[0]);
                     yield null;
@@ -396,7 +526,10 @@ class RabbitMqDlqClientTest {
                     bindings.add(args[0] + "|" + args[1] + "|" + args[2]);
                     yield null;
                 }
-                case "basicGet" -> deliveries.poll();
+                case "basicGet" -> {
+                    basicGetQueues.add((String) args[0]);
+                    yield deliveries.poll();
+                }
                 case "basicAck" -> {
                     ackedTags.add((Long) args[0]);
                     yield null;

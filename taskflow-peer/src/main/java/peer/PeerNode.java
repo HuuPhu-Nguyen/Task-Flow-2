@@ -31,6 +31,6 @@ public final class PeerNode {
                 "java -jar taskflow-peer-<version>-submitter-runtime.jar submit <task-type> <parameter> <file> [file...] (requester role)",
                 "java -jar taskflow-peer-<version>-executor-runtime.jar (executor role)",
                 "java -jar taskflow-peer-<version>-combined-runtime.jar [submit <task-type> <parameter> <file> [file...]] (requester + executor)",
-                "java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|redrive|quarantine|discard> [count]");
+                "java -jar taskflow-peer-<version>-combined-runtime.jar dlq <inspect|inspect-quarantine|redrive|redrive-quarantine|quarantine|discard> [count]");
     }
 }

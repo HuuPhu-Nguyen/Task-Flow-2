@@ -1,7 +1,6 @@
 package transport.rabbitmq;
 
 import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.BuiltinExchangeType;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
@@ -73,7 +72,7 @@ public class RabbitMqTransport implements BrokerTransport {
             closeAfterStartupFailure(connection, channel, e);
             throw e;
         }
-        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={}",
+        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} retry_delays_ms={} max_delivery_attempts={}",
                 config.host(),
                 config.port(),
                 config.virtualHost(),
@@ -81,7 +80,9 @@ public class RabbitMqTransport implements BrokerTransport {
                 config.durable(),
                 config.prefetchCount(),
                 config.publisherConfirmTimeoutMillis(),
-                config.deadLetterEnabled());
+                config.deadLetterEnabled(),
+                config.retryDelaysMillis(),
+                config.maxDeliveryAttempts());
     }
 
     private static RabbitMqConnectionResources openResources(RabbitMqTransportConfig config) throws Exception {
@@ -121,36 +122,18 @@ public class RabbitMqTransport implements BrokerTransport {
     @Override
     public void declareTopology() throws Exception {
         synchronized (channel) {
-            if (topology.deadLetterEnabled()) {
-                channel.exchangeDeclare(topology.deadLetterExchangeName(), BuiltinExchangeType.DIRECT, topology.durable());
-                channel.queueDeclare(topology.deadLetterQueueName(), topology.durable(), false, false, null);
-                channel.queueBind(
-                        topology.deadLetterQueueName(),
-                        topology.deadLetterExchangeName(),
-                        topology.deadLetterRoutingKey()
-                );
-                channel.queueDeclare(topology.deadLetterQuarantineQueueName(), topology.durable(), false, false, null);
-                channel.queueBind(
-                        topology.deadLetterQuarantineQueueName(),
-                        topology.deadLetterExchangeName(),
-                        topology.deadLetterQuarantineRoutingKey()
-                );
-            }
-            Map<String, Object> queueArguments = topology.queueArguments();
-            channel.exchangeDeclare(topology.exchangeName(), BuiltinExchangeType.DIRECT, topology.durable());
-            for (TransportRoute route : TransportRoute.values()) {
-                String queueName = topology.queueName(route);
-                channel.queueDeclare(queueName, topology.durable(), false, false, queueArguments);
-                channel.queueBind(queueName, topology.exchangeName(), route.routingKey());
-            }
+            RabbitMqTopologyDeclarer.declare(channel, topology);
         }
-        LOGGER.info("event=rabbitmq_topology_declared exchange={} durable={} dead_letter_enabled={} dead_letter_exchange={} dead_letter_queue={} dead_letter_quarantine_queue={}",
+        LOGGER.info("event=rabbitmq_topology_declared exchange={} durable={} dead_letter_enabled={} dead_letter_exchange={} dead_letter_queue={} quarantine_exchange={} quarantine_queue={} retry_delays_ms={} max_delivery_attempts={}",
                 topology.exchangeName(),
                 topology.durable(),
                 topology.deadLetterEnabled(),
                 topology.deadLetterEnabled() ? topology.deadLetterExchangeName() : "",
                 topology.deadLetterEnabled() ? topology.deadLetterQueueName() : "",
-                topology.deadLetterEnabled() ? topology.deadLetterQuarantineQueueName() : "");
+                topology.quarantineExchangeName(),
+                topology.deadLetterQuarantineQueueName(),
+                topology.retryDelaysMillis(),
+                topology.maxDeliveryAttempts());
     }
 
     @Override
@@ -174,6 +157,16 @@ public class RabbitMqTransport implements BrokerTransport {
                 .contentEncoding(StandardCharsets.UTF_8.name())
                 .deliveryMode(config.durable() ? 2 : 1)
                 .timestamp(Date.from(Instant.now()))
+                .headers(Map.of(
+                        RabbitMqRetryHeaders.DELIVERY_ATTEMPT,
+                        1,
+                        RabbitMqRetryHeaders.ORIGINAL_ROUTING_KEY,
+                        routingKey,
+                        RabbitMqRetryHeaders.ORIGINAL_EXCHANGE,
+                        topology.exchangeName(),
+                        RabbitMqRetryHeaders.ORIGINAL_MESSAGE_ID,
+                        messageId
+                ))
                 .build();
         CompletableFuture<Return> returned = mandatory ? new CompletableFuture<>() : null;
         if (mandatory) {
@@ -271,8 +264,17 @@ public class RabbitMqTransport implements BrokerTransport {
     private String consume(String queueName, TransportRoute route, TransportMessageHandler handler) throws Exception {
         synchronized (channel) {
             String consumerTag = channel.basicConsume(queueName, false, (tag, delivery) -> {
-                RabbitMqAcknowledgement acknowledgement =
-                        new RabbitMqAcknowledgement(channel, delivery.getEnvelope().getDeliveryTag());
+                RabbitMqDeliveryRetry retry = new RabbitMqDeliveryRetry(
+                        config,
+                        topology,
+                        delivery,
+                        this::publishSettlementMessage
+                );
+                RabbitMqAcknowledgement acknowledgement = new RabbitMqAcknowledgement(
+                        channel,
+                        delivery.getEnvelope().getDeliveryTag(),
+                        retry
+                );
                 InboundTransportMessage message;
                 try {
                     message = codec.decode(delivery.getBody(), route, acknowledgement);
@@ -287,26 +289,40 @@ public class RabbitMqTransport implements BrokerTransport {
                             DeliveryDisposition.REJECT_INVALID,
                             e.getMessage(),
                             e);
-                    settleDelivery(acknowledgement, DeliveryDisposition.REJECT_INVALID);
+                    settleDelivery(
+                            acknowledgement,
+                            DeliveryDisposition.REJECT_INVALID,
+                            reasonCode
+                    );
                     return;
                 }
 
                 try {
                     handler.handle(message);
                     if (!acknowledgement.isSettled() && !acknowledgement.isDeferred()) {
-                        settleDelivery(acknowledgement, DeliveryDisposition.ACK_SUCCESS);
+                        settleDelivery(
+                                acknowledgement,
+                                DeliveryDisposition.ACK_SUCCESS,
+                                "handler_completed"
+                        );
                     }
                 } catch (Exception e) {
                     preserveInterrupt(e);
                     ClassifiedDeliveryFailure failure = DeliveryFailureClassifier.classify(e);
-                    LOGGER.warn("event=rabbitmq_delivery_handler_failed route={} queue={} reason_code={} disposition={} error={}",
+                    LOGGER.warn("event=rabbitmq_delivery_handler_failed route={} queue={} reason_code={} disposition={} delivery_attempt={} max_delivery_attempts={} error={}",
                             route.name(),
                             queueName,
                             failure.reasonCode(),
                             failure.disposition(),
+                            retry.deliveryAttempt(),
+                            config.maxDeliveryAttempts(),
                             e.getMessage(),
                             e);
-                    settleDelivery(acknowledgement, failure.disposition());
+                    settleDelivery(
+                            acknowledgement,
+                            failure.disposition(),
+                            failure.reasonCode()
+                    );
                 }
             }, tag -> {
                 LOGGER.warn("event=rabbitmq_consumer_cancelled route={} queue={} consumer_tag={}",
@@ -319,18 +335,72 @@ public class RabbitMqTransport implements BrokerTransport {
     }
 
     private void settleDelivery(RabbitMqAcknowledgement acknowledgement,
-                                DeliveryDisposition disposition) throws IOException {
+                                DeliveryDisposition disposition,
+                                String reasonCode) throws IOException {
         if (acknowledgement.isSettled()) {
             return;
         }
         try {
-            acknowledgement.settle(disposition);
+            acknowledgement.settle(disposition, reasonCode);
         } catch (Exception ackError) {
             preserveInterrupt(ackError);
             throw new IOException(
                     "Failed to settle RabbitMQ delivery as " + disposition,
                     ackError
             );
+        }
+    }
+
+    private boolean publishSettlementMessage(String exchange,
+                                             String routingKey,
+                                             AMQP.BasicProperties properties,
+                                             byte[] body) throws Exception {
+        String messageId = properties.getMessageId();
+        CompletableFuture<Return> returned = new CompletableFuture<>();
+        mandatoryReturns.put(messageId, returned);
+        try {
+            synchronized (channel) {
+                channel.basicPublish(exchange, routingKey, true, properties, body);
+                if (!waitForSettlementPublisherConfirm(exchange, routingKey)) {
+                    return false;
+                }
+            }
+            try {
+                Return returnedMessage = returned.get(MANDATORY_RETURN_WAIT_MILLIS, TimeUnit.MILLISECONDS);
+                LOGGER.error("event=rabbitmq_settlement_publish_unroutable exchange={} routing_key={} reply_code={} reply_text={}",
+                        exchange,
+                        returnedMessage.getRoutingKey(),
+                        returnedMessage.getReplyCode(),
+                        returnedMessage.getReplyText());
+                return false;
+            } catch (TimeoutException expectedWhenRouted) {
+                return true;
+            }
+        } finally {
+            mandatoryReturns.remove(messageId);
+        }
+    }
+
+    private boolean waitForSettlementPublisherConfirm(String exchange,
+                                                      String routingKey) throws IOException {
+        try {
+            boolean confirmed = channel.waitForConfirms(config.publisherConfirmTimeoutMillis());
+            if (!confirmed) {
+                LOGGER.error("event=rabbitmq_settlement_publish_not_confirmed exchange={} routing_key={} timeout_ms={}",
+                        exchange,
+                        routingKey,
+                        config.publisherConfirmTimeoutMillis());
+            }
+            return confirmed;
+        } catch (TimeoutException e) {
+            LOGGER.error("event=rabbitmq_settlement_publish_confirm_timeout exchange={} routing_key={} timeout_ms={}",
+                    exchange,
+                    routingKey,
+                    config.publisherConfirmTimeoutMillis());
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while waiting for RabbitMQ settlement publisher confirm", e);
         }
     }
 

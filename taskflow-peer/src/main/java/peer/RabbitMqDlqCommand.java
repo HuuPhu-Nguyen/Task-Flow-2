@@ -26,8 +26,11 @@ final class RabbitMqDlqCommand {
         String action = args[1].toLowerCase(Locale.ROOT);
         int count = args.length >= 3 ? parseCount(args[2]) : DEFAULT_COUNT;
         switch (action) {
-            case "inspect" -> printMessages(client.inspect(count), out);
+            case "inspect" -> printMessages(client.inspect(count), "DLQ", out);
+            case "inspect-quarantine" ->
+                    printMessages(client.inspectQuarantine(count), "Quarantine queue", out);
             case "redrive" -> printResults(client.redrive(count), out);
+            case "redrive-quarantine" -> printResults(client.redriveQuarantine(count), out);
             case "quarantine" -> printResults(client.quarantine(count), out);
             case "discard" -> printResults(client.discard(count), out);
             default -> throw new IllegalArgumentException(usage());
@@ -36,16 +39,20 @@ final class RabbitMqDlqCommand {
 
     static String usage() {
         return """
-                Usage: peer.PeerNode dlq <inspect|redrive|quarantine|discard> [count]
+                Usage: peer.PeerNode dlq <inspect|inspect-quarantine|redrive|redrive-quarantine|quarantine|discard> [count]
                 Examples:
                   .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq inspect 5"
                   .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq redrive 1"
+                  .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq inspect-quarantine 5"
+                  .\\mvnw.cmd -pl taskflow-peer exec:java -Dexec.args="dlq redrive-quarantine 1"
                 """;
     }
 
-    private static void printMessages(List<RabbitMqDlqMessage> messages, PrintStream out) {
+    private static void printMessages(List<RabbitMqDlqMessage> messages,
+                                      String queueLabel,
+                                      PrintStream out) {
         if (messages.isEmpty()) {
-            out.println("DLQ is empty.");
+            out.println(queueLabel + " is empty.");
             return;
         }
         for (int i = 0; i < messages.size(); i++) {
@@ -67,7 +74,7 @@ final class RabbitMqDlqCommand {
 
     private static void printMessage(int index, RabbitMqDlqMessage message, PrintStream out) {
         out.printf(
-                "message[%d] id=%s route=%s originalRoutingKey=%s deadLetterQueue=%s reason=%s deadLetterCount=%d redriveCount=%d redrivable=%s%n",
+                "message[%d] id=%s route=%s originalRoutingKey=%s deadLetterQueue=%s reason=%s deadLetterCount=%d redriveCount=%d deliveryAttempt=%d failureReason=%s failureDisposition=%s redrivable=%s%n",
                 index,
                 value(message.messageId()),
                 value(message.inferredRoute()),
@@ -76,6 +83,9 @@ final class RabbitMqDlqCommand {
                 value(message.deadLetterReason()),
                 message.deadLetterCount(),
                 message.redriveCount(),
+                message.deliveryAttempt(),
+                value(message.failureReason()),
+                value(message.failureDisposition()),
                 message.redrivable()
         );
         if (!message.redrivable()) {

@@ -2,7 +2,6 @@ package transport.rabbitmq;
 
 import com.google.gson.JsonParser;
 import com.rabbitmq.client.AMQP;
-import com.rabbitmq.client.BuiltinExchangeType;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
@@ -33,8 +32,8 @@ public class RabbitMqDlqClient implements AutoCloseable {
     private static final String HEADER_REDRIVE_COUNT = "x-taskflow-redrive-count";
     private static final String HEADER_DECISION = "x-taskflow-dlq-decision";
     private static final String HEADER_DECISION_AT = "x-taskflow-dlq-decision-at";
-    private static final String HEADER_ORIGINAL_ROUTING_KEY = "x-taskflow-original-routing-key";
     private static final String DECISION_REDRIVE = "redrive";
+    private static final String DECISION_REDRIVE_QUARANTINE = "redrive-quarantine";
     private static final String DECISION_QUARANTINE = "quarantine";
 
     private final RabbitMqTransportConfig config;
@@ -75,47 +74,36 @@ public class RabbitMqDlqClient implements AutoCloseable {
     }
 
     public void declareTopology() throws Exception {
-        if (!topology.deadLetterEnabled()) {
-            throw new IllegalStateException("RabbitMQ dead-lettering is disabled.");
-        }
         synchronized (channel) {
-            channel.exchangeDeclare(topology.exchangeName(), BuiltinExchangeType.DIRECT, topology.durable());
-            Map<String, Object> queueArguments = topology.queueArguments();
-            for (TransportRoute route : TransportRoute.values()) {
-                String queueName = topology.queueName(route);
-                channel.queueDeclare(queueName, topology.durable(), false, false, queueArguments);
-                channel.queueBind(queueName, topology.exchangeName(), route.routingKey());
-            }
-            channel.exchangeDeclare(topology.deadLetterExchangeName(), BuiltinExchangeType.DIRECT, topology.durable());
-            channel.queueDeclare(topology.deadLetterQueueName(), topology.durable(), false, false, null);
-            channel.queueBind(
-                    topology.deadLetterQueueName(),
-                    topology.deadLetterExchangeName(),
-                    topology.deadLetterRoutingKey()
-            );
-            channel.queueDeclare(topology.deadLetterQuarantineQueueName(), topology.durable(), false, false, null);
-            channel.queueBind(
-                    topology.deadLetterQuarantineQueueName(),
-                    topology.deadLetterExchangeName(),
-                    topology.deadLetterQuarantineRoutingKey()
-            );
+            RabbitMqTopologyDeclarer.declare(channel, topology);
         }
-        LOGGER.info("event=rabbitmq_dlq_topology_declared dlq_queue={} quarantine_queue={}",
-                topology.deadLetterQueueName(),
-                topology.deadLetterQuarantineQueueName());
+        LOGGER.info("event=rabbitmq_dlq_topology_declared dlq_enabled={} dlq_queue={} quarantine_queue={} retry_delays_ms={}",
+                topology.deadLetterEnabled(),
+                topology.deadLetterEnabled() ? topology.deadLetterQueueName() : "",
+                topology.deadLetterQuarantineQueueName(),
+                topology.retryDelaysMillis());
     }
 
     public List<RabbitMqDlqMessage> inspect(int maxMessages) throws Exception {
+        requireDeadLetterEnabled();
+        return inspectQueue(topology.deadLetterQueueName(), maxMessages);
+    }
+
+    public List<RabbitMqDlqMessage> inspectQuarantine(int maxMessages) throws Exception {
+        return inspectQueue(topology.deadLetterQuarantineQueueName(), maxMessages);
+    }
+
+    private List<RabbitMqDlqMessage> inspectQueue(String queueName, int maxMessages) throws Exception {
         validateMaxMessages(maxMessages);
         List<PulledDlqMessage> pulled = new ArrayList<>();
         try {
             synchronized (channel) {
                 for (int i = 0; i < maxMessages; i++) {
-                    GetResponse response = channel.basicGet(topology.deadLetterQueueName(), false);
+                    GetResponse response = channel.basicGet(queueName, false);
                     if (response == null) {
                         break;
                     }
-                    pulled.add(new PulledDlqMessage(response, toMessage(response)));
+                    pulled.add(new PulledDlqMessage(response, toMessage(response, queueName)));
                 }
             }
             return pulled.stream()
@@ -160,30 +148,61 @@ public class RabbitMqDlqClient implements AutoCloseable {
     }
 
     public List<RabbitMqDlqDecisionResult> redrive(int maxMessages) throws Exception {
+        requireDeadLetterEnabled();
         validateMaxMessages(maxMessages);
         return applyDecision(maxMessages, this::redriveNext);
     }
 
     public RabbitMqDlqDecisionResult redriveNext() throws Exception {
-        return withNextDelivery(DECISION_REDRIVE, this::redriveDelivery);
+        requireDeadLetterEnabled();
+        return withNextDelivery(
+                DECISION_REDRIVE,
+                topology.deadLetterQueueName(),
+                (response, message) -> redriveDelivery(response, message, DECISION_REDRIVE)
+        );
+    }
+
+    public List<RabbitMqDlqDecisionResult> redriveQuarantine(int maxMessages) throws Exception {
+        validateMaxMessages(maxMessages);
+        return applyDecision(maxMessages, this::redriveQuarantineNext);
+    }
+
+    public RabbitMqDlqDecisionResult redriveQuarantineNext() throws Exception {
+        return withNextDelivery(
+                DECISION_REDRIVE_QUARANTINE,
+                topology.deadLetterQuarantineQueueName(),
+                (response, message) -> redriveDelivery(
+                        response,
+                        message,
+                        DECISION_REDRIVE_QUARANTINE
+                )
+        );
     }
 
     public List<RabbitMqDlqDecisionResult> quarantine(int maxMessages) throws Exception {
+        requireDeadLetterEnabled();
         validateMaxMessages(maxMessages);
         return applyDecision(maxMessages, this::quarantineNext);
     }
 
     public RabbitMqDlqDecisionResult quarantineNext() throws Exception {
-        return withNextDelivery(DECISION_QUARANTINE, this::quarantineDelivery);
+        requireDeadLetterEnabled();
+        return withNextDelivery(
+                DECISION_QUARANTINE,
+                topology.deadLetterQueueName(),
+                this::quarantineDelivery
+        );
     }
 
     public List<RabbitMqDlqDecisionResult> discard(int maxMessages) throws Exception {
+        requireDeadLetterEnabled();
         validateMaxMessages(maxMessages);
         return applyDecision(maxMessages, this::discardNext);
     }
 
     public RabbitMqDlqDecisionResult discardNext() throws Exception {
-        return withNextDelivery("discard", (response, message) -> {
+        requireDeadLetterEnabled();
+        return withNextDelivery("discard", topology.deadLetterQueueName(), (response, message) -> {
             synchronized (channel) {
                 channel.basicAck(response.getEnvelope().getDeliveryTag(), false);
             }
@@ -209,22 +228,24 @@ public class RabbitMqDlqClient implements AutoCloseable {
     }
 
     private RabbitMqDlqDecisionResult redriveDelivery(GetResponse response,
-                                                      RabbitMqDlqMessage message) throws Exception {
+                                                      RabbitMqDlqMessage message,
+                                                      String decision) throws Exception {
         if (!message.redrivable()) {
             requeue(response);
-            LOGGER.warn("event=rabbitmq_dlq_redrive_rejected status=not_redrivable message_id={} original_routing_key={} reason={}",
+            LOGGER.warn("event=rabbitmq_dlq_redrive_rejected decision={} status=not_redrivable message_id={} original_routing_key={} reason={}",
+                    decision,
                     message.messageId(),
                     message.originalRoutingKey(),
                     message.nonRedrivableReason());
             return new RabbitMqDlqDecisionResult(
-                    DECISION_REDRIVE,
+                    decision,
                     RabbitMqDlqDecisionResult.Status.NOT_REDRIVABLE,
                     message,
                     message.nonRedrivableReason()
             );
         }
         String routingKey = redriveRoutingKey(message);
-        AMQP.BasicProperties properties = propertiesWithDecision(response, message, DECISION_REDRIVE);
+        AMQP.BasicProperties properties = propertiesWithDecision(response, message, decision);
         boolean published;
         try {
             published = publishAndConfirm(config.exchangeName(), routingKey, properties, response.getBody());
@@ -234,23 +255,25 @@ public class RabbitMqDlqClient implements AutoCloseable {
         }
         if (!published) {
             requeue(response);
-            LOGGER.warn("event=rabbitmq_dlq_redrive_deferred message_id={} original_routing_key={}",
+            LOGGER.warn("event=rabbitmq_dlq_redrive_deferred decision={} message_id={} original_routing_key={}",
+                    decision,
                     message.messageId(),
                     routingKey);
             return new RabbitMqDlqDecisionResult(
-                    DECISION_REDRIVE,
+                    decision,
                     RabbitMqDlqDecisionResult.Status.PUBLISH_NOT_CONFIRMED,
                     message,
                     "Redrive publish was not confirmed or was unroutable"
             );
         }
         ack(response);
-        LOGGER.info("event=rabbitmq_dlq_redriven message_id={} original_routing_key={} redrive_count={}",
+        LOGGER.info("event=rabbitmq_dlq_redriven decision={} message_id={} original_routing_key={} redrive_count={}",
+                decision,
                 message.messageId(),
                 routingKey,
                 message.redriveCount() + 1);
         return new RabbitMqDlqDecisionResult(
-                DECISION_REDRIVE,
+                decision,
                 RabbitMqDlqDecisionResult.Status.REDRIVEN,
                 message,
                 "Redriven to " + routingKey
@@ -263,7 +286,7 @@ public class RabbitMqDlqClient implements AutoCloseable {
         boolean published;
         try {
             published = publishAndConfirm(
-                    topology.deadLetterExchangeName(),
+                    topology.quarantineExchangeName(),
                     topology.deadLetterQuarantineRoutingKey(),
                     properties,
                     response.getBody()
@@ -297,20 +320,21 @@ public class RabbitMqDlqClient implements AutoCloseable {
     }
 
     private RabbitMqDlqDecisionResult withNextDelivery(String decision,
+                                                       String queueName,
                                                        DlqDeliveryOperation operation) throws Exception {
         GetResponse response;
         synchronized (channel) {
-            response = channel.basicGet(topology.deadLetterQueueName(), false);
+            response = channel.basicGet(queueName, false);
         }
         if (response == null) {
             return new RabbitMqDlqDecisionResult(
                     decision,
                     RabbitMqDlqDecisionResult.Status.EMPTY,
                     null,
-                    "DLQ is empty"
+                    queueName + " is empty"
             );
         }
-        RabbitMqDlqMessage message = toMessage(response);
+        RabbitMqDlqMessage message = toMessage(response, queueName);
         return operation.apply(response, message);
     }
 
@@ -332,10 +356,16 @@ public class RabbitMqDlqClient implements AutoCloseable {
         for (TransportRoute route : TransportRoute.values()) {
             targets.add(new QueueTarget(route.name(), topology.queueName(route)));
         }
+        for (int retryStage = 1; retryStage <= topology.retryStageCount(); retryStage++) {
+            targets.add(new QueueTarget(
+                    "RETRY_" + retryStage,
+                    topology.retryQueueName(retryStage)
+            ));
+        }
         if (topology.deadLetterEnabled()) {
             targets.add(new QueueTarget("DLQ", topology.deadLetterQueueName()));
-            targets.add(new QueueTarget("DLQ_QUARANTINE", topology.deadLetterQuarantineQueueName()));
         }
+        targets.add(new QueueTarget("QUARANTINE", topology.deadLetterQuarantineQueueName()));
         return targets;
     }
 
@@ -355,13 +385,13 @@ public class RabbitMqDlqClient implements AutoCloseable {
         }
     }
 
-    private RabbitMqDlqMessage toMessage(GetResponse response) {
+    private RabbitMqDlqMessage toMessage(GetResponse response, String sourceQueue) {
         AMQP.BasicProperties properties = properties(response);
         Map<String, Object> headers = copyHeaders(properties.getHeaders());
         XDeath xDeath = firstXDeath(headers);
         String originalRoutingKey = firstNonBlank(
-                firstRoutingKey(xDeath),
-                stringValue(headers.get(HEADER_ORIGINAL_ROUTING_KEY))
+                RabbitMqRetryHeaders.stringValue(headers, RabbitMqRetryHeaders.ORIGINAL_ROUTING_KEY),
+                firstRoutingKey(xDeath)
         );
         TransportRoute routeFromRoutingKey = topology.routeForRoutingKey(originalRoutingKey);
         DecodeResult decodeResult = decode(response.getBody(), routeFromRoutingKey);
@@ -370,14 +400,20 @@ public class RabbitMqDlqClient implements AutoCloseable {
         return new RabbitMqDlqMessage(
                 properties.getMessageId(),
                 properties.getContentType(),
-                xDeath == null ? null : xDeath.exchange(),
+                firstNonBlank(
+                        RabbitMqRetryHeaders.stringValue(headers, RabbitMqRetryHeaders.ORIGINAL_EXCHANGE),
+                        xDeath == null ? null : xDeath.exchange()
+                ),
                 originalRoutingKey,
-                xDeath == null ? topology.deadLetterQueueName() : xDeath.queue(),
+                xDeath == null ? sourceQueue : xDeath.queue(),
                 xDeath == null ? "" : xDeath.reason(),
                 xDeath == null ? 0L : xDeath.count(),
                 xDeath == null ? null : xDeath.firstTime(),
                 xDeath == null ? null : xDeath.lastTime(),
                 redriveCount(headers),
+                RabbitMqRetryHeaders.deliveryAttempt(headers),
+                RabbitMqRetryHeaders.stringValue(headers, RabbitMqRetryHeaders.FAILURE_REASON),
+                RabbitMqRetryHeaders.stringValue(headers, RabbitMqRetryHeaders.FAILURE_DISPOSITION),
                 inferredRoute,
                 nonRedrivableReason == null,
                 nonRedrivableReason,
@@ -449,18 +485,28 @@ public class RabbitMqDlqClient implements AutoCloseable {
         headers.put(HEADER_DECISION, decision);
         headers.put(HEADER_DECISION_AT, Instant.now().toString());
         if (message.originalRoutingKey() != null && !message.originalRoutingKey().isBlank()) {
-            headers.put(HEADER_ORIGINAL_ROUTING_KEY, message.originalRoutingKey());
+            headers.put(RabbitMqRetryHeaders.ORIGINAL_ROUTING_KEY, message.originalRoutingKey());
         }
-        if (DECISION_REDRIVE.equals(decision)) {
+        if (message.originalExchange() != null && !message.originalExchange().isBlank()) {
+            headers.putIfAbsent(RabbitMqRetryHeaders.ORIGINAL_EXCHANGE, message.originalExchange());
+        }
+        if (decision.startsWith(DECISION_REDRIVE)) {
             headers.put(HEADER_REDRIVE_COUNT, message.redriveCount() + 1);
+            headers.put(RabbitMqRetryHeaders.DELIVERY_ATTEMPT, 1);
+            headers.remove(RabbitMqRetryHeaders.RETRY_DELAY_MILLIS);
+            headers.remove(RabbitMqRetryHeaders.RETRY_SCHEDULED_AT);
+            headers.remove(RabbitMqRetryHeaders.QUARANTINED_AT);
+            headers.remove(RabbitMqRetryHeaders.RETRY_EXHAUSTED);
         }
         String messageId = properties.getMessageId();
         if (messageId == null || messageId.isBlank()) {
             messageId = UUID.randomUUID().toString();
         }
+        headers.putIfAbsent(RabbitMqRetryHeaders.ORIGINAL_MESSAGE_ID, messageId);
         return properties.builder()
                 .messageId(messageId)
                 .headers(headers)
+                .expiration(null)
                 .build();
     }
 
@@ -670,6 +716,12 @@ public class RabbitMqDlqClient implements AutoCloseable {
     private static void validateMaxMessages(int maxMessages) {
         if (maxMessages <= 0) {
             throw new IllegalArgumentException("maxMessages must be positive");
+        }
+    }
+
+    private void requireDeadLetterEnabled() {
+        if (!topology.deadLetterEnabled()) {
+            throw new IllegalStateException("RabbitMQ dead-lettering is disabled.");
         }
     }
 

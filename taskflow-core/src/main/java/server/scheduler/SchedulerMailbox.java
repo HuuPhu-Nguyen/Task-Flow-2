@@ -39,7 +39,10 @@ public final class SchedulerMailbox {
                 acknowledgement
         ));
         if (!queued && acknowledgement != null) {
-            acknowledgement.settle(DeliveryDisposition.RETRY_TRANSIENT);
+            acknowledgement.settle(
+                    DeliveryDisposition.RETRY_TRANSIENT,
+                    "scheduler_mailbox_full"
+            );
         }
         return queued;
     }

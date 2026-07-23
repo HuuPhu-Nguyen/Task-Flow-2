@@ -17,13 +17,15 @@ final job results, with live broker coverage for seeded pending rows and
 replayed task-assignment duplicates. TaskFlow also provides DLQ inspection,
 redrive, quarantine, and discard commands for RabbitMQ dead-letter entries.
 Focused broker-failure coverage now spans coordinator, command-line
-participant, GUI service adapters, publisher confirms, requeue/reject/DLQ
+participant, GUI service adapters, publisher confirms, retry/reject/DLQ
 behavior, and result routing. Automated JavaFX RabbitMQ desktop smoke evidence
 covers live submit/execute/result/save and broker-failure heartbeat handling.
 The runtime now classifies every consumed message through a five-value typed
-delivery disposition. Full broker outage/restart recovery and delayed bounded
-retry remain incomplete. TF-0301 removed the legacy socket runtime and
-transport selector from supported builds and releases.
+delivery disposition. Retry-eligible failures use bounded TTL queues and
+automatically enter final quarantine after the configured delivery-attempt
+limit. Full broker outage/restart recovery remains incomplete. TF-0301 removed
+the legacy socket runtime and transport selector from supported builds and
+releases.
 
 ## Current RabbitMQ Guarantees
 
@@ -86,19 +88,35 @@ The current RabbitMQ path includes:
   Cache eviction or participant restart permits re-execution, with SQLite
   generation fencing remaining authoritative.
 - RabbitMQ prefetch configuration.
-- Dead-letter exchange, dead-letter queue, and quarantine queue topology
-  declaration.
+- Dead-letter exchange, dead-letter queue, final quarantine queue, and explicit
+  per-delay retry exchange/queue topology declaration. Retry queue TTL expiry
+  routes the message back through its original routing key without a
+  delayed-message broker plugin.
+- A default retry schedule of `1000`, `5000`, and `30000` milliseconds,
+  configurable as positive comma-separated values through
+  `TASKFLOW_RABBITMQ_RETRY_DELAYS_MS`. The initial delivery is attempt 1, so the
+  default permits four processing deliveries before final quarantine.
+- Publisher-confirmed retry/quarantine handoff with
+  `x-taskflow-delivery-attempt`, original routing key/exchange, first/current
+  failure reason, failure disposition, and retry-delay metadata. No delivery
+  failure path uses immediate negative-acknowledge/requeue.
 - DLQ inspection for dead-letter metadata, original routing keys, body preview,
-  redrive count, and redrivability.
+  redrive count, delivery attempt, classified failure metadata, and
+  redrivability.
 - DLQ decisions for redrive, quarantine, and discard. Redrive republishes valid
   TaskFlow broker envelopes to the original RabbitMQ routing key, increments
   `x-taskflow-redrive-count`, and acknowledges the DLQ entry only after broker
   publish confirmation. Malformed or unknown-route poison messages are left in
   the DLQ for quarantine or discard.
+- Quarantine inspection and manual redrive commands. Quarantine redrive uses
+  the preserved original routing key, resets delivery attempt to 1 for a fresh
+  bounded budget, retains failure history, and acknowledges the quarantined
+  source only after publish confirmation.
 - Live broker tests for shared-route delivery, peer-route delivery,
-  acknowledgement drain, transient-handler retry, deterministic-handler
-  reject-to-dead-letter,
-  DLQ redrive/quarantine behavior, prefetch behavior, broker-side
+  acknowledgement drain, delayed transient-handler retry,
+  deterministic-handler quarantine after the configured exact attempt bound,
+  preserved retry metadata/manual quarantine redrive, ordinary DLQ
+  redrive/quarantine behavior, prefetch behavior, broker-side
   connection-close recovery, coordinator job completion, seeded pending outbox
   replay for `TASK_ASSIGN` and `JOB_RESULT`, replay after
   publish-before-sent-marking, and duplicate task-result rejection after
@@ -122,15 +140,21 @@ TaskFlow does not yet provide:
 - RabbitMQ duplicate-participant disconnection beyond the current invalid-config
   policy for participants sharing the same peer route.
 - RabbitMQ GUI `JOB_RESULT_REQUEST` replay after restart.
+- Recovery for `REJECT_INVALID` or an unconfirmed retry/quarantine handoff when
+  ordinary dead-lettering is explicitly disabled. The bounded retry topology
+  still declares its final quarantine queue, but a source `basicReject` without
+  queue dead-letter arguments is discarded by RabbitMQ.
 - Participant-side durable `TASK_RESULT` outbox persistence. Executor roles
   instead defer assignment acknowledgement until `TASK_RESULT` publication is
   confirmed.
+- Guaranteed retry return after a peer-specific auto-delete queue disappears.
+  Retry TTL expiry preserves the peer routing key, but RabbitMQ dead-letter
+  forwarding is not mandatory; if that ephemeral binding no longer exists, the
+  broker can drop the unroutable return. Shared coordinator routes and
+  continuously bound peer routes have the tested finite quarantine behavior;
+  TF-0306 owns participant-outage recovery.
 - Full broker outage/restart recovery beyond coordinator outbox retry after
   publish failures or coordinator restart.
-- Delayed retry queues, broker-owned attempt limits, preserved retry reason
-  metadata, and automatic final-quarantine routing. TF-0303 owns that topology;
-  the current adapter maps `RETRY_TRANSIENT` to immediate broker requeue and
-  terminal rejection dispositions to the existing dead-letter workflow.
 - Native RabbitMQ TLS/certificate configuration. Current configuration exposes
   host, port, username, password, vhost, and topology settings; use a trusted
   network or verified TLS-terminating tunnel/proxy until direct TLS support is
@@ -159,15 +183,15 @@ First keep support-promotion evidence current:
 Then close remaining durable outbox/replay decisions:
 
 - Decide whether participant-side durable `TASK_RESULT` outbox persistence is
-  needed beyond the current deferred-ack/requeue behavior.
+  needed beyond the current deferred-ack/bounded-retry behavior.
 - Keep live coordinator outbox crash-window coverage in the broker-backed CI
   profile.
 
 Then promote evidence:
 
 - Keep the RabbitMQ-backed CI profile passing for focused live integration
-  gates, including DLQ redrive/quarantine behavior and the focused
-  broker-failure service-adapter tests.
+  gates, including delayed retry/final-quarantine, DLQ and quarantine redrive,
+  and the focused broker-failure service-adapter tests.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,

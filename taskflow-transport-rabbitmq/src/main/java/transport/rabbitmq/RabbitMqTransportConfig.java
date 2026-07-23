@@ -1,5 +1,7 @@
 package transport.rabbitmq;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 public record RabbitMqTransportConfig(
@@ -16,9 +18,11 @@ public record RabbitMqTransportConfig(
         boolean deadLetterEnabled,
         String deadLetterExchangeName,
         String deadLetterQueueName,
-        String deadLetterRoutingKey
+        String deadLetterRoutingKey,
+        List<Long> retryDelaysMillis
 ) {
     public static final int DEFAULT_PORT = 5672;
+    public static final List<Long> DEFAULT_RETRY_DELAYS_MILLIS = List.of(1000L, 5000L, 30000L);
 
     public RabbitMqTransportConfig {
         if (host == null || host.isBlank()) {
@@ -59,6 +63,50 @@ public record RabbitMqTransportConfig(
                 throw new IllegalArgumentException("deadLetterRoutingKey is required when dead lettering is enabled");
             }
         }
+        if (retryDelaysMillis == null || retryDelaysMillis.isEmpty()) {
+            throw new IllegalArgumentException("retryDelaysMillis must contain at least one delay");
+        }
+        for (Long retryDelayMillis : retryDelaysMillis) {
+            if (retryDelayMillis == null || retryDelayMillis <= 0) {
+                throw new IllegalArgumentException("retryDelaysMillis values must be positive");
+            }
+        }
+        retryDelaysMillis = List.copyOf(retryDelaysMillis);
+    }
+
+    public RabbitMqTransportConfig(
+            String host,
+            int port,
+            String username,
+            String password,
+            String virtualHost,
+            String exchangeName,
+            String queuePrefix,
+            boolean durable,
+            int prefetchCount,
+            long publisherConfirmTimeoutMillis,
+            boolean deadLetterEnabled,
+            String deadLetterExchangeName,
+            String deadLetterQueueName,
+            String deadLetterRoutingKey
+    ) {
+        this(
+                host,
+                port,
+                username,
+                password,
+                virtualHost,
+                exchangeName,
+                queuePrefix,
+                durable,
+                prefetchCount,
+                publisherConfirmTimeoutMillis,
+                deadLetterEnabled,
+                deadLetterExchangeName,
+                deadLetterQueueName,
+                deadLetterRoutingKey,
+                DEFAULT_RETRY_DELAYS_MILLIS
+        );
     }
 
     public static RabbitMqTransportConfig localDefaults() {
@@ -76,7 +124,8 @@ public record RabbitMqTransportConfig(
                 true,
                 "taskflow.dead-letter.exchange",
                 "taskflow.dead-letter",
-                "dead-letter"
+                "dead-letter",
+                DEFAULT_RETRY_DELAYS_MILLIS
         );
     }
 
@@ -100,8 +149,17 @@ public record RabbitMqTransportConfig(
                 booleanValue(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ENABLED", defaults.deadLetterEnabled()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_EXCHANGE", defaults.deadLetterExchangeName()),
                 value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_QUEUE", defaults.deadLetterQueueName()),
-                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", defaults.deadLetterRoutingKey())
+                value(env, "TASKFLOW_RABBITMQ_DEAD_LETTER_ROUTING_KEY", defaults.deadLetterRoutingKey()),
+                retryDelays(
+                        env,
+                        "TASKFLOW_RABBITMQ_RETRY_DELAYS_MS",
+                        defaults.retryDelaysMillis()
+                )
         );
+    }
+
+    public int maxDeliveryAttempts() {
+        return retryDelaysMillis.size() + 1;
     }
 
     private static String value(Map<String, String> env, String key, String fallback) {
@@ -117,6 +175,31 @@ public record RabbitMqTransportConfig(
     private static long longValue(Map<String, String> env, String key, long fallback) {
         String value = env.get(key);
         return value == null || value.isBlank() ? fallback : Long.parseLong(value);
+    }
+
+    private static List<Long> retryDelays(Map<String, String> env,
+                                          String key,
+                                          List<Long> fallback) {
+        String value = env.get(key);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        List<Long> delays = new ArrayList<>();
+        for (String rawDelay : value.split(",", -1)) {
+            String delay = rawDelay.trim();
+            if (delay.isEmpty()) {
+                throw new IllegalArgumentException(key + " must be a comma-separated list of positive integers");
+            }
+            try {
+                delays.add(Long.parseLong(delay));
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        key + " must be a comma-separated list of positive integers",
+                        e
+                );
+            }
+        }
+        return delays;
     }
 
     private static boolean booleanValue(Map<String, String> env, String key, boolean fallback) {

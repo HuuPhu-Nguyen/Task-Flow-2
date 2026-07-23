@@ -4,6 +4,7 @@ import transport.TransportRoute;
 
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -41,11 +42,53 @@ public class RabbitMqTopology {
     }
 
     public String deadLetterQuarantineQueueName() {
-        return config.deadLetterQueueName() + ".quarantine";
+        if (config.deadLetterEnabled()) {
+            return config.deadLetterQueueName() + ".quarantine";
+        }
+        return config.queuePrefix() + ".quarantine";
     }
 
     public String deadLetterQuarantineRoutingKey() {
-        return config.deadLetterRoutingKey() + ".quarantine";
+        if (config.deadLetterEnabled()) {
+            return config.deadLetterRoutingKey() + ".quarantine";
+        }
+        return "quarantine";
+    }
+
+    public String quarantineExchangeName() {
+        if (config.deadLetterEnabled()) {
+            return config.deadLetterExchangeName();
+        }
+        return config.exchangeName() + ".quarantine";
+    }
+
+    public List<Long> retryDelaysMillis() {
+        return config.retryDelaysMillis();
+    }
+
+    public int maxDeliveryAttempts() {
+        return config.maxDeliveryAttempts();
+    }
+
+    public int retryStageCount() {
+        return config.retryDelaysMillis().size();
+    }
+
+    public String retryExchangeName(int retryStage) {
+        long delayMillis = retryDelayMillis(retryStage);
+        return config.exchangeName() + ".retry." + retryStage + "." + delayMillis + "ms";
+    }
+
+    public String retryQueueName(int retryStage) {
+        long delayMillis = retryDelayMillis(retryStage);
+        return config.queuePrefix() + ".retry." + retryStage + "." + delayMillis + "ms";
+    }
+
+    public Map<String, Object> retryQueueArguments(int retryStage) {
+        Map<String, Object> arguments = new LinkedHashMap<>();
+        arguments.put("x-message-ttl", retryDelayMillis(retryStage));
+        arguments.put("x-dead-letter-exchange", config.exchangeName());
+        return Map.copyOf(arguments);
     }
 
     public Map<String, Object> queueArguments() {
@@ -114,5 +157,14 @@ public class RabbitMqTopology {
             throw new IllegalArgumentException("route is required");
         }
         return route.name().toLowerCase(Locale.ROOT).replace('_', '-');
+    }
+
+    private long retryDelayMillis(int retryStage) {
+        if (retryStage <= 0 || retryStage > retryStageCount()) {
+            throw new IllegalArgumentException(
+                    "retryStage must be between 1 and " + retryStageCount()
+            );
+        }
+        return config.retryDelaysMillis().get(retryStage - 1);
     }
 }

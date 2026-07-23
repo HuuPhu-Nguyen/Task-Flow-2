@@ -31,8 +31,8 @@ Queue pressure and scheduler health:
   `status queues`, and `status dlq` commands report persisted job/task state,
   retry and lease counts, last-known peers, pending coordinator outbox rows,
   RabbitMQ queue depths, and DLQ inspection summaries.
-- `scheduler_ingress_requeued reason=mailbox_full` records RabbitMQ
-  scheduler-delivery requeue when the bounded scheduler mailbox is full.
+- `scheduler_ingress_retry_requested reason=mailbox_full` records the bounded
+  RabbitMQ retry disposition when the scheduler mailbox is full.
 
 Job lifecycle:
 
@@ -78,7 +78,8 @@ Task assignment, retry, and failure:
 - `task_result_not_committed` is retained only for unknown-task and
   storage-failure dispositions, also with the complete correlation tuple.
   Duplicate, stale, and unknown broker results are acknowledged; storage
-  failure is requeued by the scheduler's processing-failure path.
+  failure receives bounded delayed retry through the scheduler's
+  processing-failure path.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
   attempts with `retry_count` and `terminal_failure`.
 - `task_lease_expired` records assigned work whose persisted lease expired
@@ -137,11 +138,12 @@ Persistence and recovery:
 RabbitMQ publish, acknowledgement, and DLQ routing:
 
 - `rabbitmq_connected` records the broker connection configuration, including
-  prefetch, publisher-confirm timeout, and dead-letter setting.
+  prefetch, publisher-confirm timeout, dead-letter setting, retry-delay
+  schedule, and maximum delivery attempts.
 - `rabbitmq_topology_declared` records dead-letter exchange, dead-letter queue,
-  and quarantine queue declaration when enabled.
-- `rabbitmq_dlq_topology_declared` records the DLQ and quarantine queues used
-  by the operator DLQ command path.
+  final quarantine queue, retry-delay schedule, and maximum delivery attempts.
+- `rabbitmq_dlq_topology_declared` records the DLQ, quarantine, and retry
+  topology used by the operator command path.
 - `rabbitmq_publish_unroutable`, `rabbitmq_publish_not_confirmed`,
   `rabbitmq_publish_confirm_timeout`, and
   `rabbitmq_publish_returned_unmatched` record broker publication failures or
@@ -159,15 +161,27 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
   failed broker settlement attempt.
 - `rabbitmq_delivery_settlement_failed` and
   `gui_rabbitmq_delivery_settlement_failed` record participant settlement
-  failures with the requested disposition.
+  failures with the requested disposition and reason code.
 - `task_result_publish_failed` and `rabbitmq_heartbeat_failed` record peer-side
   RabbitMQ publish failures.
 - `rabbitmq_delivery_decode_failed` records malformed broker input with
   `reason_code` and `disposition=REJECT_INVALID`. With dead-lettering enabled,
   RabbitMQ routes the rejected delivery to the configured dead-letter queue.
 - `rabbitmq_delivery_handler_failed` records the classified `reason_code` and
-  one of the typed failure dispositions. Participant assignment, execution, and
-  result-publication failure events expose the same fields.
+  one of the typed failure dispositions plus current and maximum delivery
+  attempts. Participant assignment, execution, and result-publication failure
+  events expose the same classification fields.
+- `rabbitmq_delivery_retry_scheduled` records original routing key, stable
+  reason code, disposition, current/next/max delivery attempt, delay, and retry
+  queue. `rabbitmq_delivery_quarantined` records the same failure identity and
+  terminal quarantine queue.
+- `rabbitmq_delivery_retry_publish_failed`,
+  `rabbitmq_delivery_quarantine_publish_failed`,
+  `rabbitmq_settlement_publish_unroutable`,
+  `rabbitmq_settlement_publish_not_confirmed`, and
+  `rabbitmq_settlement_publish_confirm_timeout` record a retry/quarantine
+  handoff that could not be confirmed. These paths reject the source without
+  immediate requeue.
 - `rabbitmq_dlq_redriven`, `rabbitmq_dlq_quarantined`, and
   `rabbitmq_dlq_discarded` record explicit operator decisions on DLQ entries.
 - `rabbitmq_dlq_redrive_rejected status=not_redrivable`,
@@ -176,6 +190,9 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
   `rabbitmq_dlq_publish_confirm_timeout`, and
   `rabbitmq_dlq_publish_returned_unmatched` record DLQ workflow failures or
   deferrals.
+- RabbitMQ queue status includes each configured retry queue and the final
+  quarantine queue. DLQ/quarantine message inspection exposes
+  `deliveryAttempt`, `failureReason`, and `failureDisposition`.
 
 ## Current Limits
 

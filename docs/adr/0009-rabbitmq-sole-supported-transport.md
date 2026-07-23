@@ -50,16 +50,17 @@ the large binary data plane.
 
 ## Consequences
 
-- Runtime delivery code uses one five-value typed disposition contract; bounded
-  delayed retry and final automatic quarantine remain follow-up topology work.
+- Runtime delivery code uses one five-value typed disposition contract plus
+  bounded TTL retry queues, observable attempt/reason metadata, and final
+  automatic quarantine.
 - RabbitMQ, its topology, and broker-backed integration evidence become runtime
   prerequisites for supported distributed operation.
 - Publisher confirms do not mean consumer processing or exactly-once delivery;
   duplicates remain normal and must be classified safely.
 - Legacy socket configuration, packaging, tests, and claims are absent from the
   supported surface.
-- Full broker outage/restart, bounded poison handling, and acknowledgement crash
-  windows must pass before production-strength RabbitMQ claims are made.
+- Full broker outage/restart and acknowledgement crash windows must pass before
+  production-strength RabbitMQ claims are made.
 
 ## Conditions That Would Invalidate This Decision
 

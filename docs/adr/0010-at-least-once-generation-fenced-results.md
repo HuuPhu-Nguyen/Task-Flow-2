@@ -38,9 +38,10 @@ side effects exactly once.
 
 Consumed broker messages use the separate five-value disposition contract:
 successful and duplicate/stale outcomes acknowledge, explicit transient
-failures retry, and invalid or deterministic-poison outcomes reject without
-requeue. Delayed attempt accounting and automatic final quarantine remain
-topology work rather than task retry state.
+failures retry through bounded TTL queues, invalid outcomes reject without
+requeue, and deterministic poison uses the bounded delivery schedule before
+final quarantine. Delivery-attempt accounting is broker metadata and remains
+separate from task retry state.
 
 ## Alternatives Considered
 
