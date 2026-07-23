@@ -13,6 +13,10 @@ adaptive throttling remains deferred.
   unchanged.
 - RabbitMQ consumers apply `TASKFLOW_RABBITMQ_PREFETCH`, limiting outstanding
   unacknowledged deliveries per consumer channel.
+- Initial broker connection retry has one process-owned attempt in flight at a
+  time. Each attempt has a configured timeout and failures use capped
+  exponential delay, preventing startup or recovery from creating an
+  unbounded connection-attempt storm.
 - Executor participants defer `TASK_ASSIGN` acknowledgement until the matching
   `TASK_RESULT` publication is broker-confirmed. A transient failed publication
   gives the assignment `RETRY_TRANSIENT`.
@@ -53,6 +57,9 @@ ephemeral peer route disappears or adaptive capacity management.
 - `RabbitMqCoordinatorShutdownLiveIntegrationTest` proves one pre-stop
   delivery drains while a post-stop deferred delivery returns to broker
   ownership after transport close.
+- `RabbitMqBrokerRecoveryIntegrationTest` proves the connection retry bound,
+  offline coordinator outbox ownership, and exact replay after a real
+  single-broker stop/restart while work is active.
 
 ## Deferred Adaptive Behavior
 

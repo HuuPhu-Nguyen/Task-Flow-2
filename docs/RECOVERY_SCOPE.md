@@ -33,8 +33,11 @@ scheduler mailbox. A delivery that was admitted drains to its typed
 scheduler/store disposition; a delivery that reaches the closed ingress gate
 remains unacknowledged and returns to RabbitMQ when the channel closes.
 SQLite closes only after the scheduler, peer monitor, and outbox replayer stop.
-This is healthy-broker connection-close recovery, not proof of broker-process
-restart; TF-0306 owns the latter.
+Healthy-connection acknowledgement windows remain separate from the managed
+single-broker restart proof. The latter starts with RabbitMQ unavailable,
+stops it again during active work, preserves SQLite assignment/outbox state,
+restores topology and consumers, rejects the stale pre-outage result, and
+completes with the current result after recovery.
 
 ## Decision
 
@@ -166,7 +169,7 @@ lease preservation on startup, expired-lease release, and stale-result rejection
 after reassignment. They may also claim replayable single-coordinator job
 finalization from durable ordered task results and atomic terminal/outbox
 commit, plus broker redelivery of unsettled coordinator deliveries after
-connection close, but not exactly-once broker delivery or full broker-restart
-recovery. They should not claim
-multi-coordinator locking, PostgreSQL/Flyway storage, or an operator-managed
-external database until those are implemented and tested.
+connection close and bounded single-broker restart recovery for active work.
+They must not claim exactly-once broker delivery, zero-downtime cluster
+failover, multi-coordinator locking, PostgreSQL/Flyway storage, or an
+operator-managed external database until those are implemented and tested.

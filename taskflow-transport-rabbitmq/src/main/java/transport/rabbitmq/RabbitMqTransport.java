@@ -4,6 +4,8 @@ import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.Channel;
 import com.rabbitmq.client.Connection;
 import com.rabbitmq.client.ConnectionFactory;
+import com.rabbitmq.client.Recoverable;
+import com.rabbitmq.client.RecoveryListener;
 import com.rabbitmq.client.Return;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +29,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class RabbitMqTransport implements BrokerTransport {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTransport.class);
@@ -36,31 +40,59 @@ public class RabbitMqTransport implements BrokerTransport {
     private final RabbitMqTransportConfig config;
     private final RabbitMqTopology topology;
     private final RabbitMqMessageCodec codec;
+    private final RabbitMqRecoveryPolicy recoveryPolicy;
     private final Connection connection;
     private final Channel channel;
     private final Map<String, CompletableFuture<Return>> mandatoryReturns = new ConcurrentHashMap<>();
 
     public RabbitMqTransport(RabbitMqTransportConfig config) throws Exception {
-        this(config, new RabbitMqMessageCodec());
+        this(config, RabbitMqRecoveryPolicy.defaults());
+    }
+
+    public RabbitMqTransport(RabbitMqTransportConfig config,
+                             RabbitMqRecoveryPolicy recoveryPolicy) throws Exception {
+        this(config, new RabbitMqMessageCodec(), recoveryPolicy);
     }
 
     public RabbitMqTransport(RabbitMqTransportConfig config, RabbitMqMessageCodec codec) throws Exception {
-        this(config, codec, openResources(config));
+        this(config, codec, RabbitMqRecoveryPolicy.defaults());
+    }
+
+    public RabbitMqTransport(RabbitMqTransportConfig config,
+                             RabbitMqMessageCodec codec,
+                             RabbitMqRecoveryPolicy recoveryPolicy) throws Exception {
+        this(config, codec, recoveryPolicy, openResources(config, recoveryPolicy));
     }
 
     private RabbitMqTransport(RabbitMqTransportConfig config,
                               RabbitMqMessageCodec codec,
+                              RabbitMqRecoveryPolicy recoveryPolicy,
                               RabbitMqConnectionResources resources) throws Exception {
-        this(config, codec, resources.connection(), resources.channel());
+        this(config, codec, recoveryPolicy, resources.connection(), resources.channel());
     }
 
     RabbitMqTransport(RabbitMqTransportConfig config,
                       RabbitMqMessageCodec codec,
                       Connection connection,
                       Channel channel) throws Exception {
+        this(
+                config,
+                codec,
+                RabbitMqRecoveryPolicy.defaults(),
+                connection,
+                channel
+        );
+    }
+
+    RabbitMqTransport(RabbitMqTransportConfig config,
+                      RabbitMqMessageCodec codec,
+                      RabbitMqRecoveryPolicy recoveryPolicy,
+                      Connection connection,
+                      Channel channel) throws Exception {
         this.config = config;
         this.topology = new RabbitMqTopology(config);
         this.codec = codec;
+        this.recoveryPolicy = recoveryPolicy;
         this.connection = connection;
         this.channel = channel;
         try {
@@ -69,11 +101,12 @@ public class RabbitMqTransport implements BrokerTransport {
                 this.channel.confirmSelect();
                 this.channel.addReturnListener(this::handleReturnedMessage);
             }
+            registerRecoveryObservers();
         } catch (Exception e) {
             closeAfterStartupFailure(connection, channel, e);
             throw e;
         }
-        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} retry_delays_ms={} max_delivery_attempts={}",
+        LOGGER.info("event=rabbitmq_connected host={} port={} vhost={} exchange={} durable={} prefetch={} publisher_confirm_timeout_ms={} dead_letter_enabled={} retry_delays_ms={} max_delivery_attempts={} connection_timeout_ms={} recovery_initial_delay_ms={} recovery_max_delay_ms={} recovery_backoff_multiplier={}",
                 config.host(),
                 config.port(),
                 config.virtualHost(),
@@ -83,10 +116,17 @@ public class RabbitMqTransport implements BrokerTransport {
                 config.publisherConfirmTimeoutMillis(),
                 config.deadLetterEnabled(),
                 config.retryDelaysMillis(),
-                config.maxDeliveryAttempts());
+                config.maxDeliveryAttempts(),
+                recoveryPolicy.connectionTimeoutMillis(),
+                recoveryPolicy.initialRetryDelayMillis(),
+                recoveryPolicy.maxRetryDelayMillis(),
+                recoveryPolicy.backoffMultiplier());
     }
 
-    private static RabbitMqConnectionResources openResources(RabbitMqTransportConfig config) throws Exception {
+    private static RabbitMqConnectionResources openResources(
+            RabbitMqTransportConfig config,
+            RabbitMqRecoveryPolicy recoveryPolicy
+    ) throws Exception {
         ConnectionFactory factory = new ConnectionFactory();
         factory.setHost(config.host());
         factory.setPort(config.port());
@@ -94,6 +134,21 @@ public class RabbitMqTransport implements BrokerTransport {
         factory.setPassword(config.password());
         factory.setVirtualHost(config.virtualHost());
         factory.setAutomaticRecoveryEnabled(true);
+        factory.setTopologyRecoveryEnabled(true);
+        factory.setConnectionTimeout(recoveryPolicy.connectionTimeoutMillis());
+        factory.setHandshakeTimeout(recoveryPolicy.connectionTimeoutMillis());
+        factory.setRecoveryDelayHandler(recoveryAttempts -> {
+            int failedAttempts = Math.max(1, recoveryAttempts);
+            long delayMillis = recoveryPolicy.retryDelayMillis(failedAttempts);
+            LOGGER.warn(
+                    "event=rabbitmq_connection_recovery_retry_scheduled attempt={} delay_ms={} host={} port={}",
+                    failedAttempts,
+                    delayMillis,
+                    config.host(),
+                    config.port()
+            );
+            return delayMillis;
+        });
         Connection connection = factory.newConnection("taskflow-rabbitmq-transport");
         try {
             return new RabbitMqConnectionResources(connection, connection.createChannel());
@@ -104,6 +159,74 @@ public class RabbitMqTransport implements BrokerTransport {
                 e.addSuppressed(closeFailure);
             }
             throw e;
+        }
+    }
+
+    private void registerRecoveryObservers() {
+        AtomicInteger recoveryCycle = new AtomicInteger();
+        AtomicLong recoveryStartedNanos = new AtomicLong();
+        connection.addShutdownListener(cause -> {
+            if (cause.isInitiatedByApplication()) {
+                LOGGER.info(
+                        "event=rabbitmq_connection_closed host={} port={} hard_error={} reason={}",
+                        config.host(),
+                        config.port(),
+                        cause.isHardError(),
+                        cause.getReason()
+                );
+            } else {
+                LOGGER.warn(
+                        "event=rabbitmq_connection_interrupted host={} port={} hard_error={} reason={}",
+                        config.host(),
+                        config.port(),
+                        cause.isHardError(),
+                        cause.getReason()
+                );
+            }
+        });
+        if (connection instanceof Recoverable recoverable) {
+            recoverable.addRecoveryListener(new RecoveryListener() {
+                @Override
+                public void handleRecoveryStarted(Recoverable ignored) {
+                    recoveryStartedNanos.set(System.nanoTime());
+                    LOGGER.warn(
+                            "event=rabbitmq_connection_recovery_started cycle={} host={} port={} "
+                                    + "initial_delay_ms={} max_delay_ms={} backoff_multiplier={}",
+                            recoveryCycle.incrementAndGet(),
+                            config.host(),
+                            config.port(),
+                            recoveryPolicy.initialRetryDelayMillis(),
+                            recoveryPolicy.maxRetryDelayMillis(),
+                            recoveryPolicy.backoffMultiplier()
+                    );
+                }
+
+                @Override
+                public void handleTopologyRecoveryStarted(Recoverable ignored) {
+                    LOGGER.info(
+                            "event=rabbitmq_topology_recovery_started cycle={} host={} port={}",
+                            recoveryCycle.get(),
+                            config.host(),
+                            config.port()
+                    );
+                }
+
+                @Override
+                public void handleRecovery(Recoverable ignored) {
+                    long startedNanos = recoveryStartedNanos.getAndSet(0L);
+                    long elapsedMillis = startedNanos == 0L
+                            ? 0L
+                            : (System.nanoTime() - startedNanos) / 1_000_000L;
+                    LOGGER.info(
+                            "event=rabbitmq_connection_recovery_completed cycle={} elapsed_ms={} "
+                                    + "host={} port={} topology_recovered=true",
+                            recoveryCycle.get(),
+                            elapsedMillis,
+                            config.host(),
+                            config.port()
+                    );
+                }
+            });
         }
     }
 

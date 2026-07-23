@@ -60,9 +60,11 @@ the large binary data plane.
 - Legacy socket configuration, packaging, tests, and claims are absent from the
   supported surface.
 - Healthy-broker acknowledgement crash windows now have live pre-ack,
-  post-commit/pre-ack, and shutdown-ownership evidence. Full broker
-  outage/restart recovery and the broader Phase 7 process-kill matrix must pass
-  before production-strength RabbitMQ claims are made.
+  post-commit/pre-ack, and shutdown-ownership evidence. A managed
+  Testcontainers/Toxiproxy test also proves bounded unavailable startup and
+  single-broker restart recovery during active work. The broader Phase 7
+  process-kill/chaos matrix and remaining operational gates must pass before
+  production-strength RabbitMQ claims are made.
 
 ## Conditions That Would Invalidate This Decision
 

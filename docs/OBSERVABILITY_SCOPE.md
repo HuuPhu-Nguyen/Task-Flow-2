@@ -142,7 +142,26 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 
 - `rabbitmq_connected` records the broker connection configuration, including
   prefetch, publisher-confirm timeout, dead-letter setting, retry-delay
-  schedule, and maximum delivery attempts.
+  schedule, maximum delivery attempts, connection timeout, and recovery
+  backoff bounds.
+- `coordinator_broker_startup_waiting` and `peer_broker_startup_waiting`
+  identify a process that is alive but not yet ready because its initial broker
+  connection has not completed.
+- `rabbitmq_initial_connection_retry_scheduled` records each failed initial
+  attempt, elapsed time, next delay, endpoint, and exception type.
+  `rabbitmq_initial_connection_ready` records the attempt count and elapsed
+  time at readiness. `rabbitmq_initial_connection_failed_permanently`
+  distinguishes authentication, protocol, or configuration failures, while
+  `rabbitmq_initial_connection_stopped` identifies interrupted shutdown.
+- `rabbitmq_connection_interrupted`,
+  `rabbitmq_connection_recovery_retry_scheduled`,
+  `rabbitmq_connection_recovery_started`,
+  `rabbitmq_topology_recovery_started`, and
+  `rabbitmq_connection_recovery_completed` expose an established connection's
+  automatic recovery cycle and elapsed recovery time.
+- `rabbitmq_connection_closed` distinguishes an application-initiated or
+  otherwise non-recovering connection shutdown from an interrupted connection
+  entering automatic recovery.
 - `rabbitmq_topology_declared` records dead-letter exchange, dead-letter queue,
   final quarantine queue, retry-delay schedule, and maximum delivery attempts.
 - `rabbitmq_dlq_topology_declared` records the DLQ, quarantine, and retry

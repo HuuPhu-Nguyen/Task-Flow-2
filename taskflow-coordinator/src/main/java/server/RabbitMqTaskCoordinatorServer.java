@@ -28,11 +28,14 @@ import transport.InboundTransportMessage;
 import transport.TransportRoute;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
+import transport.rabbitmq.RabbitMqRecoveryPolicy;
+import transport.rabbitmq.RabbitMqTransportConnector;
 
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class RabbitMqTaskCoordinatorServer {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTaskCoordinatorServer.class);
@@ -40,7 +43,26 @@ public class RabbitMqTaskCoordinatorServer {
     private static final long HEARTBEAT_TIMEOUT_MILLIS = 90_000;
 
     public static void main(String[] args) throws Exception {
-        RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
+        RabbitMqTransportConfig transportConfig = RabbitMqTransportConfig.fromEnvironment();
+        RabbitMqRecoveryPolicy recoveryPolicy = RabbitMqRecoveryPolicy.fromEnvironment();
+        RabbitMqTransportConnector startupConnector =
+                new RabbitMqTransportConnector(transportConfig, recoveryPolicy);
+        AtomicReference<Runnable> shutdownAction =
+                new AtomicReference<>(startupConnector::close);
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(() -> shutdownAction.get().run(), "rabbitmq-coordinator-shutdown")
+        );
+
+        LOGGER.info(
+                "event=coordinator_broker_startup_waiting host={} port={} "
+                        + "connection_timeout_ms={} recovery_initial_delay_ms={} recovery_max_delay_ms={}",
+                transportConfig.host(),
+                transportConfig.port(),
+                recoveryPolicy.connectionTimeoutMillis(),
+                recoveryPolicy.initialRetryDelayMillis(),
+                recoveryPolicy.maxRetryDelayMillis()
+        );
+        RabbitMqTransport transport = startupConnector.connect();
         transport.declareTopology();
 
         SchedulerConfig schedulerConfig = SchedulerConfig.fromRuntime();
@@ -121,9 +143,11 @@ public class RabbitMqTaskCoordinatorServer {
                 schedulerThread,
                 finalDb
         );
-        Runtime.getRuntime().addShutdownHook(
-                new Thread(shutdown, "rabbitmq-coordinator-shutdown")
-        );
+        shutdownAction.set(shutdown);
+        RabbitMqTransport releasedTransport = startupConnector.releaseTransportOwnership();
+        if (releasedTransport != transport) {
+            throw new IllegalStateException("startup connector released an unexpected transport");
+        }
 
         monitor.start();
         schedulerThread.start();

@@ -23,9 +23,9 @@ covers live submit/execute/result/save and broker-failure heartbeat handling.
 The runtime now classifies every consumed message through a five-value typed
 delivery disposition. Retry-eligible failures use bounded TTL queues and
 automatically enter final quarantine after the configured delivery-attempt
-limit. Full broker outage/restart recovery remains incomplete. TF-0301 removed
-the legacy socket runtime and transport selector from supported builds and
-releases.
+limit. Managed evidence now covers initial broker unavailability and a real
+single-broker stop/restart during active work. TF-0301 removed the legacy
+socket runtime and transport selector from supported builds and releases.
 
 ## Current RabbitMQ Guarantees
 
@@ -33,6 +33,15 @@ The current RabbitMQ path includes:
 
 - Coordinator, command-line participant, and JavaFX entry points start RabbitMQ
   directly; there is no runtime transport selector.
+- Coordinator and command-line participant startup remains alive but unready
+  during a transient broker outage. One interruptible owner makes one
+  timeout-bounded connection attempt at a time with capped exponential
+  backoff. Permanent authentication/protocol/configuration failures terminate
+  startup instead of looping.
+- Established transports enable automatic connection and topology recovery.
+  The configured per-attempt timeout and capped delay bounds apply to both
+  initial connection ownership and client recovery; structured events expose
+  retry, interruption, topology restoration, and completion.
 - Shared broker routes for heartbeat, job submission, and task result messages.
 - Peer-specific broker routes for task assignment and job result messages.
 - Explicit sanitized peer IDs shared by command-line and JavaFX GUI participants
@@ -147,11 +156,15 @@ The current RabbitMQ path includes:
   classification after durable commit but before acknowledgement, ordered
   shutdown ownership for pre-stop and post-stop deliveries, plus
   same-participant ABA fencing across failure, reassignment, obsolete result
-  delivery, and current result commitment.
+  delivery, and current result commitment. A managed RabbitMQ/Toxiproxy
+  scenario also proves unavailable startup, real broker stop/restart during
+  active work, offline SQLite/outbox continuity, shared and peer consumer
+  restoration, exact pending assignment replay, stale-result fencing, and
+  eventual valid completion after participant recovery.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
-  transport/coordinator gates plus command-line participant and JavaFX GUI
-  RabbitMQ service-adapter tests.
+  transport/coordinator gates, including the managed stop/restart scenario,
+  plus command-line participant and JavaFX GUI RabbitMQ service-adapter tests.
 - Focused service-adapter failure-path tests cover command-line requester
   publish exceptions, JavaFX RabbitMQ startup heartbeat publish failure,
   transient task-result publish failure, deterministic task-execution poison
@@ -179,13 +192,12 @@ TaskFlow does not yet provide:
   preserves the peer routing key, but RabbitMQ dead-letter forwarding is not
   mandatory; if that ephemeral binding no longer exists, the broker can drop
   the unroutable return. Shared coordinator routes and continuously bound peer
-  routes have the tested finite quarantine behavior; TF-0306 owns
-  participant-outage recovery.
-- Full broker outage/restart recovery beyond coordinator outbox retry after
-  publish failures or coordinator restart. The acknowledgement tests close
-  healthy client connections against a running broker; they do not prove
-  topology, publisher, consumer, and active-job recovery across a broker
-  process restart, which remains TF-0306.
+  routes have the tested finite quarantine and broker-restart behavior, but an
+  offline participant has no endpoint for RabbitMQ to restore.
+- RabbitMQ-cluster failover, zero-downtime broker availability, or
+  multi-coordinator authority. The automated recovery proof intentionally
+  covers one restarted broker behind a stable endpoint and one authoritative
+  coordinator.
 - Native RabbitMQ TLS/certificate configuration. Current configuration exposes
   host, port, username, password, vhost, and topology settings; use a trusted
   network or verified TLS-terminating tunnel/proxy until direct TLS support is
@@ -222,7 +234,8 @@ Then promote evidence:
 
 - Keep the RabbitMQ-backed CI profile passing for focused live integration
   gates, including delayed retry/final-quarantine, DLQ and quarantine redrive,
-  and the focused broker-failure service-adapter tests.
+  the managed broker stop/restart test, and the focused broker-failure
+  service-adapter tests.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,
@@ -237,5 +250,6 @@ production-ready rather than transitional.
 
 Until the gates above are complete, public docs should say that RabbitMQ mode is
 functional and tested for the listed broker behaviors, but transitional. Avoid
-phrases such as production-ready broker runtime, durable RabbitMQ recovery, full
-broker outage recovery, automatic DLQ repair, or DLQ dashboard.
+phrases such as production-ready broker runtime, zero-downtime failover,
+multi-coordinator recovery, automatic DLQ repair, or DLQ dashboard. It is
+accurate to claim the bounded single-broker restart behavior linked above.

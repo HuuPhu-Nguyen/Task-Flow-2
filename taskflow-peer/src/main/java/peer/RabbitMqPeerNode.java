@@ -29,8 +29,10 @@ import transport.TransportRoute;
 import transport.TransientDeliveryException;
 import transport.rabbitmq.RabbitMqDlqClient;
 import transport.rabbitmq.RabbitMqRuntimeDefaults;
+import transport.rabbitmq.RabbitMqRecoveryPolicy;
 import transport.rabbitmq.RabbitMqTransport;
 import transport.rabbitmq.RabbitMqTransportConfig;
+import transport.rabbitmq.RabbitMqTransportConnector;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -43,6 +45,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class RabbitMqPeerNode {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqPeerNode.class);
@@ -57,7 +61,26 @@ public class RabbitMqPeerNode {
         }
 
         String nodeId = resolveNodeId();
-        RabbitMqTransport transport = new RabbitMqTransport(RabbitMqTransportConfig.fromEnvironment());
+        RabbitMqTransportConfig transportConfig = RabbitMqTransportConfig.fromEnvironment();
+        RabbitMqRecoveryPolicy recoveryPolicy = RabbitMqRecoveryPolicy.fromEnvironment();
+        RabbitMqTransportConnector startupConnector =
+                new RabbitMqTransportConnector(transportConfig, recoveryPolicy);
+        AtomicReference<Runnable> shutdownAction =
+                new AtomicReference<>(startupConnector::close);
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(() -> shutdownAction.get().run(), "rabbitmq-peer-shutdown")
+        );
+        LOGGER.info(
+                "event=peer_broker_startup_waiting peer_id={} host={} port={} "
+                        + "connection_timeout_ms={} recovery_initial_delay_ms={} recovery_max_delay_ms={}",
+                nodeId,
+                transportConfig.host(),
+                transportConfig.port(),
+                recoveryPolicy.connectionTimeoutMillis(),
+                recoveryPolicy.initialRetryDelayMillis(),
+                recoveryPolicy.maxRetryDelayMillis()
+        );
+        RabbitMqTransport transport = startupConnector.connect();
         transport.declareTopology();
 
         BlockingQueue<ReceivedJobResult> jobResults = new LinkedBlockingQueue<>();
@@ -77,14 +100,29 @@ public class RabbitMqPeerNode {
                 delivery -> handleJobResult(jobResults, delivery));
 
         ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId, engine.getRegisteredTaskTypes());
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+        AtomicBoolean shutdownStarted = new AtomicBoolean();
+        Runnable peerShutdown = () -> {
+            if (!shutdownStarted.compareAndSet(false, true)) {
+                return;
+            }
             heartbeats.shutdownNow();
             engine.shutdown();
             try {
                 transport.close();
-            } catch (Exception ignored) {
+            } catch (Exception closeError) {
+                LOGGER.warn(
+                        "event=rabbitmq_peer_shutdown_transport_close_failed peer_id={} error={}",
+                        nodeId,
+                        closeError.getMessage(),
+                        closeError
+                );
             }
-        }));
+        };
+        shutdownAction.set(peerShutdown);
+        RabbitMqTransport releasedTransport = startupConnector.releaseTransportOwnership();
+        if (releasedTransport != transport) {
+            throw new IllegalStateException("startup connector released an unexpected transport");
+        }
 
         if (isSubmitCommand(args)) {
             Map<String, ClientJobPlugin> clientPlugins = ClientJobPlugins.byTaskType(ClientJobPlugins.discover());
@@ -94,9 +132,7 @@ public class RabbitMqPeerNode {
             try {
                 waitForJobResult(jobId, jobResults, clientPlugins);
             } finally {
-                heartbeats.shutdownNow();
-                engine.shutdown();
-                transport.close();
+                peerShutdown.run();
             }
             return;
         }

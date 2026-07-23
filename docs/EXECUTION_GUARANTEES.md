@@ -170,8 +170,9 @@ nodes may enable the requester role, executor role, or both.
 - The finite retry/quarantine guarantee assumes that the original routing
   binding still exists when each TTL expires. A peer-specific auto-delete queue
   can disappear while its delivery waits; RabbitMQ dead-letter forwarding is
-  not mandatory, so that return can be unroutable. TF-0306 owns recovery for
-  that participant-outage window.
+  not mandatory, so that return can be unroutable. Automatic topology recovery
+  restores a continuously connected participant endpoint after a broker
+  restart, but it cannot restore a route while that participant is offline.
 
 ## Coordinator Consumer Acknowledgement and Shutdown
 
@@ -202,16 +203,50 @@ nodes may enable the requester role, executor role, or both.
   stop, SQLite close is deliberately deferred to process exit rather than
   racing a live callback. The initial outbox replay also runs on the replayer
   executor, so the same bounded stop owns startup-time database work.
-- These tests use intentional healthy connection/channel close to exercise the
-  acknowledgement windows. Full broker-process outage, topology recovery, and
-  active-job completion after broker restart remain TF-0306.
+- The acknowledgement-window tests use intentional healthy connection/channel
+  close. A separate managed Testcontainers/Toxiproxy test stops the RabbitMQ
+  process, preserves durable coordinator state while it is offline, and proves
+  topology, consumer, outbox, fencing, and active-job recovery after restart.
 
 ## RabbitMQ Connection Recovery
 
-- RabbitMQ client automatic connection recovery is enabled for transport connections.
-- Opt-in live transport coverage verifies that an existing transport can consume and publish again after the broker closes its connection through the RabbitMQ management API.
-- SQLite-backed coordinator outbox replay covers coordinator-originated `TASK_ASSIGN` and final `JOB_RESULT` messages that were queued before a coordinator crash. Live broker coverage verifies seeded pending outbox rows, replay after a simulated publish-before-sent-marking crash window, and duplicate task-result rejection after replayed task assignments.
-- This does not guarantee full broker outage recovery, participant-side durable `TASK_RESULT` replay, or redelivery of messages outside the coordinator outbox.
+- Coordinator and command-line participant startup uses one connection owner
+  that makes one attempt at a time. A TCP/AMQP attempt is bounded by
+  `TASKFLOW_RABBITMQ_CONNECTION_TIMEOUT_MS` (`5000` ms by default). Transient
+  failures retry with capped exponential delay configured by
+  `TASKFLOW_RABBITMQ_RECOVERY_INITIAL_DELAY_MS`,
+  `TASKFLOW_RABBITMQ_RECOVERY_MAX_DELAY_MS`, and
+  `TASKFLOW_RABBITMQ_RECOVERY_BACKOFF_MULTIPLIER` (defaults `1000`, `30000`,
+  and `2.0`). Invalid credentials, incompatible protocol, and invalid
+  configuration fail; shutdown interrupts backoff.
+- A coordinator is alive but unready during initial retry. Its
+  `coordinator_started` event occurs only after broker connection, topology
+  declaration, consumer construction, and scheduler startup. Connection
+  attempts and state changes emit
+  `rabbitmq_initial_connection_retry_scheduled`,
+  `rabbitmq_initial_connection_ready`, and
+  `rabbitmq_initial_connection_stopped`.
+- After first connection, RabbitMQ automatic connection and topology recovery
+  uses the same capped delay policy. Recovery emits
+  `rabbitmq_connection_interrupted`,
+  `rabbitmq_connection_recovery_retry_scheduled`,
+  `rabbitmq_connection_recovery_started`,
+  `rabbitmq_topology_recovery_started`, and
+  `rabbitmq_connection_recovery_completed`.
+- SQLite-backed coordinator outbox rows remain pending when a broker publish
+  fails. Periodic replay resumes after connection/topology recovery and uses
+  the exact committed assignment identity; it does not create a recovery-only
+  assignment generation.
+- [`RabbitMqBrokerRecoveryIntegrationTest#unavailableStartupAndActiveBrokerRestartRecoverOutboxConsumersAndFencing`](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqBrokerRecoveryIntegrationTest.java)
+  uses managed RabbitMQ plus a stable Toxiproxy endpoint. It proves unavailable
+  startup retry; a real broker stop during active work; offline durable
+  replacement assignment/outbox state; restored shared and peer consumers;
+  exact outbox replay; stale pre-outage result rejection; and eventual valid
+  completion after the participant connection recovers.
+- This is a single-broker, single-coordinator recovery guarantee. It does not
+  provide RabbitMQ-cluster failover, zero downtime, multi-coordinator
+  authority, participant-side durable `TASK_RESULT` replay, or exactly-once
+  delivery/execution.
 
 ## RabbitMQ Dead Lettering
 

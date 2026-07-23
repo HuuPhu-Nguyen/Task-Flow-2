@@ -50,6 +50,13 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   already admitted envelopes within a fixed bound, closes the broker channel
   to return unsettled deliveries, and closes SQLite only after database-using
   background components stop.
+- coordinator and command-line participant startup uses one interruptible,
+  timeout-bounded connection owner with capped exponential backoff; established
+  transports automatically recover connections, recorded topology, channels,
+  and consumers through the same bounded delay policy;
+- broker-offline coordinator publications stay in the SQLite outbox and replay
+  their exact identity after recovery rather than creating an extra assignment
+  generation.
 
 At-least-once delivery and execution remain explicit. Publisher confirmation is
 not consumer completion, and exactly-once delivery is not claimed.
@@ -80,7 +87,9 @@ authoritative.
 - Live broker tests, broker-backed CI, Docker Compose, and the JavaFX desktop
   smoke helper exercise the supported runtime. The coordinator live gates
   include pre-ack redelivery, post-commit/pre-ack duplicate classification,
-  and pre-stop/post-stop shutdown delivery ownership.
+  pre-stop/post-stop shutdown delivery ownership, unavailable startup, and a
+  managed single-broker stop/restart with active work, recovered participant
+  routes, outbox replay, stale fencing, and completion.
 
 ## Legacy Data
 
@@ -106,8 +115,9 @@ Deployments upgrading from the removed socket runtime must:
 RabbitMQ is the only supported transport, but the implementation remains
 transitional rather than production-ready. The remaining promotion gates are:
 
-- full broker outage/restart recovery for active work;
 - a final participant-side `TASK_RESULT` durability decision;
+- RabbitMQ-cluster failover or multi-coordinator design only if a deployment
+  requires those capabilities beyond the tested single-broker recovery scope;
 - direct TLS/certificate configuration if brokers are used across untrusted
   networks;
 - continued broker-backed CI, Docker Compose, and JavaFX smoke evidence;
@@ -119,6 +129,7 @@ Use wording such as **sole supported RabbitMQ transport**, **at-least-once
 broker delivery**, and **transitional runtime**.
 
 TaskFlow can claim bounded poison-message quarantine under the configured
-RabbitMQ retry schedule. Do not describe TaskFlow as production-ready,
-exactly-once, or fully outage recoverable until the corresponding gates are
-implemented and tested.
+RabbitMQ retry schedule and bounded single-broker restart recovery under the
+documented assumptions. Do not describe TaskFlow as production-ready,
+exactly-once, zero-downtime, clustered, or multi-coordinator recoverable until
+the corresponding gates are implemented and tested.
