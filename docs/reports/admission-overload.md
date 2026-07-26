@@ -2,7 +2,7 @@
 
 Date: 2026-07-26
 
-Implementation commit: `PENDING_TF_0405_IMPLEMENTATION_COMMIT`
+Implementation commit: `7efffc168e54a1d7438d70d62a998f8ecc45ee60`
 
 ## Contract
 
