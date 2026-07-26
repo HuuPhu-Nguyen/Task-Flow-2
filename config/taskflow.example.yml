@@ -9,6 +9,10 @@ scheduler:
   maxTaskRetries: 20
   inboundQueueCapacity: 1000
   jobResultMaxDeliveryAttempts: 300
+  schedulerMessageBatchSize: 100
+  schedulerDeadlineBatchSize: 100
+  schedulerDispatchBatchSize: 100
+  schedulerOutboxBatchSize: 100
   metricsLogIntervalMs: 10000
   scoring:
     loadWeight: 6.0

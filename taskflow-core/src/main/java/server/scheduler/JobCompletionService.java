@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /** Owns J1/J2 aggregation, result delivery, terminal persistence, and cleanup. */
 final class JobCompletionService {
@@ -29,6 +30,7 @@ final class JobCompletionService {
     private final SchedulerOutboxService outbox;
     private final SchedulerEventLog events;
     private final Map<String, PendingJobCompletion> pendingCompletions = new LinkedHashMap<>();
+    private final TreeSet<PendingResultRetry> pendingRetryDeadlines = new TreeSet<>();
 
     JobCompletionService(SchedulerState state,
                          PeerRegistry registry,
@@ -86,22 +88,56 @@ final class JobCompletionService {
         tryDeliverJobResult(completion, true);
     }
 
-    void retryPendingJobResults() {
-        for (PendingJobCompletion completion : List.copyOf(pendingCompletions.values())) {
+    SchedulerLoop.StageResult retryPendingJobResults(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive");
+        }
+
+        long now = clock.nowEpochMillis();
+        int processed = 0;
+        while (processed < limit
+                && !pendingRetryDeadlines.isEmpty()
+                && pendingRetryDeadlines.getFirst().dueAtMillis() <= now) {
+            PendingResultRetry due = pendingRetryDeadlines.removeFirst();
+            processed++;
+            PendingJobCompletion completion = pendingCompletions.get(due.jobId());
+            if (completion == null || !due.equals(completion.retryDeadline)) {
+                continue;
+            }
+            completion.retryDeadline = null;
             tryDeliverJobResult(completion, false);
         }
+        boolean immediateWorkRemaining = !pendingRetryDeadlines.isEmpty()
+                && pendingRetryDeadlines.getFirst().dueAtMillis() != Long.MAX_VALUE
+                && pendingRetryDeadlines.getFirst().dueAtMillis() <= now;
+        return new SchedulerLoop.StageResult(processed, immediateWorkRemaining);
+    }
+
+    long millisUntilNextRetry() {
+        if (pendingRetryDeadlines.isEmpty()) {
+            return Long.MAX_VALUE;
+        }
+        long now = clock.nowEpochMillis();
+        long dueAt = pendingRetryDeadlines.getFirst().dueAtMillis();
+        if (dueAt == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        return dueAt <= now ? 0L : dueAt - now;
     }
 
     private void tryDeliverJobResult(PendingJobCompletion completion, boolean force) {
         long now = clock.nowEpochMillis();
-        if (!force && now - completion.lastAttemptAtMillis < RESULT_DELIVERY_RETRY_INTERVAL_MILLIS) {
+        if (!force
+                && completion.retryDeadline != null
+                && completion.retryDeadline.dueAtMillis() > now) {
             return;
         }
-        completion.lastAttemptAtMillis = now;
+        clearRetryDeadline(completion);
 
         if (outbox.available()) {
             completion.attempts++;
             tryDeliverJobResultThroughOutbox(completion);
+            scheduleRetryIfPending(completion, now);
             return;
         }
 
@@ -113,6 +149,7 @@ final class JobCompletionService {
                         "success", completion.success,
                         "outcome", outcome
                 ));
+                scheduleRetryIfPending(completion, now);
                 return;
             }
             completion.durableTerminal = true;
@@ -131,6 +168,7 @@ final class JobCompletionService {
                         "reason", "requester_missing"
                 ));
                 abandonIfResultDeliveryExhausted(completion, "requester_missing");
+                scheduleRetryIfPending(completion, now);
                 return;
             }
         } catch (Exception e) {
@@ -141,6 +179,7 @@ final class JobCompletionService {
                     "error", e.getMessage()
             ));
             abandonIfResultDeliveryExhausted(completion, e.getMessage());
+            scheduleRetryIfPending(completion, now);
             return;
         }
 
@@ -346,9 +385,35 @@ final class JobCompletionService {
     }
 
     private void removeCompletion(String jobId) {
+        PendingJobCompletion completion = pendingCompletions.get(jobId);
+        if (completion != null) {
+            clearRetryDeadline(completion);
+        }
         state.removeJob(jobId);
         pendingCompletions.remove(jobId);
         metrics.setActiveJobs(state.activeJobCount());
+    }
+
+    private void scheduleRetryIfPending(PendingJobCompletion completion, long attemptedAtMillis) {
+        if (pendingCompletions.get(completion.job.getJobId()) != completion) {
+            return;
+        }
+        long dueAt = attemptedAtMillis >= Long.MAX_VALUE - RESULT_DELIVERY_RETRY_INTERVAL_MILLIS
+                ? Long.MAX_VALUE
+                : attemptedAtMillis + RESULT_DELIVERY_RETRY_INTERVAL_MILLIS;
+        clearRetryDeadline(completion);
+        completion.retryDeadline = new PendingResultRetry(
+                dueAt,
+                completion.job.getJobId()
+        );
+        pendingRetryDeadlines.add(completion.retryDeadline);
+    }
+
+    private void clearRetryDeadline(PendingJobCompletion completion) {
+        if (completion.retryDeadline != null) {
+            pendingRetryDeadlines.remove(completion.retryDeadline);
+            completion.retryDeadline = null;
+        }
     }
 
     private void logFailureIfPresent(PendingJobCompletion completion) {
@@ -374,10 +439,10 @@ final class JobCompletionService {
         private final JobResultMessage response;
         private final boolean success;
         private final String reason;
-        private long lastAttemptAtMillis;
         private int attempts;
         private boolean durableTerminal;
         private boolean terminalProjectionApplied;
+        private PendingResultRetry retryDeadline;
 
         private PendingJobCompletion(EmbarrassinglyParallelJob<?, ?> job,
                                      JobResultMessage response,
@@ -387,6 +452,15 @@ final class JobCompletionService {
             this.response = response;
             this.success = success;
             this.reason = reason;
+        }
+    }
+
+    private record PendingResultRetry(long dueAtMillis, String jobId)
+            implements Comparable<PendingResultRetry> {
+        @Override
+        public int compareTo(PendingResultRetry other) {
+            int dueOrder = Long.compare(dueAtMillis, other.dueAtMillis);
+            return dueOrder != 0 ? dueOrder : jobId.compareTo(other.jobId);
         }
     }
 }

@@ -162,7 +162,7 @@ For every correctness-relevant runtime transition, the scheduler decides first, 
 
 With SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. The last successful task-result transaction also moves its parent job from `RUNNING` to durable `FINALIZING` after verifying that the complete expected task set and every result snapshot are present. Final aggregation runs deterministically from those committed snapshots; terminal job state, semantic final payload, and one outbound `JOB_RESULT` outbox row then commit together before immediate publish or replay. When persistence/outbox storage is unavailable, the same RabbitMQ output follows the non-outbox durable-first boundary that is applicable to the configured state store, but it cannot claim transactional outbound intent.
 
-The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, requester public keys for signed ownership when present, schema-v5 peer registry metadata for last-known peer state, schema-v6 final result payloads for completed jobs, schema-v7 task-attempt audit rows for assignment and terminal outcomes, schema-v8 task leases, schema-v9 broker outbox rows for coordinator RabbitMQ publication replay, schema-v10 current attempt/assignment IDs plus assignment IDs and lease deadlines in the attempt audit, schema-v11 durable `FINALIZING` intent, and schema-v12 canonical submission request hashes. On startup, resumable `RUNNING` jobs and replayable `FINALIZING` jobs are rebuilt from SQLite, including task status, retry count, assignment generation/identity, leases, and committed result payloads. Expired or incomplete assignments are conditionally released before hydration, fully result-bearing version-10 jobs left `RUNNING` are migrated to `FINALIZING`, pending coordinator outbox rows are replayed, and otherwise non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` where a runtime route exists; identity-bound jobs must also include the matching requester public key and a valid signature. An exact duplicate `JOB_SUBMIT` is an authorized status/result replay request when its owner tuple and canonical request hash match. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`; broker deliveries receive bounded delayed retry when the scheduler mailbox is full and are acknowledged only after scheduler/store classification. Coordinator shutdown closes ingress and cancels consumers before draining admitted envelopes; channel close returns any delivery that was not durably handled and acknowledged to RabbitMQ.
+The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, requester public keys for signed ownership when present, schema-v5 peer registry metadata for last-known peer state, schema-v6 final result payloads for completed jobs, schema-v7 task-attempt audit rows for assignment and terminal outcomes, schema-v8 task leases, schema-v9 broker outbox rows for coordinator RabbitMQ publication replay, schema-v10 current attempt/assignment IDs plus assignment IDs and lease deadlines in the attempt audit, schema-v11 durable `FINALIZING` intent, and schema-v12 canonical submission request hashes. On startup, resumable `RUNNING` jobs and replayable `FINALIZING` jobs are rebuilt from SQLite, including task status, retry count, assignment generation/identity, leases, and committed result payloads. Expired or incomplete assignments are conditionally released before hydration, fully result-bearing version-10 jobs left `RUNNING` are migrated to `FINALIZING`, pending coordinator outbox rows are replayed, and otherwise non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` where a runtime route exists; identity-bound jobs must also include the matching requester public key and a valid signature. An exact duplicate `JOB_SUBMIT` is an authorized status/result replay request when its owner tuple and canonical request hash match. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`. Each scheduler cycle also has separate message, deadline, dispatch, and terminal/outbox budgets, all defaulting to `100`, in that order. Broker deliveries receive bounded delayed retry when the scheduler mailbox is full and are acknowledged only after scheduler/store classification. Coordinator shutdown closes ingress and cancels consumers before draining admitted envelopes; its interruptible idle wait wakes for shutdown, and channel close returns any delivery that was not durably handled and acknowledged to RabbitMQ.
 
 The RabbitMQ module provides broker topology declaration, persistent application-message delivery mode, JSON protocol serialization, publish/subscribe operations, publisher confirms, peer-specific task/result routing, manual acknowledgement, bounded TTL retry queues, automatic final quarantine, dead-letter exchange/queue configuration, DLQ and quarantine inspection/redrive operations, mandatory-return detection for unroutable peer-targeted publishes, and SQLite-backed coordinator outbox replay for outbound task assignments and final job results. Coordinator-side broker deliveries for job submissions and task results are acknowledged after scheduler processing, rather than immediately after broker receipt. RabbitMQ executor roles use a bounded, process-local cache keyed by assignment ID: a duplicate delivery for running work is acknowledged without a second processor invocation, while a completed cached assignment republishes the same task result before acknowledgement. Size/TTL eviction or participant restart permits re-execution, so the cache reduces duplicate work but SQLite assignment-generation fencing remains the correctness authority. RabbitMQ is wired directly into coordinator, command-line participant, and JavaFX entry points. It is the sole supported transport, but it is not production-ready until the gates in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md` are complete.
 
@@ -197,7 +197,7 @@ focused services behind an orchestration-only `SchedulerLoop`.
 - `JobCompletionService`: aggregation, terminal state, final-result delivery/outbox intent, and cleanup
 - `RecoveryService`: installation of reconciled persisted projections
 - `SchedulerWorkloadIndex`: per-job pending deques, runnable-job rotation, exact assignment deadlines, and worker-assignment discovery
-- `SchedulerLoop`: mailbox, timer, dispatch, completion-retry, and metrics orchestration only
+- `SchedulerLoop`: bounded message, deadline, dispatch, terminal-retry, and metrics orchestration only
 
 Normal timeout, lease, dispatch, and participant-loss work is index-driven
 rather than a scan of every task in every active job. The index lifecycle,
@@ -446,6 +446,10 @@ scheduler:
   maxTaskRetries: 20
   inboundQueueCapacity: 1000
   jobResultMaxDeliveryAttempts: 300
+  schedulerMessageBatchSize: 100
+  schedulerDeadlineBatchSize: 100
+  schedulerDispatchBatchSize: 100
+  schedulerOutboxBatchSize: 100
   metricsLogIntervalMs: 10000
   scoring:
     loadWeight: 6.0
@@ -466,6 +470,10 @@ Environment overrides:
 - `TASKFLOW_MAX_TASK_RETRIES`
 - `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`
 - `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`
+- `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`
+- `TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE`
+- `TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE`
+- `TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`
 - `TASKFLOW_METRICS_LOG_INTERVAL_MS`
 - `TASKFLOW_SCORE_LOAD_WEIGHT`
 - `TASKFLOW_SCORE_LATENCY_WEIGHT`
@@ -490,6 +498,10 @@ $env:TASKFLOW_MAX_TASKS_PER_PEER = "5"
 $env:TASKFLOW_MAX_TASK_RETRIES = "8"
 $env:TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY = "2000"
 $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
+$env:TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE = "100"
+$env:TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE = "100"
+$env:TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE = "100"
+$env:TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE = "100"
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 

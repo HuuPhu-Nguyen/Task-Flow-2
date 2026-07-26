@@ -106,7 +106,11 @@ public class RabbitMqTaskCoordinatorServer {
         RabbitMqSchedulerOutput schedulerOutput = new RabbitMqSchedulerOutput(transport);
         RabbitMqOutboxReplayer outboxReplayer = db == null
                 ? null
-                : new RabbitMqOutboxReplayer(db, schedulerOutput);
+                : new RabbitMqOutboxReplayer(
+                        db,
+                        schedulerOutput,
+                        schedulerConfig.schedulerOutboxBatchSize()
+                );
         TaskScheduler schedulerLogic = new TaskScheduler(
                 inboundMailbox,
                 registry,

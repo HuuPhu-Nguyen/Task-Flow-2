@@ -73,8 +73,9 @@ decision.
 - [Backpressure scope](../BACKPRESSURE_SCOPE.md)
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
-- Phase 4 owns event-driven indexes, fair batches, weighted capacity, admission,
-  and persistent-overload behavior.
+- TF-0401/TF-0402 implement event-driven indexes and fair bounded cycle stages.
+  TF-0403 through TF-0406 still own explicit cross-job quota, weighted
+  capacity, admission, and persistent-overload behavior.
 
 ## Related Documents
 

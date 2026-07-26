@@ -29,6 +29,12 @@ public final class RabbitMqOutboxReplayer implements AutoCloseable {
         this(outboxStore, publisher, DEFAULT_BATCH_SIZE, DEFAULT_REPLAY_INTERVAL_MILLIS);
     }
 
+    public RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
+                                  BrokerOutboxPublisher publisher,
+                                  int batchSize) {
+        this(outboxStore, publisher, batchSize, DEFAULT_REPLAY_INTERVAL_MILLIS);
+    }
+
     RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
                            BrokerOutboxPublisher publisher,
                            int batchSize,

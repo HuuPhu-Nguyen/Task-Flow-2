@@ -323,8 +323,25 @@ final class SchedulerWorkloadIndex {
         if (deadlines.isEmpty() || deadlines.getFirst().dueAtMillis() > nowMillis) {
             return null;
         }
+        return removeDue(deadlines.getFirst());
+    }
 
-        ScheduledDeadline due = deadlines.removeFirst();
+    ScheduledDeadline pollNextDue(long nowMillis) {
+        deadlineHeadChecks++;
+        ScheduledDeadline next = nextDeadline();
+        if (next == null || next.dueAtMillis() > nowMillis) {
+            return null;
+        }
+        return removeDue(next);
+    }
+
+    long nextDeadlineAtMillis() {
+        ScheduledDeadline next = nextDeadline();
+        return next == null ? Long.MAX_VALUE : next.dueAtMillis();
+    }
+
+    private ScheduledDeadline removeDue(ScheduledDeadline due) {
+        deadlines(due.kind()).remove(due);
         deadlineEntriesPopped++;
         AssignmentDeadlines pair = deadlinesByAssignment.get(due.assignmentKey());
         if (pair != null) {
@@ -334,6 +351,18 @@ final class SchedulerWorkloadIndex {
             }
         }
         return due;
+    }
+
+    private ScheduledDeadline nextDeadline() {
+        ScheduledDeadline timeout = timeoutDeadlines.isEmpty() ? null : timeoutDeadlines.getFirst();
+        ScheduledDeadline lease = leaseDeadlines.isEmpty() ? null : leaseDeadlines.getFirst();
+        if (timeout == null) {
+            return lease;
+        }
+        if (lease == null) {
+            return timeout;
+        }
+        return timeout.compareTo(lease) <= 0 ? timeout : lease;
     }
 
     void recordDeadlineValidation(ScheduledDeadline deadline, boolean currentAssignment) {

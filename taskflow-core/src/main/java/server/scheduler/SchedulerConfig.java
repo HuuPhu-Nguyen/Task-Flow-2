@@ -18,6 +18,10 @@ public record SchedulerConfig(
         int maxTaskRetries,
         int inboundQueueCapacity,
         int jobResultMaxDeliveryAttempts,
+        int schedulerMessageBatchSize,
+        int schedulerDeadlineBatchSize,
+        int schedulerDispatchBatchSize,
+        int schedulerOutboxBatchSize,
         long metricsLogIntervalMillis,
         double peerScoreLoadWeight,
         double peerScoreLatencyWeight,
@@ -33,6 +37,10 @@ public record SchedulerConfig(
     public static final int DEFAULT_MAX_TASK_RETRIES = 20;
     public static final int DEFAULT_INBOUND_QUEUE_CAPACITY = 1000;
     public static final int DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = 300;
+    public static final int DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE = 100;
+    public static final int DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE = 100;
+    public static final int DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE = 100;
+    public static final int DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE = 100;
     public static final long DEFAULT_METRICS_LOG_INTERVAL_MILLIS = 10_000L;
     public static final double DEFAULT_PEER_SCORE_LOAD_WEIGHT = 6.0;
     public static final double DEFAULT_PEER_SCORE_LATENCY_WEIGHT = 2.0;
@@ -51,6 +59,10 @@ public record SchedulerConfig(
         requirePositive(maxTaskRetries, "maxTaskRetries");
         requirePositive(inboundQueueCapacity, "inboundQueueCapacity");
         requirePositive(jobResultMaxDeliveryAttempts, "jobResultMaxDeliveryAttempts");
+        requirePositive(schedulerMessageBatchSize, "schedulerMessageBatchSize");
+        requirePositive(schedulerDeadlineBatchSize, "schedulerDeadlineBatchSize");
+        requirePositive(schedulerDispatchBatchSize, "schedulerDispatchBatchSize");
+        requirePositive(schedulerOutboxBatchSize, "schedulerOutboxBatchSize");
         requirePositive(metricsLogIntervalMillis, "metricsLogIntervalMillis");
         requireNonNegative(peerScoreLoadWeight, "peerScoreLoadWeight");
         requireNonNegative(peerScoreLatencyWeight, "peerScoreLatencyWeight");
@@ -63,6 +75,48 @@ public record SchedulerConfig(
         }
     }
 
+    /**
+     * Compatibility constructor retained for callers compiled against the
+     * pre-TF-0402 scheduler configuration surface.
+     */
+    public SchedulerConfig(
+            long taskTimeoutMillis,
+            long taskLeaseMillis,
+            int maxTasksPerPeer,
+            int maxTaskRetries,
+            int inboundQueueCapacity,
+            int jobResultMaxDeliveryAttempts,
+            long metricsLogIntervalMillis,
+            double peerScoreLoadWeight,
+            double peerScoreLatencyWeight,
+            double peerScoreDurationWeight,
+            double peerScoreFailureWeight,
+            double peerScoreLatencyBaselineMillis,
+            double peerScoreDurationBaselineMillis,
+            double peerScoreEwmaAlpha
+    ) {
+        this(
+                taskTimeoutMillis,
+                taskLeaseMillis,
+                maxTasksPerPeer,
+                maxTaskRetries,
+                inboundQueueCapacity,
+                jobResultMaxDeliveryAttempts,
+                DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
+                DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
+                DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
+                DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
+                metricsLogIntervalMillis,
+                peerScoreLoadWeight,
+                peerScoreLatencyWeight,
+                peerScoreDurationWeight,
+                peerScoreFailureWeight,
+                peerScoreLatencyBaselineMillis,
+                peerScoreDurationBaselineMillis,
+                peerScoreEwmaAlpha
+        );
+    }
+
     public static SchedulerConfig defaults() {
         return new SchedulerConfig(
                 DEFAULT_TASK_TIMEOUT_MILLIS,
@@ -71,6 +125,10 @@ public record SchedulerConfig(
                 DEFAULT_MAX_TASK_RETRIES,
                 DEFAULT_INBOUND_QUEUE_CAPACITY,
                 DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS,
+                DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
+                DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
+                DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
+                DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
                 DEFAULT_METRICS_LOG_INTERVAL_MILLIS,
                 DEFAULT_PEER_SCORE_LOAD_WEIGHT,
                 DEFAULT_PEER_SCORE_LATENCY_WEIGHT,
@@ -125,6 +183,18 @@ public record SchedulerConfig(
                         defaults.inboundQueueCapacity()),
                 intValue(scheduler, env, "jobResultMaxDeliveryAttempts", "TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS",
                         defaults.jobResultMaxDeliveryAttempts()),
+                intValue(scheduler, env, "schedulerMessageBatchSize",
+                        "TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE",
+                        defaults.schedulerMessageBatchSize()),
+                intValue(scheduler, env, "schedulerDeadlineBatchSize",
+                        "TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE",
+                        defaults.schedulerDeadlineBatchSize()),
+                intValue(scheduler, env, "schedulerDispatchBatchSize",
+                        "TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE",
+                        defaults.schedulerDispatchBatchSize()),
+                intValue(scheduler, env, "schedulerOutboxBatchSize",
+                        "TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE",
+                        defaults.schedulerOutboxBatchSize()),
                 longValue(scheduler, env, "metricsLogIntervalMs", "TASKFLOW_METRICS_LOG_INTERVAL_MS",
                         defaults.metricsLogIntervalMillis()),
                 doubleValue(scoring, env, "loadWeight", "TASKFLOW_SCORE_LOAD_WEIGHT",

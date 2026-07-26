@@ -183,22 +183,15 @@ class SchedulerArchitectureTest {
         assertTrue(assignment.contains("getAvailablePeers(taskType"));
 
         String leases = read(schedulerRoot, "LeaseService.java");
-        String timeoutStage = between(
+        String deadlineStage = between(
                 leases,
-                "void checkTimeouts()",
-                "void checkLeaseExpirations()"
+                "SchedulerLoop.StageResult processDueDeadlines",
+                "long millisUntilNextDeadline"
         );
-        String leaseStage = between(
-                leases,
-                "void checkLeaseExpirations()",
-                "LeaseExpiryResult expireTaskLeaseIfNeeded"
-        );
-        for (String normalStage : List.of(timeoutStage, leaseStage)) {
-            assertFalse(normalStage.contains("activeJobs()"));
-            assertFalse(normalStage.contains("getTasks().values()"));
-        }
-        assertTrue(timeoutStage.contains("pollDueTimeout("));
-        assertTrue(leaseStage.contains("pollDueLeaseExpiry("));
+        assertFalse(deadlineStage.contains("activeJobs()"));
+        assertFalse(deadlineStage.contains("getTasks().values()"));
+        assertTrue(deadlineStage.contains("pollNextDueDeadline("));
+        assertTrue(deadlineStage.contains("processed < limit"));
 
         String peerUnavailableStage = between(
                 leases,

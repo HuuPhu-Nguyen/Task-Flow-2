@@ -183,33 +183,47 @@ public class TaskScheduler implements Runnable {
             @Override
             public void processEnvelope(MessageEnvelope envelope) {
                 messages.processEnvelope(envelope);
+                assignments.signalSchedulingStateMayHaveChanged();
             }
 
             @Override
-            public void checkTimeouts() {
-                leases.checkTimeouts();
+            public SchedulerLoop.StageResult processDueDeadlines(int limit) {
+                SchedulerLoop.StageResult result = leases.processDueDeadlines(limit);
+                if (result.processed() > 0) {
+                    assignments.signalSchedulingStateMayHaveChanged();
+                }
+                return result;
             }
 
             @Override
-            public void checkLeaseExpirations() {
-                leases.checkLeaseExpirations();
+            public SchedulerLoop.StageResult dispatchPendingTasks(int limit) {
+                return assignments.dispatchPendingTasks(limit);
             }
 
             @Override
-            public void dispatchPendingTasks() {
-                assignments.dispatchPendingTasks();
-            }
-
-            @Override
-            public void retryPendingJobResults() {
-                jobCompletions.retryPendingJobResults();
+            public SchedulerLoop.StageResult retryPendingOutbound(int limit) {
+                return jobCompletions.retryPendingJobResults(limit);
             }
 
             @Override
             public void updateMetrics() {
                 metricUpdates.updateAndMaybeLog();
             }
-        });
+
+            @Override
+            public long millisUntilNextScheduledWork() {
+                return Math.min(
+                        leases.millisUntilNextDeadline(),
+                        Math.min(
+                                assignments.millisUntilNextDispatchRecheck(),
+                                Math.min(
+                                        jobCompletions.millisUntilNextRetry(),
+                                        metricUpdates.millisUntilNextUpdate()
+                                )
+                        )
+                );
+            }
+        }, effectiveConfig);
     }
 
     private static String newLeaseOwnerId() {

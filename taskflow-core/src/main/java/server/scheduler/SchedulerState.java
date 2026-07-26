@@ -172,6 +172,24 @@ final class SchedulerState {
         return pollDueDeadline(SchedulerWorkloadIndex.DeadlineKind.LEASE_EXPIRY, nowMillis);
     }
 
+    DeadlinePoll pollNextDueDeadline(long nowMillis) {
+        SchedulerWorkloadIndex.ScheduledDeadline deadline = workloadIndex.pollNextDue(nowMillis);
+        if (deadline == null) {
+            return DeadlinePoll.none();
+        }
+        EmbarrassinglyParallelJob<?, ?> job = activeJobs.get(deadline.jobId());
+        TaskUnit<?> task = job == null ? null : job.getTasks().get(deadline.taskId());
+        boolean currentAssignment = task != null && matches(task, deadline);
+        workloadIndex.recordDeadlineValidation(deadline, currentAssignment);
+        return currentAssignment
+                ? DeadlinePoll.consumed(new DeadlineTarget(job, task, deadline))
+                : DeadlinePoll.consumed(null);
+    }
+
+    long nextDeadlineAtMillis() {
+        return workloadIndex.nextDeadlineAtMillis();
+    }
+
     void rescheduleCurrentDeadline(DeadlineTarget target, long nextDueAtMillis) {
         if (target != null && matches(target.task(), target.deadline())) {
             workloadIndex.reschedule(target.deadline(), nextDueAtMillis);
@@ -262,6 +280,16 @@ final class SchedulerState {
             TaskUnit<?> task,
             SchedulerWorkloadIndex.ScheduledDeadline deadline
     ) {
+    }
+
+    record DeadlinePoll(boolean consumed, DeadlineTarget target) {
+        static DeadlinePoll none() {
+            return new DeadlinePoll(false, null);
+        }
+
+        static DeadlinePoll consumed(DeadlineTarget target) {
+            return new DeadlinePoll(true, target);
+        }
     }
 
     record AssignmentTarget(

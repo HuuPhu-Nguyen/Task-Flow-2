@@ -138,7 +138,7 @@ when durable state and memory disagree.
 
 | Boundary | Runtime owner |
 |---|---|
-| Mailbox polling and cycle order | `SchedulerLoop`; it delegates message, timeout, lease, dispatch, completion-retry, and metric stages through an in-memory-testable `Work` seam. |
+| Mailbox polling and cycle order | `SchedulerLoop`; it delegates bounded message, combined deadline, dispatch, terminal-retry, and metric stages through an in-memory-testable `Work` seam, then blocks until the next scheduler-owned due time when no work remains immediate. |
 | Work discovery | `SchedulerWorkloadIndex` owns post-commit pending/runnable/deadline/worker-assignment projections; every popped deadline is revalidated against the exact current assignment before a transition decision. |
 | J0/T0 submission and broker disposition | `SchedulerMessageService` validates/routes envelopes and adds an active projection only after startup persistence succeeds. |
 | T1 assignment | `AssignmentService` owns placement, assignment preparation, transactional assignment/outbox creation, non-outbox dispatch, and projection installation. |
@@ -524,8 +524,8 @@ different transition IDs.
 | [`ResultCommitService.handleSuccessfulResult(...)`](../taskflow-core/src/main/java/server/scheduler/ResultCommitService.java) committed branch | T2 |
 | `ResultCommitService.handleFailedResult(...)` retry branch | T3 |
 | `ResultCommitService.handleFailedResult(...)` terminal branch | T4a |
-| [`LeaseService.checkTimeouts()`](../taskflow-core/src/main/java/server/scheduler/LeaseService.java) retry branch | T3 |
-| `LeaseService.checkTimeouts()` terminal branch | T4a |
+| [`LeaseService.processDueDeadlines(...)`](../taskflow-core/src/main/java/server/scheduler/LeaseService.java) timeout retry branch | T3 |
+| `LeaseService.processDueDeadlines(...)` timeout terminal branch | T4a |
 | `LeaseService.handlePeerUnavailable(...)` retry branch | T3 |
 | `LeaseService.handlePeerUnavailable(...)` terminal branch | T4a |
 | `LeaseService.expireTaskLeaseIfNeeded(...)` retry branch | T3 |
@@ -668,8 +668,9 @@ never one ambiguous edge.
   [`DatabaseManagerTest#failedTaskInsertRollsBackSubmissionHashAndJobTogether`](../taskflow-persistence-sqlite/src/test/java/server/db/DatabaseManagerTest.java)
   cover typed replay/conflicts, concurrent convergence, restart stability, and
   atomic rollback at J0/T0.
-- [`SchedulerLoopTest#oneCycleDelegatesEnvelopeAndMaintenanceInStableOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
-  proves the loop using an in-memory mailbox and fake work boundary, while
+- [`SchedulerLoopTest#oneCycleAppliesExactStageLimitsInRequiredOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
+  proves exact cycle order and stage budgets using an in-memory mailbox and fake
+  work boundary, while
   [`SchedulerArchitectureTest#schedulerFacadeAndLoopCannotOwnTransitionEffects`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
   enforces the dependency and responsibility split and
   [`SchedulerArchitectureTest#correctnessEffectsCommitBeforeProjectionOrDelivery`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)

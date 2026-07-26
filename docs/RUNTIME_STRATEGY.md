@@ -32,6 +32,10 @@ All supported runtime delivery behavior is defined against RabbitMQ:
   mailbox admission and scheduler/store classification; connection loss before
   settlement returns broker ownership, and a post-commit redelivery is a typed
   harmless duplicate;
+- admitted scheduler work runs in configurable message, combined-deadline,
+  dispatch, and terminal/outbox batches. Message/deadline ordering prevents
+  starvation in either direction, while the independent durable outbox
+  replayer applies the configured outbound load bound;
 - scheduler-mailbox saturation and explicitly transient handler/storage
   failures use `RETRY_TRANSIENT` under the documented bounded TTL schedule;
 - deterministic processing failures use the same bounded schedule and enter

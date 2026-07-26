@@ -1,4 +1,4 @@
-# Scheduler Workload Indexes
+# Bounded Event-Driven Scheduler
 
 ## Authority and ownership
 
@@ -29,6 +29,55 @@ and the conditional store transition still decide whether an event may act.
 | Worker assignments | Worker ID to exact assignment keys | At most one entry per live indexed assignment |
 | Worker capacity | Task type to capable and currently available live worker IDs | One capable membership and at most one available membership per advertised worker/task-type pair |
 | Inbound mailbox | Bounded blocking queue | `inboundQueueCapacity`, default `1000` |
+| Terminal retry deadlines | Priority-ordered due times keyed by job ID | At most one entry per pending terminal delivery |
+
+## Fair bounded cycle
+
+`SchedulerLoop` executes this order on every cycle:
+
+1. process at most `schedulerMessageBatchSize` mailbox envelopes;
+2. pop at most `schedulerDeadlineBatchSize` combined timeout/lease entries;
+3. attempt at most `schedulerDispatchBatchSize` placements or no-capacity probes;
+4. retry at most `schedulerOutboxBatchSize` due terminal deliveries;
+5. refresh metrics.
+
+All four defaults are `100`. The YAML keys use the names above. Environment
+overrides are `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`,
+`TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE`,
+`TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE`, and
+`TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`. Values must be positive. The legacy
+14-argument `SchedulerConfig` constructor remains a compatibility overload and
+supplies these defaults.
+
+The work units deliberately count unsuccessful discovery:
+
+- one admitted envelope is one message unit;
+- one popped timeout or lease entry is one deadline unit, including an entry
+  rejected as stale before it reaches a transition;
+- one task placement attempt or one runnable-job probe with no compatible
+  capacity is one dispatch unit;
+- one due pending terminal-result delivery is one outbound unit.
+
+This prevents invalid, stale, unavailable-capacity, or transient-failure work
+from bypassing a limit merely because it did not produce a successful
+transition. Message work precedes deadlines in every cycle, so a due-deadline
+backlog cannot block a queued task result. Deadlines still run after every
+bounded message batch, so continuous mailbox traffic cannot block lease expiry.
+
+The durable SQLite broker-outbox replayer remains an independent coordinator
+component rather than moving onto the scheduler thread. It uses
+`schedulerOutboxBatchSize` as its database load bound. The scheduler's outbound
+stage owns only due in-memory terminal delivery/persistence attempts; RabbitMQ
+terminal intent that has committed to SQLite is replayed by the independent
+replayer.
+
+When any stage reports immediately runnable work after exhausting its budget,
+the next cycle starts without blocking. Otherwise the loop waits on the mailbox
+until the earliest assignment deadline, terminal retry, no-capacity recheck, or
+metrics deadline. A full no-capacity round schedules one 500 ms recheck so
+capacity registered outside the mailbox is eventually observed without a
+zero-delay dispatch loop. Shutdown interrupts this idle wait, then drains only
+envelopes already admitted through the bounded ingress gate.
 
 Insertion-ordered sets provide FIFO/deque ordering plus keyed constant-time removal,
 so deleting a task or job does not search a queue. Deadline sets are paired with
@@ -83,12 +132,12 @@ owned by one unavailable worker.
 | Handle one worker loss | `O(Aw log A)`; other jobs and assignments are not visited |
 | Hydrate one job at admission/recovery | `O(Tjob log Tjob)` deterministic pending ordering plus deadline insertion, then indexed steady state |
 
-The current TF-0401 loop may process every deadline already due or every
-assignment that fits currently available capacity in one stage. TF-0402 owns
-configurable batch sizes, fair mailbox/deadline ordering, and blocking until
-the next deadline. TF-0403 owns the final configurable per-job assignment quota;
-the runnable deque introduced here provides its rotation primitive. Retry tasks
-retain priority within a job while remaining FIFO relative to other retries.
+TF-0402 bounds all four cycle stages and prevents one busy stage from
+permanently excluding the next. TF-0403 still owns the final configurable
+per-job assignment quota and the policy for removing capacity-blocked jobs from
+the runnable rotation; the current persistent sweep plus timed recheck is only
+the non-spinning bounded fallback. Retry tasks retain priority within a job
+while remaining FIFO relative to other retries.
 
 ## Observability and evidence
 
@@ -138,8 +187,8 @@ RAM, 64-bit Windows 11 Pro 10.0.26200, and Oracle HotSpot Java 25.0.2. The
 operation-count assertion is the portable result; absolute time will vary by
 machine and JVM. The changed design moves work into `O(log A)` assignment
 deadline insertion/removal and still sorts the compatible-worker snapshot.
-Due-work batch bounds, absolute active-work bounds, and the final per-job
-dispatch quota remain assigned to TF-0402, TF-0405, and TF-0403 respectively.
+Absolute active-work bounds and the final per-job dispatch quota remain
+assigned to TF-0405 and TF-0403 respectively.
 
 Additional boundary evidence:
 
@@ -154,3 +203,21 @@ Additional boundary evidence:
 - [`SchedulerArchitectureTest#normalSchedulerMaintenanceUsesIndexesInsteadOfFullTaskOrPeerScans`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
   prevents the normal timeout, lease, dispatch, and participant-loss paths from
   regressing to active-job/task/peer scans.
+- [`SchedulerLoopTest#oneCycleAppliesExactStageLimitsInRequiredOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java),
+  [`SchedulerLoopTest#continuousMailboxBacklogStillProcessesDeadlinesEveryCycle`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java), and
+  [`SchedulerLoopTest#continuousDueDeadlineBacklogCannotStarveQueuedTaskResult`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
+  prove exact stage limits, ordering, and both starvation boundaries using
+  deterministic in-memory queues.
+- [`SchedulerWorkloadIndexTest#staleDeadlinePopsRemainVisibleAsIndividualBatchWork`](../taskflow-core/src/test/java/server/scheduler/SchedulerWorkloadIndexTest.java)
+  proves stale timer entries consume the shared deadline budget.
+- [`LeaseServiceBatchTest#combinedTimeoutAndLeaseWorkStopsAtDeadlineBudget`](../taskflow-core/src/test/java/server/scheduler/LeaseServiceBatchTest.java)
+  proves timeout and lease entries share one enforced service-level budget.
+- [`AssignmentServiceBatchTest#noCapacitySweepPersistsAcrossBatchesAndDoesNotSpin`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
+  proves a capacity-blocked rotation completes across batches and then waits
+  for a signal or timed recheck.
+- [`JobCompletionServiceBatchTest#dueTerminalDeliveryRetriesUseBoundedBatchAndExactNextWake`](../taskflow-core/src/test/java/server/scheduler/JobCompletionServiceBatchTest.java)
+  proves due terminal retries are batch-bounded and publish an exact next wake
+  time.
+- [`RabbitMqOutboxReplayerTest#replayLoadsAtMostConfiguredSchedulerOutboxBatch`](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqOutboxReplayerTest.java)
+  proves the independent durable replayer loads no more than the configured
+  outbound batch.

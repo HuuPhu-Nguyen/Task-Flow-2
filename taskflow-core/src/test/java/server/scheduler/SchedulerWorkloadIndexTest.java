@@ -15,6 +15,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchedulerWorkloadIndexTest {
 
@@ -66,6 +67,36 @@ class SchedulerWorkloadIndexTest {
         assertEquals(1L, snapshot.staleDeadlineEntriesRejected());
         assertEquals(0, snapshot.deadlineEntries());
         assertEquals(0, snapshot.liveAssignments());
+    }
+
+    @Test
+    void staleDeadlinePopsRemainVisibleAsIndividualBatchWork() {
+        SchedulerConfig config = config(100L, 1_000L);
+        FixedClock clock = new FixedClock(1_000L);
+        SchedulerState state = new SchedulerState(config);
+        IndexedJob job = new IndexedJob("job-stale-batch");
+        for (int index = 0; index < 3; index++) {
+            TaskUnit<String> task = job.addTask("task-stale-" + index, clock);
+            task.markAssigned(identity(task.getTaskId(), 1, 1_000L), 0L, "owner");
+        }
+        state.addActiveJob(job, "", "");
+        for (TaskUnit<?> task : job.getTasks().values()) {
+            task.resetToPending();
+            task.markAssigned(identity(task.getTaskId(), 2, 2_000L), 1L, "owner");
+        }
+
+        SchedulerState.DeadlinePoll first = state.pollNextDueDeadline(1_000L);
+        SchedulerState.DeadlinePoll second = state.pollNextDueDeadline(1_000L);
+
+        assertTrue(first.consumed());
+        assertNull(first.target());
+        assertTrue(second.consumed());
+        assertNull(second.target());
+        SchedulerWorkloadIndex.Snapshot snapshot = state.workloadSnapshot();
+        assertEquals(2L, snapshot.deadlineEntriesPopped());
+        assertEquals(2L, snapshot.staleDeadlineEntriesRejected());
+        assertEquals(2, snapshot.deadlineEntries());
+        assertEquals(1, snapshot.liveAssignments());
     }
 
     @Test

@@ -68,4 +68,16 @@ final class SchedulerMetricsService {
                 "result_storage_failure_count", snapshot.resultStorageFailureCount()
         ));
     }
+
+    long millisUntilNextUpdate() {
+        long now = clock.nowEpochMillis();
+        long interval = config.metricsLogIntervalMillis();
+        long nextUpdate = lastMetricsLogAtMillis >= Long.MAX_VALUE - interval
+                ? Long.MAX_VALUE
+                : lastMetricsLogAtMillis + interval;
+        if (nextUpdate == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        return nextUpdate <= now ? 0L : nextUpdate - now;
+    }
 }

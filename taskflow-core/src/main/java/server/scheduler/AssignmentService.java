@@ -19,6 +19,8 @@ import java.util.List;
 
 /** Owns T1 placement, assignment persistence, projection, and outbound intent. */
 final class AssignmentService {
+    private static final long NO_CAPACITY_RECHECK_MILLIS = 500L;
+
     private final SchedulerState state;
     private final PeerRegistry registry;
     private final SchedulerPersistence persistence;
@@ -32,6 +34,8 @@ final class AssignmentService {
     private final TaskTransitionDecisions transitions;
     private final JobCompletionService jobCompletions;
     private final SchedulerEventLog events;
+    private int consecutiveNoProgressProbes;
+    private long nextCapacityRecheckAtMillis = Long.MAX_VALUE;
 
     AssignmentService(SchedulerState state,
                       PeerRegistry registry,
@@ -61,60 +65,126 @@ final class AssignmentService {
         this.events = events;
     }
 
-    void dispatchPendingTasks() {
-        int jobsToVisit = state.runnableJobCount();
-        for (int jobIndex = 0; jobIndex < jobsToVisit; jobIndex++) {
+    SchedulerLoop.StageResult dispatchPendingTasks(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive");
+        }
+
+        int attempts = 0;
+        while (attempts < limit) {
+            int runnableJobs = state.runnableJobCount();
+            if (runnableJobs == 0) {
+                consecutiveNoProgressProbes = 0;
+                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+                break;
+            }
+            if (consecutiveNoProgressProbes >= runnableJobs) {
+                if (clock.nowEpochMillis() < nextCapacityRecheckAtMillis) {
+                    break;
+                }
+                consecutiveNoProgressProbes = 0;
+                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+            }
+
             EmbarrassinglyParallelJob<?, ?> job = state.pollRunnableJob();
             if (job == null) {
-                return;
+                consecutiveNoProgressProbes = 0;
+                break;
             }
             if (!state.hasActiveJob(job.getJobId()) || jobCompletions.isPending(job.getJobId())) {
+                attempts++;
                 continue;
             }
             Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(job.getTaskType()));
             if (candidates.isEmpty()) {
                 state.requeueRunnableJob(job.getJobId());
+                attempts++;
+                consecutiveNoProgressProbes++;
+                scheduleCapacityRecheckIfSweepComplete();
                 continue;
             }
 
-            int tasksToVisit = state.pendingTaskCount(job.getJobId());
-            for (int taskIndex = 0; taskIndex < tasksToVisit; taskIndex++) {
-                while (!candidates.isEmpty()
-                        && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
-                    candidates.removeFirst();
-                }
-                PeerInfo bestPeer = candidates.peekFirst();
-                if (bestPeer == null) {
-                    break;
-                }
-                TaskUnit<?> task = state.pollPendingTask(job.getJobId());
-                if (task == null) {
-                    break;
-                }
-                assign(job, task, bestPeer);
-                if (task.getStatus() == TaskUnit.TaskStatus.PENDING
-                        && state.hasActiveJob(job.getJobId())
-                        && !jobCompletions.isPending(job.getJobId())) {
-                    state.indexPendingTask(task, true);
-                }
-                if (!state.hasActiveJob(job.getJobId()) || jobCompletions.isPending(job.getJobId())) {
-                    break;
-                }
+            while (!candidates.isEmpty()
+                    && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
+                candidates.removeFirst();
+            }
+            PeerInfo bestPeer = candidates.peekFirst();
+            attempts++;
+            if (bestPeer == null) {
+                state.requeueRunnableJob(job.getJobId());
+                consecutiveNoProgressProbes++;
+                scheduleCapacityRecheckIfSweepComplete();
+                continue;
+            }
+            TaskUnit<?> task = state.pollPendingTask(job.getJobId());
+            if (task == null) {
+                consecutiveNoProgressProbes++;
+                scheduleCapacityRecheckIfSweepComplete();
+                continue;
+            }
+
+            boolean progress = assign(job, task, bestPeer);
+            if (task.getStatus() == TaskUnit.TaskStatus.PENDING
+                    && state.hasActiveJob(job.getJobId())
+                    && !jobCompletions.isPending(job.getJobId())) {
+                state.indexPendingTask(task, true);
             }
             if (state.hasActiveJob(job.getJobId()) && !jobCompletions.isPending(job.getJobId())) {
                 state.requeueRunnableJob(job.getJobId());
             }
+            consecutiveNoProgressProbes = progress ? 0 : consecutiveNoProgressProbes + 1;
+            if (progress) {
+                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+            } else {
+                scheduleCapacityRecheckIfSweepComplete();
+            }
         }
+
+        int runnableJobs = state.runnableJobCount();
+        boolean immediateWorkRemaining = runnableJobs > 0
+                && consecutiveNoProgressProbes < runnableJobs
+                && attempts >= limit;
+        return new SchedulerLoop.StageResult(attempts, immediateWorkRemaining);
     }
 
-    private void assign(EmbarrassinglyParallelJob<?, ?> job, TaskUnit<?> task, PeerInfo peer) {
+    void signalSchedulingStateMayHaveChanged() {
+        consecutiveNoProgressProbes = 0;
+        nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+    }
+
+    long millisUntilNextDispatchRecheck() {
+        if (nextCapacityRecheckAtMillis == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        long now = clock.nowEpochMillis();
+        return nextCapacityRecheckAtMillis <= now ? 0L : nextCapacityRecheckAtMillis - now;
+    }
+
+    private void scheduleCapacityRecheckIfSweepComplete() {
+        int runnableJobs = state.runnableJobCount();
+        if (runnableJobs == 0 || consecutiveNoProgressProbes < runnableJobs) {
+            return;
+        }
+        long now = clock.nowEpochMillis();
+        nextCapacityRecheckAtMillis = now >= Long.MAX_VALUE - NO_CAPACITY_RECHECK_MILLIS
+                ? Long.MAX_VALUE
+                : now + NO_CAPACITY_RECHECK_MILLIS;
+    }
+
+    private boolean assign(EmbarrassinglyParallelJob<?, ?> job, TaskUnit<?> task, PeerInfo peer) {
         long pendingSince = task.getPendingSinceMillis();
         long startedAt = clock.nowEpochMillis();
         long leaseExpiresAt = leaseExpiresAt(startedAt);
         long dispatchLatencyMs = pendingSince > 0L ? Math.max(0L, startedAt - pendingSince) : 0L;
         if (outbox.available()) {
-            assignWithBrokerOutbox(job, task, peer, startedAt, leaseExpiresAt, dispatchLatencyMs);
-            return;
+            return assignWithBrokerOutbox(
+                    job,
+                    task,
+                    peer,
+                    startedAt,
+                    leaseExpiresAt,
+                    dispatchLatencyMs
+            );
         }
 
         AssignmentIdentity assignmentIdentity;
@@ -134,7 +204,7 @@ final class AssignmentService {
                     startedAt
             );
             if (!decision.accepted()) {
-                return;
+                return false;
             }
             message = job.createTaskAssignMessage(task).withAssignmentIdentity(
                     assignmentIdentity.attemptNumber(),
@@ -144,7 +214,7 @@ final class AssignmentService {
             MessageValidator.validate(message);
         } catch (RuntimeException e) {
             jobCompletions.failJob(job, "Task assignment could not be prepared: " + e.getMessage());
-            return;
+            return false;
         }
 
         JobStateStore store = persistence.store();
@@ -167,7 +237,7 @@ final class AssignmentService {
                 if (durableStorageFailed(durableOutcome)) {
                     jobCompletions.failJob(job, persistence.failureReason("markTaskAssigned"));
                 }
-                return;
+                return false;
             }
         }
 
@@ -176,7 +246,7 @@ final class AssignmentService {
                     job,
                     "Committed task assignment could not be installed in memory."
             );
-            return;
+            return false;
         }
 
         state.indexAssignedTask(task, assignmentIdentity);
@@ -218,7 +288,7 @@ final class AssignmentService {
                             persistence.failureReason("markTaskRetried")
                     );
                 }
-                return;
+                return false;
             }
             task.resetToPending();
             state.indexClosedAssignment(task, assignmentIdentity);
@@ -229,15 +299,17 @@ final class AssignmentService {
                     "peer_id", peer.getNodeId(),
                     "error", e.getMessage()
             ));
+            return false;
         }
+        return true;
     }
 
-    private void assignWithBrokerOutbox(EmbarrassinglyParallelJob<?, ?> job,
-                                        TaskUnit<?> task,
-                                        PeerInfo peer,
-                                        long startedAt,
-                                        long leaseExpiresAt,
-                                        long dispatchLatencyMs) {
+    private boolean assignWithBrokerOutbox(EmbarrassinglyParallelJob<?, ?> job,
+                                           TaskUnit<?> task,
+                                           PeerInfo peer,
+                                           long startedAt,
+                                           long leaseExpiresAt,
+                                           long dispatchLatencyMs) {
         BrokerOutboxStore outboxStore = outbox.store();
         BrokerOutboxPublisher outboxPublisher = outbox.publisher();
         if (outboxStore == null || outboxPublisher == null) {
@@ -253,7 +325,7 @@ final class AssignmentService {
                     job,
                     "Broker outbox task assignment could not be prepared: " + e.getMessage()
             );
-            return;
+            return false;
         }
 
         BrokerOutboxStore.TaskAssignmentCommit assignmentCommit =
@@ -285,7 +357,7 @@ final class AssignmentService {
                         persistence.failureReason("createTaskAssignmentAndEnqueueBrokerOutbox")
                 );
             }
-            return;
+            return false;
         }
 
         BrokerOutboxStore.CommittedTaskAssignment committed = assignmentCommit.assignment();
@@ -305,7 +377,7 @@ final class AssignmentService {
                     job,
                     "Committed broker assignment could not be installed in memory: " + e.getMessage()
             );
-            return;
+            return false;
         }
 
         state.indexAssignedTask(task, committed.identity());
@@ -323,6 +395,7 @@ final class AssignmentService {
                 "outbox_id", outboxRecord.outboxId(),
                 "outbox_published", published
         ));
+        return true;
     }
 
     private long leaseExpiresAt(long startedAt) {

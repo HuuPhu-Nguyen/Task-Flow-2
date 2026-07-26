@@ -24,6 +24,10 @@ class SchedulerConfigTest {
         assertEquals(20, config.maxTaskRetries());
         assertEquals(1000, config.inboundQueueCapacity());
         assertEquals(300, config.jobResultMaxDeliveryAttempts());
+        assertEquals(100, config.schedulerMessageBatchSize());
+        assertEquals(100, config.schedulerDeadlineBatchSize());
+        assertEquals(100, config.schedulerDispatchBatchSize());
+        assertEquals(100, config.schedulerOutboxBatchSize());
         assertEquals(10_000L, config.metricsLogIntervalMillis());
         assertEquals(6.0, config.peerScoreLoadWeight());
         assertEquals(2.0, config.peerScoreLatencyWeight());
@@ -43,6 +47,10 @@ class SchedulerConfigTest {
                 Map.entry("TASKFLOW_MAX_TASK_RETRIES", "5"),
                 Map.entry("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "77"),
                 Map.entry("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "11"),
+                Map.entry("TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE", "13"),
+                Map.entry("TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE", "17"),
+                Map.entry("TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE", "19"),
+                Map.entry("TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE", "23"),
                 Map.entry("TASKFLOW_METRICS_LOG_INTERVAL_MS", "3000"),
                 Map.entry("TASKFLOW_SCORE_LOAD_WEIGHT", "4.5"),
                 Map.entry("TASKFLOW_SCORE_LATENCY_WEIGHT", "1.25"),
@@ -59,6 +67,10 @@ class SchedulerConfigTest {
         assertEquals(5, config.maxTaskRetries());
         assertEquals(77, config.inboundQueueCapacity());
         assertEquals(11, config.jobResultMaxDeliveryAttempts());
+        assertEquals(13, config.schedulerMessageBatchSize());
+        assertEquals(17, config.schedulerDeadlineBatchSize());
+        assertEquals(19, config.schedulerDispatchBatchSize());
+        assertEquals(23, config.schedulerOutboxBatchSize());
         assertEquals(3_000L, config.metricsLogIntervalMillis());
         assertEquals(4.5, config.peerScoreLoadWeight());
         assertEquals(1.25, config.peerScoreLatencyWeight());
@@ -80,6 +92,14 @@ class SchedulerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "0")));
         assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE", "0")));
+        assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCORE_FAILURE_WEIGHT", "-1")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCORE_EWMA_ALPHA", "1.5")));
@@ -96,6 +116,10 @@ class SchedulerConfigTest {
                   maxTaskRetries: 6
                   inboundQueueCapacity: 123
                   jobResultMaxDeliveryAttempts: 12
+                  schedulerMessageBatchSize: 14
+                  schedulerDeadlineBatchSize: 16
+                  schedulerDispatchBatchSize: 18
+                  schedulerOutboxBatchSize: 20
                   metricsLogIntervalMs: 2500
                   scoring:
                     loadWeight: 3.5
@@ -115,6 +139,10 @@ class SchedulerConfigTest {
         assertEquals(6, config.maxTaskRetries());
         assertEquals(123, config.inboundQueueCapacity());
         assertEquals(12, config.jobResultMaxDeliveryAttempts());
+        assertEquals(14, config.schedulerMessageBatchSize());
+        assertEquals(16, config.schedulerDeadlineBatchSize());
+        assertEquals(18, config.schedulerDispatchBatchSize());
+        assertEquals(20, config.schedulerOutboxBatchSize());
         assertEquals(2_500L, config.metricsLogIntervalMillis());
         assertEquals(3.5, config.peerScoreLoadWeight());
         assertEquals(1.5, config.peerScoreLatencyWeight());
@@ -151,5 +179,36 @@ class SchedulerConfigTest {
 
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromRuntime(Map.of(SchedulerConfig.CONFIG_PATH_ENV, missing.toString())));
+    }
+
+    @Test
+    void legacyConstructorUsesBatchDefaults() {
+        SchedulerConfig defaults = SchedulerConfig.defaults();
+
+        SchedulerConfig config = new SchedulerConfig(
+                defaults.taskTimeoutMillis(),
+                defaults.taskLeaseMillis(),
+                defaults.maxTasksPerPeer(),
+                defaults.maxTaskRetries(),
+                defaults.inboundQueueCapacity(),
+                defaults.jobResultMaxDeliveryAttempts(),
+                defaults.metricsLogIntervalMillis(),
+                defaults.peerScoreLoadWeight(),
+                defaults.peerScoreLatencyWeight(),
+                defaults.peerScoreDurationWeight(),
+                defaults.peerScoreFailureWeight(),
+                defaults.peerScoreLatencyBaselineMillis(),
+                defaults.peerScoreDurationBaselineMillis(),
+                defaults.peerScoreEwmaAlpha()
+        );
+
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
+                config.schedulerMessageBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
+                config.schedulerDeadlineBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
+                config.schedulerDispatchBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
+                config.schedulerOutboxBatchSize());
     }
 }

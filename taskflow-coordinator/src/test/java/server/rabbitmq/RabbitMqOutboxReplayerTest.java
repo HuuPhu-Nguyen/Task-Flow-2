@@ -32,6 +32,24 @@ class RabbitMqOutboxReplayerTest {
     Path tempDir;
 
     @Test
+    void replayLoadsAtMostConfiguredSchedulerOutboxBatch() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of(
+                outboxRecord(10L),
+                outboxRecord(11L),
+                outboxRecord(12L)
+        ));
+        RecordingPublisher publisher = new RecordingPublisher(true);
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 2);
+
+        int published = replayer.replayOnce();
+
+        assertEquals(2, published);
+        assertEquals(List.of(10L, 11L), publisher.publishedIds);
+        assertEquals(1, store.loadPendingBrokerOutbox(10).size());
+        replayer.close();
+    }
+
+    @Test
     void replayMarksPublishedRowsSent() {
         RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(1L)));
         RecordingPublisher publisher = new RecordingPublisher(true);

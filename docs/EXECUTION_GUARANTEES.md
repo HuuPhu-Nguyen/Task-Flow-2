@@ -279,6 +279,23 @@ nodes may enable the requester role, executor role, or both.
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
+- Each cycle processes at most the configured message, combined deadline,
+  dispatch, and terminal/outbox budgets, in that order. The YAML fields are
+  `schedulerMessageBatchSize`, `schedulerDeadlineBatchSize`,
+  `schedulerDispatchBatchSize`, and `schedulerOutboxBatchSize`; every default
+  is `100`.
+- A stale timer pop still consumes one deadline unit. A no-capacity runnable-job
+  probe still consumes one dispatch unit. This prevents unsuccessful discovery
+  from escaping the cycle bound.
+- Continuous messages cannot starve deadlines because the message stage ends at
+  its limit. Continuous deadlines cannot starve task results because mailbox
+  messages are always processed first.
+- When no stage leaves immediate work, the scheduler blocks until a mailbox
+  message or the earliest assignment, terminal-retry, no-capacity-recheck, or
+  metrics due time. Shutdown interrupts that wait before draining admitted
+  envelopes.
+- The independent SQLite broker-outbox replayer retains durable replay
+  ownership and loads at most `schedulerOutboxBatchSize` rows per pass.
 - RabbitMQ job submissions and task results receive bounded delayed retry when the scheduler mailbox is full instead of being accepted into process memory.
 - RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
 - Broker deliveries use manual acknowledgement.

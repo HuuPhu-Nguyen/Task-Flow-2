@@ -10,7 +10,7 @@ import java.util.Map;
 
 /** Owns timeout, lease-expiry, and participant-unavailability transition rules. */
 final class LeaseService {
-    private static final long DEADLINE_RECHECK_MILLIS = SchedulerLoop.DEFAULT_POLL_TIMEOUT_MILLIS;
+    private static final long DEADLINE_RECHECK_MILLIS = 500L;
 
     private final SchedulerState state;
     private final SchedulerConfig config;
@@ -39,74 +39,104 @@ final class LeaseService {
         this.events = events;
     }
 
-    void checkTimeouts() {
-        long now = clock.nowEpochMillis();
-        Map<String, String> jobsToFail = new LinkedHashMap<>();
-
-        SchedulerState.DeadlineTarget target;
-        while ((target = state.pollDueTimeout(now)) != null) {
-            EmbarrassinglyParallelJob<?, ?> job = target.job();
-            TaskUnit<?> task = target.task();
-            TransitionDecision decision = transitions.taskTimedOut(
-                    task,
-                    config.maxTaskRetries(),
-                    config.taskTimeoutMillis(),
-                    now
-            );
-            if (!decision.accepted()) {
-                if (!rescheduleForLaterCycle(target, now)) {
-                    break;
-                }
-                continue;
-            }
-
-            String assignedPeerId = task.getAssignedPeerId();
-            AttemptService.FailureResult failure = attempts.closeFailedAttempt(
-                    task,
-                    assignedPeerId,
-                    decision,
-                    config.maxTaskRetries(),
-                    "task_timeout",
-                    now
-            );
-            if (!failure.handled()) {
-                recordDurableFailure(job, failure, jobsToFail);
-                if (!rescheduleForLaterCycle(target, now)) {
-                    break;
-                }
-                continue;
-            }
-            events.error("task_timeout", events.fields(
-                    "job_id", job.getJobId(),
-                    "task_id", task.getTaskId(),
-                    "assigned_peer_id", assignedPeerId,
-                    "retry_count", task.getRetryCount(),
-                    "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
-            ));
-
-            recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
-                    " exceeded max retries after timeout.");
+    SchedulerLoop.StageResult processDueDeadlines(int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive");
         }
-
-        failJobs(jobsToFail);
-    }
-
-    void checkLeaseExpirations() {
         long now = clock.nowEpochMillis();
         Map<String, String> jobsToFail = new LinkedHashMap<>();
+        int processed = 0;
 
-        SchedulerState.DeadlineTarget target;
-        while ((target = state.pollDueLeaseExpiry(now)) != null) {
-            LeaseExpiryResult result = expireTaskLeaseIfNeeded(target.job(), target.task(), now);
-            if (result.jobFailureReason() != null) {
-                jobsToFail.putIfAbsent(target.job().getJobId(), result.jobFailureReason());
-            }
-            if (!rescheduleForLaterCycle(target, now)) {
+        while (processed < limit) {
+            SchedulerState.DeadlinePoll poll = state.pollNextDueDeadline(now);
+            if (!poll.consumed()) {
                 break;
             }
+            processed++;
+            SchedulerState.DeadlineTarget target = poll.target();
+            if (target == null) {
+                continue;
+            }
+
+            if (target.deadline().kind() == SchedulerWorkloadIndex.DeadlineKind.TASK_TIMEOUT) {
+                processTimeout(target, now, jobsToFail);
+            } else {
+                processLeaseExpiry(target, now, jobsToFail);
+            }
         }
 
         failJobs(jobsToFail);
+        long nextDeadline = state.nextDeadlineAtMillis();
+        return new SchedulerLoop.StageResult(
+                processed,
+                nextDeadline != Long.MAX_VALUE && nextDeadline <= now
+        );
+    }
+
+    long millisUntilNextDeadline() {
+        long nextDeadline = state.nextDeadlineAtMillis();
+        if (nextDeadline == Long.MAX_VALUE) {
+            return Long.MAX_VALUE;
+        }
+        long now = clock.nowEpochMillis();
+        return nextDeadline <= now ? 0L : nextDeadline - now;
+    }
+
+    private void processTimeout(SchedulerState.DeadlineTarget target,
+                                long now,
+                                Map<String, String> jobsToFail) {
+        EmbarrassinglyParallelJob<?, ?> job = target.job();
+        TaskUnit<?> task = target.task();
+        TransitionDecision decision = transitions.taskTimedOut(
+                task,
+                config.maxTaskRetries(),
+                config.taskTimeoutMillis(),
+                now
+        );
+        if (!decision.accepted()) {
+            rescheduleForLaterCycle(target, now);
+            return;
+        }
+
+        String assignedPeerId = task.getAssignedPeerId();
+        AttemptService.FailureResult failure = attempts.closeFailedAttempt(
+                task,
+                assignedPeerId,
+                decision,
+                config.maxTaskRetries(),
+                "task_timeout",
+                now
+        );
+        if (!failure.handled()) {
+            recordDurableFailure(job, failure, jobsToFail);
+            rescheduleForLaterCycle(target, now);
+            return;
+        }
+        events.error("task_timeout", events.fields(
+                "job_id", job.getJobId(),
+                "task_id", task.getTaskId(),
+                "assigned_peer_id", assignedPeerId,
+                "retry_count", task.getRetryCount(),
+                "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
+        ));
+
+        recordTerminalOrPersistenceFailure(
+                job,
+                task,
+                failure,
+                jobsToFail,
+                " exceeded max retries after timeout."
+        );
+    }
+
+    private void processLeaseExpiry(SchedulerState.DeadlineTarget target,
+                                    long now,
+                                    Map<String, String> jobsToFail) {
+        LeaseExpiryResult result = expireTaskLeaseIfNeeded(target.job(), target.task(), now);
+        if (result.jobFailureReason() != null) {
+            jobsToFail.putIfAbsent(target.job().getJobId(), result.jobFailureReason());
+        }
+        rescheduleForLaterCycle(target, now);
     }
 
     LeaseExpiryResult expireTaskLeaseIfNeeded(EmbarrassinglyParallelJob<?, ?> job,
@@ -255,16 +285,10 @@ final class LeaseService {
                 : nowMillis + DEADLINE_RECHECK_MILLIS;
     }
 
-    /**
-     * Re-indexes a still-current assignment after a deferred transition.
-     *
-     * @return {@code false} only when the clock is saturated and the caller must
-     *         stop this pass to avoid immediately polling the same entry forever
-     */
-    private boolean rescheduleForLaterCycle(SchedulerState.DeadlineTarget target, long nowMillis) {
+    /** Re-indexes a still-current assignment after a deferred transition. */
+    private void rescheduleForLaterCycle(SchedulerState.DeadlineTarget target, long nowMillis) {
         long nextCheck = nextDeadlineRecheck(nowMillis);
         state.rescheduleCurrentDeadline(target, nextCheck);
-        return nextCheck > nowMillis;
     }
 
     record LeaseExpiryResult(boolean handled, String jobFailureReason) {
