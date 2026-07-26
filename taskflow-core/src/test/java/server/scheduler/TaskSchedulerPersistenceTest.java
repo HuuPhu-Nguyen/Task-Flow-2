@@ -253,6 +253,42 @@ class TaskSchedulerPersistenceTest {
     }
 
     @Test
+    void pendingOutboxCountExceptionIsNormalizedToStorageFailure() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.throwPendingOutboxCount();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(
+                scheduler,
+                "scheduler-outbox-count-exception-test"
+        );
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-outbox-count-exception", List.of("a")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertTrue(output.result().getErrorMessage().contains("could not read"));
+            assertEquals(0L, startupCommitCount(store));
+            assertFalse(scheduler.getOverloadSnapshot().pendingOutboxObservationHealthy());
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
+
+    @Test
     void successfulJobPersistsLifecycleTransitions() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         InMemoryPeerRegistry registry = registryWithPeer("peer-1");
@@ -2034,6 +2070,13 @@ class TaskSchedulerPersistenceTest {
         assertTrue(event.contains("taskflow_capacity_projection_failures_total="));
         assertTrue(event.contains("taskflow_capacity_active_reservations="));
         assertTrue(event.contains("taskflow_capacity_reserved_units="));
+        assertTrue(event.contains("overloaded="));
+        assertTrue(event.contains("overload_primary_reason="));
+        assertTrue(event.contains("overload_configured_maximum="));
+        assertTrue(event.contains("overload_observed_value="));
+        assertTrue(event.contains("overload_reasons="));
+        assertTrue(event.contains("job_submit_prefetch=1"));
+        assertTrue(event.contains("pending_outbox_observation_healthy="));
     }
 
     private static final class ThreadSafeListAppender extends AppenderBase<ILoggingEvent> {
@@ -2923,6 +2966,7 @@ class TaskSchedulerPersistenceTest {
         private boolean failNextFinalOutbox;
         private int finalOutboxAttempts;
         private boolean failPendingOutboxCount;
+        private boolean throwPendingOutboxCount;
         private int pendingOutboxCountReads;
 
         @Override
@@ -3091,6 +3135,9 @@ class TaskSchedulerPersistenceTest {
         @Override
         public synchronized PendingOutboxCount countPendingBrokerOutbox() {
             pendingOutboxCountReads++;
+            if (throwPendingOutboxCount) {
+                throw new IllegalStateException("injected pending-outbox count failure");
+            }
             if (failPendingOutboxCount) {
                 return PendingOutboxCount.storageFailure();
             }
@@ -3117,6 +3164,10 @@ class TaskSchedulerPersistenceTest {
 
         synchronized void failPendingOutboxCount() {
             failPendingOutboxCount = true;
+        }
+
+        synchronized void throwPendingOutboxCount() {
+            throwPendingOutboxCount = true;
         }
 
         synchronized int pendingOutboxCountReads() {

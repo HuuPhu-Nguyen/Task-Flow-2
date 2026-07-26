@@ -47,6 +47,7 @@ final class SchedulerMessageService {
     private final ResultCommitService resultCommits;
     private final LeaseService leases;
     private final JobCompletionService jobCompletions;
+    private final SchedulerOverloadStatus overloadStatus;
     private final SchedulerEventLog events;
 
     SchedulerMessageService(SchedulerState state,
@@ -60,6 +61,7 @@ final class SchedulerMessageService {
                             ResultCommitService resultCommits,
                             LeaseService leases,
                             JobCompletionService jobCompletions,
+                            SchedulerOverloadStatus overloadStatus,
                             SchedulerEventLog events) {
         this.state = state;
         this.persistence = persistence;
@@ -72,6 +74,7 @@ final class SchedulerMessageService {
         this.resultCommits = resultCommits;
         this.leases = leases;
         this.jobCompletions = jobCompletions;
+        this.overloadStatus = overloadStatus;
         this.events = events;
     }
 
@@ -241,6 +244,7 @@ final class SchedulerMessageService {
             state.addActiveJob(job, requesterTokenHash, requesterIdentityKey, requestHash);
             metrics.setActiveJobs(state.activeJobCount());
             metrics.setActiveTasks(state.activeTaskCount());
+            overloadStatus.refreshActive(state.activeJobCount(), state.activeTaskCount());
             events.info("job_started", events.fields(
                     "job_id", job.getJobId(),
                     "task_type", job.getTaskType(),
@@ -283,15 +287,27 @@ final class SchedulerMessageService {
         );
     }
 
-    private static BrokerOutboxStore.PendingOutboxCount pendingOutboxCount(
-            JobStateStore store) {
+    private BrokerOutboxStore.PendingOutboxCount pendingOutboxCount(JobStateStore store) {
         if (!(store instanceof BrokerOutboxStore outboxStore)) {
-            return BrokerOutboxStore.PendingOutboxCount.counted(0L);
+            BrokerOutboxStore.PendingOutboxCount count =
+                    BrokerOutboxStore.PendingOutboxCount.counted(0L);
+            overloadStatus.refreshPendingOutbox(count);
+            return count;
         }
-        BrokerOutboxStore.PendingOutboxCount count = outboxStore.countPendingBrokerOutbox();
-        return count == null
+        BrokerOutboxStore.PendingOutboxCount count;
+        try {
+            count = outboxStore.countPendingBrokerOutbox();
+        } catch (RuntimeException e) {
+            events.error("scheduler_pending_outbox_count_failed", events.fields(
+                    "error", e.getMessage()
+            ));
+            count = BrokerOutboxStore.PendingOutboxCount.storageFailure();
+        }
+        BrokerOutboxStore.PendingOutboxCount normalized = count == null
                 ? BrokerOutboxStore.PendingOutboxCount.storageFailure()
                 : count;
+        overloadStatus.refreshPendingOutbox(normalized);
+        return normalized;
     }
 
     private void rejectAdmission(String requesterNodeId,

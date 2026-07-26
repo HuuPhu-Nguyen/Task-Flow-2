@@ -7,6 +7,7 @@ import com.rabbitmq.client.GetResponse;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.AdmissionRejection;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
@@ -21,6 +22,7 @@ import server.registry.CapacityMetricsSnapshot;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.scheduler.SchedulerConfig;
+import server.scheduler.SchedulerMailbox;
 import server.scheduler.SchedulerOutput;
 import server.scheduler.TaskScheduler;
 import transport.InboundTransportMessage;
@@ -36,6 +38,7 @@ import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
@@ -199,6 +202,282 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 schedulerThread.join(2_000);
             }
             cleanup(config, topology, peerId);
+        }
+    }
+
+    @Test
+    void submissionFloodPreservesAcceptedResultsAndRecoversAdmissionAgainstLiveBroker()
+            throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV
+                        + "=true to run live RabbitMQ tests.");
+
+        int floodCount = 8;
+        String token = "overload-" + UUID.randomUUID().toString().replace("-", "");
+        String peerId = "peer-" + token;
+        String initialJobId = "job-initial-" + token;
+        String finalJobId = "job-final-" + token;
+        RabbitMqTransportConfig transportConfig = liveConfig(token);
+        RabbitMqTopology topology = new RabbitMqTopology(transportConfig);
+        SchedulerConfig schedulerConfig = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1",
+                "TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE", "1",
+                "TASKFLOW_MAX_ACTIVE_JOBS", "1",
+                "TASKFLOW_MAX_ACTIVE_TASKS", "1"
+        ));
+
+        Thread schedulerThread = null;
+        BlockingFirstAssignmentOutput output = null;
+        TaskScheduler scheduler = null;
+        try {
+            cleanup(transportConfig, topology, peerId);
+
+            try (RabbitMqTransport coordinatorTransport =
+                         new RabbitMqTransport(transportConfig);
+                 RabbitMqTransport peerTransport = new RabbitMqTransport(transportConfig)) {
+                coordinatorTransport.declareTopology();
+                BlockingQueue<MessageEnvelope> mailbox =
+                        SchedulerMailbox.create(schedulerConfig);
+                SchedulerMailbox.BrokerIngress brokerIngress =
+                        SchedulerMailbox.brokerIngress(mailbox);
+                InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+                registry.register(peerId, new PeerInfo(
+                        peerId,
+                        schedulerConfig,
+                        List.of(TestTaskPlugin.TASK_TYPE)
+                ));
+
+                output = new BlockingFirstAssignmentOutput(
+                        new RabbitMqSchedulerOutput(coordinatorTransport)
+                );
+                scheduler = new TaskScheduler(
+                        mailbox,
+                        registry,
+                        null,
+                        output,
+                        schedulerConfig
+                );
+                TaskScheduler liveScheduler = scheduler;
+                schedulerThread = new Thread(
+                        scheduler,
+                        "rabbitmq-persistent-overload-live-scheduler"
+                );
+                schedulerThread.start();
+
+                BlockingQueue<TaskAssignMessage> assignments = new LinkedBlockingQueue<>();
+                BlockingQueue<JobResultMessage> results = new LinkedBlockingQueue<>();
+                AtomicReference<Throwable> peerFailure = new AtomicReference<>();
+                peerTransport.subscribePeer(TransportRoute.TASK_ASSIGN, peerId, delivery -> {
+                    try {
+                        assignments.add(assertInstanceOf(
+                                TaskAssignMessage.class,
+                                delivery.message()
+                        ));
+                    } catch (Throwable error) {
+                        peerFailure.compareAndSet(null, error);
+                    }
+                });
+                peerTransport.subscribePeer(TransportRoute.JOB_RESULT, peerId, delivery -> {
+                    try {
+                        results.add(assertInstanceOf(
+                                JobResultMessage.class,
+                                delivery.message()
+                        ));
+                    } catch (Throwable error) {
+                        peerFailure.compareAndSet(null, error);
+                    }
+                });
+
+                CountDownLatch firstFloodQueued = new CountDownLatch(1);
+                CountDownLatch resultReserved = new CountDownLatch(1);
+                AtomicReference<Throwable> ingressFailure = new AtomicReference<>();
+                coordinatorTransport.subscribe(TransportRoute.JOB_SUBMIT, 1, delivery -> {
+                    try {
+                        SchedulerMailbox.BrokerOfferOutcome outcome =
+                                brokerIngress.offer(delivery);
+                        liveScheduler.refreshMailboxPressure();
+                        if (outcome != SchedulerMailbox.BrokerOfferOutcome.QUEUED) {
+                            throw new AssertionError(
+                                    "Unexpected JOB_SUBMIT ingress outcome: " + outcome
+                            );
+                        }
+                        JobSubmitMessage submit = assertInstanceOf(
+                                JobSubmitMessage.class,
+                                delivery.message()
+                        );
+                        if (submit.getJobId().startsWith("job-flood-")) {
+                            firstFloodQueued.countDown();
+                        }
+                    } catch (Throwable error) {
+                        ingressFailure.compareAndSet(null, error);
+                        firstFloodQueued.countDown();
+                    }
+                });
+                coordinatorTransport.subscribe(TransportRoute.TASK_RESULT, delivery -> {
+                    try {
+                        SchedulerMailbox.BrokerOfferOutcome outcome =
+                                brokerIngress.offer(delivery);
+                        liveScheduler.refreshMailboxPressure();
+                        if (outcome != SchedulerMailbox.BrokerOfferOutcome.QUEUED) {
+                            throw new AssertionError(
+                                    "Accepted task result did not enter its reserve: " + outcome
+                            );
+                        }
+                        resultReserved.countDown();
+                    } catch (Throwable error) {
+                        ingressFailure.compareAndSet(null, error);
+                        resultReserved.countDown();
+                    }
+                });
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.JOB_SUBMIT,
+                        peerId,
+                        jobSubmission(peerId, initialJobId, List.of("alpha"))
+                ));
+                TaskAssignMessage initialAssignment = awaitQueue(
+                        assignments,
+                        peerFailure,
+                        "initial assignment before persistent submission pressure"
+                );
+                assertEquals(initialJobId, initialAssignment.getJobId());
+                assertTrue(output.awaitFirstAssignmentPublication(),
+                        "Scheduler output did not enter the controlled assignment boundary.");
+
+                for (int index = 0; index < floodCount; index++) {
+                    String jobId = "job-flood-" + index + "-" + token;
+                    peerTransport.publish(new OutboundTransportMessage(
+                            TransportRoute.JOB_SUBMIT,
+                            peerId,
+                            jobSubmission(peerId, jobId, List.of("alpha"))
+                    ));
+                }
+                awaitDelivery(
+                        firstFloodQueued,
+                        ingressFailure,
+                        "first capacity-one flood submission"
+                );
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(
+                                peerId,
+                                initialAssignment,
+                                "initial-completed",
+                                true,
+                                ""
+                        )
+                ));
+                awaitDelivery(
+                        resultReserved,
+                        ingressFailure,
+                        "accepted result in the dedicated result reserve"
+                );
+                SchedulerMailbox.DepthSnapshot saturated =
+                        SchedulerMailbox.depthSnapshot(mailbox);
+                assertEquals(1, saturated.submissionDepth());
+                assertEquals(1, saturated.taskResultDepth());
+
+                output.releaseFirstAssignment();
+
+                JobResultMessage initialResult = awaitQueue(
+                        results,
+                        peerFailure,
+                        "initial accepted job result under submission pressure"
+                );
+                assertEquals(initialJobId, initialResult.getJobId());
+                assertTrue(initialResult.isSuccessful());
+
+                TaskAssignMessage floodAssignment = awaitQueue(
+                        assignments,
+                        peerFailure,
+                        "first flood submission accepted after result cleanup"
+                );
+                assertTrue(floodAssignment.getJobId().startsWith("job-flood-"));
+
+                int typedRejections = 0;
+                while (typedRejections < floodCount - 1) {
+                    JobResultMessage rejected = awaitQueue(
+                            results,
+                            peerFailure,
+                            "typed overload rejection " + (typedRejections + 1)
+                    );
+                    AdmissionRejection rejection = rejected.getAdmissionRejection();
+                    assertNotNull(rejection);
+                    assertEquals(AdmissionRejection.Limit.MAX_ACTIVE_JOBS, rejection.limit());
+                    typedRejections++;
+                }
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(
+                                peerId,
+                                floodAssignment,
+                                "flood-completed",
+                                true,
+                                ""
+                        )
+                ));
+                JobResultMessage floodResult = awaitQueue(
+                        results,
+                        peerFailure,
+                        "accepted flood job completion"
+                );
+                assertEquals(floodAssignment.getJobId(), floodResult.getJobId());
+                assertTrue(floodResult.isSuccessful());
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.JOB_SUBMIT,
+                        peerId,
+                        jobSubmission(peerId, finalJobId, List.of("alpha"))
+                ));
+                TaskAssignMessage finalAssignment = awaitQueue(
+                        assignments,
+                        peerFailure,
+                        "fresh admission after overload recovery"
+                );
+                assertEquals(finalJobId, finalAssignment.getJobId());
+                assertTrue(schedulerThread.isAlive(),
+                        "Admission recovery must not restart the coordinator scheduler.");
+
+                peerTransport.publish(new OutboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        peerId,
+                        taskResult(peerId, finalAssignment, "final-completed", true, "")
+                ));
+                JobResultMessage finalResult = awaitQueue(
+                        results,
+                        peerFailure,
+                        "final job completion after overload recovery"
+                );
+                assertEquals(finalJobId, finalResult.getJobId());
+                assertTrue(finalResult.isSuccessful());
+                assertQueueDrained(
+                        transportConfig,
+                        topology.queueName(TransportRoute.JOB_SUBMIT)
+                );
+                assertQueueDrained(
+                        transportConfig,
+                        topology.queueName(TransportRoute.TASK_RESULT)
+                );
+            }
+        } finally {
+            if (output != null) {
+                output.releaseFirstAssignment();
+            }
+            if (scheduler != null) {
+                scheduler.requestShutdownAfterDrain();
+            }
+            if (schedulerThread != null) {
+                schedulerThread.join(2_000L);
+                if (schedulerThread.isAlive()) {
+                    schedulerThread.interrupt();
+                    schedulerThread.join(2_000L);
+                }
+            }
+            cleanup(transportConfig, topology, peerId);
         }
     }
 
@@ -1443,6 +1722,44 @@ class RabbitMqCoordinatorLiveIntegrationTest {
             } finally {
                 jobResultSendCompleted.countDown();
             }
+        }
+    }
+
+    private static final class BlockingFirstAssignmentOutput implements SchedulerOutput {
+        private final SchedulerOutput delegate;
+        private final CountDownLatch firstAssignmentPublished = new CountDownLatch(1);
+        private final CountDownLatch releaseFirstAssignment = new CountDownLatch(1);
+        private final AtomicBoolean first = new AtomicBoolean(true);
+
+        private BlockingFirstAssignmentOutput(SchedulerOutput delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void sendTask(PeerInfo peer, TaskAssignMessage message) throws Exception {
+            delegate.sendTask(peer, message);
+            if (first.compareAndSet(true, false)) {
+                firstAssignmentPublished.countDown();
+                if (!releaseFirstAssignment.await(10L, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException(
+                            "Timed out waiting to release the first assignment."
+                    );
+                }
+            }
+        }
+
+        @Override
+        public boolean sendJobResult(String requesterNodeId, JobResultMessage message)
+                throws Exception {
+            return delegate.sendJobResult(requesterNodeId, message);
+        }
+
+        private boolean awaitFirstAssignmentPublication() throws InterruptedException {
+            return firstAssignmentPublished.await(10L, TimeUnit.SECONDS);
+        }
+
+        private void releaseFirstAssignment() {
+            releaseFirstAssignment.countDown();
         }
     }
 

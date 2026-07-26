@@ -7,6 +7,7 @@ import server.runtime.TaskFlowClock;
 
 import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
+import java.util.stream.Collectors;
 
 /** Owns scheduler gauge refresh and periodic structured metric snapshots. */
 final class SchedulerMetricsService {
@@ -16,6 +17,7 @@ final class SchedulerMetricsService {
     private final PeerRegistry registry;
     private final SchedulerConfig config;
     private final TaskFlowClock clock;
+    private final SchedulerOverloadStatus overloadStatus;
     private final SchedulerEventLog events;
     private long lastMetricsLogAtMillis;
 
@@ -25,6 +27,7 @@ final class SchedulerMetricsService {
                             PeerRegistry registry,
                             SchedulerConfig config,
                             TaskFlowClock clock,
+                            SchedulerOverloadStatus overloadStatus,
                             SchedulerEventLog events) {
         this.inboundMailbox = inboundMailbox;
         this.state = state;
@@ -32,6 +35,7 @@ final class SchedulerMetricsService {
         this.registry = registry;
         this.config = config;
         this.clock = clock;
+        this.overloadStatus = overloadStatus;
         this.events = events;
     }
 
@@ -47,10 +51,28 @@ final class SchedulerMetricsService {
         SchedulerMetrics.Snapshot snapshot = metrics.snapshot();
         SchedulerWorkloadIndex.Snapshot workload = state.workloadSnapshot();
         CapacityMetricsSnapshot capacity = registry.capacityMetricsSnapshot();
+        SchedulerOverloadSnapshot overload = overloadStatus.snapshot();
+        SchedulerOverloadSnapshot.Pressure primary = overload.reasons().isEmpty()
+                ? null
+                : overload.reasons().getFirst();
         events.info("scheduler_metrics", events.fields(
                 "queue_depth", snapshot.queueDepth(),
                 "active_jobs", snapshot.activeJobs(),
                 "active_tasks", snapshot.activeTasks(),
+                "overloaded", overload.overloaded(),
+                "overload_primary_reason",
+                primary == null ? "NONE" : primary.reason(),
+                "overload_configured_maximum",
+                primary == null ? 0L : primary.configuredMaximum(),
+                "overload_observed_value",
+                primary == null ? 0L : primary.observedValue(),
+                "overload_reasons",
+                overload.reasons().stream()
+                        .map(reason -> reason.reason().name())
+                        .collect(Collectors.joining(",")),
+                "job_submit_prefetch", overload.jobSubmitPrefetch(),
+                "pending_outbox_observation_healthy",
+                overload.pendingOutboxObservationHealthy(),
                 "pending_tasks_indexed", workload.pendingTasks(),
                 "runnable_jobs_indexed", workload.runnableJobs(),
                 "capacity_waiting_jobs_indexed", workload.capacityWaitingJobs(),

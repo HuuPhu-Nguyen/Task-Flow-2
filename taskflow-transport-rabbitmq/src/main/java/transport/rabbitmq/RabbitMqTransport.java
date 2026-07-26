@@ -44,6 +44,7 @@ public class RabbitMqTransport implements BrokerTransport {
     private final Connection connection;
     private final Channel channel;
     private final Map<String, CompletableFuture<Return>> mandatoryReturns = new ConcurrentHashMap<>();
+    private final Map<String, Channel> consumerChannels = new ConcurrentHashMap<>();
 
     public RabbitMqTransport(RabbitMqTransportConfig config) throws Exception {
         this(config, RabbitMqRecoveryPolicy.defaults());
@@ -364,7 +365,57 @@ public class RabbitMqTransport implements BrokerTransport {
     @Override
     public String subscribe(TransportRoute route, TransportMessageHandler handler) throws Exception {
         String queueName = topology.queueName(route);
-        return consume(queueName, route, handler);
+        return consume(queueName, route, handler, channel, null);
+    }
+
+    /**
+     * Creates one route-local consumer channel so its prefetch cannot reduce
+     * credit for other consumers on this transport.
+     */
+    public String subscribe(TransportRoute route,
+                            int prefetchCount,
+                            TransportMessageHandler handler) throws Exception {
+        if (prefetchCount <= 0) {
+            throw new IllegalArgumentException("prefetchCount must be positive");
+        }
+        Channel consumerChannel = connection.createChannel();
+        if (consumerChannel == null) {
+            throw new IOException("RabbitMQ did not create a route-local consumer channel.");
+        }
+        boolean subscribed = false;
+        try {
+            synchronized (consumerChannel) {
+                consumerChannel.basicQos(prefetchCount);
+                String consumerTag = stableConsumerTag(route);
+                String actualTag = consume(
+                        topology.queueName(route),
+                        route,
+                        handler,
+                        consumerChannel,
+                        consumerTag
+                );
+                subscribed = true;
+                LOGGER.info(
+                        "event=rabbitmq_route_prefetch_applied route={} prefetch={} consumer_tag={}",
+                        route.name(),
+                        prefetchCount,
+                        actualTag
+                );
+                return actualTag;
+            }
+        } finally {
+            if (!subscribed) {
+                try {
+                    consumerChannel.close();
+                } catch (Exception closeFailure) {
+                    LOGGER.warn(
+                            "event=rabbitmq_route_consumer_channel_close_failed route={} error={}",
+                            route.name(),
+                            closeFailure.getMessage()
+                    );
+                }
+            }
+        }
     }
 
     @Override
@@ -372,7 +423,7 @@ public class RabbitMqTransport implements BrokerTransport {
                                 String peerNodeId,
                                 TransportMessageHandler handler) throws Exception {
         declarePeerEndpoint(route, peerNodeId);
-        return consume(topology.peerQueueName(route, peerNodeId), route, handler);
+        return consume(topology.peerQueueName(route, peerNodeId), route, handler, channel, null);
     }
 
     public void declarePeerEndpoint(TransportRoute route, String peerNodeId) throws Exception {
@@ -385,9 +436,13 @@ public class RabbitMqTransport implements BrokerTransport {
                 route.name(), peerNodeId);
     }
 
-    private String consume(String queueName, TransportRoute route, TransportMessageHandler handler) throws Exception {
-        synchronized (channel) {
-            String consumerTag = channel.basicConsume(queueName, false, (tag, delivery) -> {
+    private String consume(String queueName,
+                           TransportRoute route,
+                           TransportMessageHandler handler,
+                           Channel consumerChannel,
+                           String requestedConsumerTag) throws Exception {
+        synchronized (consumerChannel) {
+            com.rabbitmq.client.DeliverCallback deliverCallback = (tag, delivery) -> {
                 RabbitMqDeliveryRetry retry = new RabbitMqDeliveryRetry(
                         config,
                         topology,
@@ -395,7 +450,7 @@ public class RabbitMqTransport implements BrokerTransport {
                         this::publishSettlementMessage
                 );
                 RabbitMqAcknowledgement acknowledgement = new RabbitMqAcknowledgement(
-                        channel,
+                        consumerChannel,
                         delivery.getEnvelope().getDeliveryTag(),
                         retry
                 );
@@ -448,10 +503,26 @@ public class RabbitMqTransport implements BrokerTransport {
                             failure.reasonCode()
                     );
                 }
-            }, tag -> {
+            };
+            com.rabbitmq.client.CancelCallback cancelCallback = tag -> {
                 LOGGER.warn("event=rabbitmq_consumer_cancelled route={} queue={} consumer_tag={}",
                         route.name(), queueName, tag);
-            });
+            };
+            String consumerTag = requestedConsumerTag == null
+                    ? consumerChannel.basicConsume(
+                            queueName,
+                            false,
+                            deliverCallback,
+                            cancelCallback
+                    )
+                    : consumerChannel.basicConsume(
+                            queueName,
+                            false,
+                            requestedConsumerTag,
+                            deliverCallback,
+                            cancelCallback
+                    );
+            consumerChannels.put(consumerTag, consumerChannel);
             LOGGER.info("event=rabbitmq_consumer_started route={} queue={} consumer_tag={}",
                     route.name(), queueName, consumerTag);
             return consumerTag;
@@ -536,9 +607,11 @@ public class RabbitMqTransport implements BrokerTransport {
 
     @Override
     public void cancel(String consumerTag) throws Exception {
-        synchronized (channel) {
-            channel.basicCancel(consumerTag);
+        Channel consumerChannel = consumerChannels.getOrDefault(consumerTag, channel);
+        synchronized (consumerChannel) {
+            consumerChannel.basicCancel(consumerTag);
         }
+        consumerChannels.remove(consumerTag, consumerChannel);
     }
 
     @Override
@@ -546,8 +619,16 @@ public class RabbitMqTransport implements BrokerTransport {
         try {
             channel.close();
         } finally {
+            consumerChannels.clear();
             connection.close();
         }
+    }
+
+    private static String stableConsumerTag(TransportRoute route) {
+        return "taskflow-"
+                + route.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-')
+                + "-"
+                + UUID.randomUUID();
     }
 
     private record RabbitMqConnectionResources(Connection connection, Channel channel) {}

@@ -23,28 +23,69 @@ public final class RabbitMqOutboxReplayer implements AutoCloseable {
     private final BrokerOutboxPublisher publisher;
     private final int batchSize;
     private final long replayIntervalMillis;
+    private final Runnable pendingOutboxChanged;
     private final ScheduledExecutorService executor;
 
     public RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore, BrokerOutboxPublisher publisher) {
-        this(outboxStore, publisher, DEFAULT_BATCH_SIZE, DEFAULT_REPLAY_INTERVAL_MILLIS);
+        this(
+                outboxStore,
+                publisher,
+                DEFAULT_BATCH_SIZE,
+                DEFAULT_REPLAY_INTERVAL_MILLIS,
+                () -> {
+                }
+        );
     }
 
     public RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
                                   BrokerOutboxPublisher publisher,
                                   int batchSize) {
-        this(outboxStore, publisher, batchSize, DEFAULT_REPLAY_INTERVAL_MILLIS);
+        this(
+                outboxStore,
+                publisher,
+                batchSize,
+                DEFAULT_REPLAY_INTERVAL_MILLIS,
+                () -> {
+                }
+        );
+    }
+
+    public RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
+                                  BrokerOutboxPublisher publisher,
+                                  int batchSize,
+                                  Runnable pendingOutboxChanged) {
+        this(
+                outboxStore,
+                publisher,
+                batchSize,
+                DEFAULT_REPLAY_INTERVAL_MILLIS,
+                pendingOutboxChanged
+        );
     }
 
     RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
                            BrokerOutboxPublisher publisher,
                            int batchSize,
                            long replayIntervalMillis) {
+        this(outboxStore, publisher, batchSize, replayIntervalMillis, () -> {
+        });
+    }
+
+    RabbitMqOutboxReplayer(BrokerOutboxStore outboxStore,
+                           BrokerOutboxPublisher publisher,
+                           int batchSize,
+                           long replayIntervalMillis,
+                           Runnable pendingOutboxChanged) {
         this.outboxStore = outboxStore;
         this.publisher = publisher;
         this.batchSize = batchSize <= 0 ? DEFAULT_BATCH_SIZE : batchSize;
         this.replayIntervalMillis = replayIntervalMillis <= 0
                 ? DEFAULT_REPLAY_INTERVAL_MILLIS
                 : replayIntervalMillis;
+        this.pendingOutboxChanged = pendingOutboxChanged == null
+                ? () -> {
+                }
+                : pendingOutboxChanged;
         this.executor = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "rabbitmq-outbox-replayer");
             thread.setDaemon(true);
@@ -94,10 +135,25 @@ public final class RabbitMqOutboxReplayer implements AutoCloseable {
             }
         }
         if (!records.isEmpty()) {
+            notifyPendingOutboxChanged();
+        }
+        if (!records.isEmpty()) {
             LOGGER.info("event=rabbitmq_outbox_replay batch_size={} published={}",
                     records.size(), published);
         }
         return published;
+    }
+
+    private void notifyPendingOutboxChanged() {
+        try {
+            pendingOutboxChanged.run();
+        } catch (RuntimeException e) {
+            LOGGER.warn(
+                    "event=rabbitmq_outbox_pressure_refresh_failed error={}",
+                    e.getMessage(),
+                    e
+            );
+        }
     }
 
     private void replayOnceSafely() {

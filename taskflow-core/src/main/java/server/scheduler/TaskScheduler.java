@@ -25,6 +25,8 @@ public class TaskScheduler implements Runnable {
     private final RecoveryService recovery;
     private final SchedulerMetrics metrics;
     private final SchedulerState state;
+    private final BlockingQueue<MessageEnvelope> mailbox;
+    private final SchedulerOverloadStatus overloadStatus;
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
@@ -91,13 +93,20 @@ public class TaskScheduler implements Runnable {
 
         SchedulerState state = new SchedulerState(effectiveConfig);
         this.state = state;
+        this.mailbox = checkedMailbox;
         this.metrics = new SchedulerMetrics();
         SchedulerEventLog events = new SchedulerEventLog();
+        this.overloadStatus = new SchedulerOverloadStatus(
+                effectiveConfig,
+                checkedClock,
+                events
+        );
         SchedulerPersistence persistence = new SchedulerPersistence(db, events);
         SchedulerOutboxService outbox = new SchedulerOutboxService(
                 persistence,
                 checkedOutput,
                 checkedClock,
+                overloadStatus,
                 events
         );
         TaskTransitionDecisions transitions = new TaskTransitionDecisions(new TaskStateMachine());
@@ -147,6 +156,7 @@ public class TaskScheduler implements Runnable {
                 resultCommits,
                 leases,
                 jobCompletions,
+                overloadStatus,
                 events
         );
         AssignmentService assignments = new AssignmentService(
@@ -171,6 +181,7 @@ public class TaskScheduler implements Runnable {
                 checkedRegistry,
                 effectiveConfig,
                 checkedClock,
+                overloadStatus,
                 events
         );
         this.recovery = new RecoveryService(
@@ -186,26 +197,37 @@ public class TaskScheduler implements Runnable {
         this.loop = new SchedulerLoop(checkedMailbox, new SchedulerLoop.Work() {
             @Override
             public void processEnvelope(MessageEnvelope envelope) {
-                messages.processEnvelope(envelope);
+                try {
+                    messages.processEnvelope(envelope);
+                } finally {
+                    refreshRuntimePressure();
+                }
             }
 
             @Override
             public SchedulerLoop.StageResult processDueDeadlines(int limit) {
-                return leases.processDueDeadlines(limit);
+                SchedulerLoop.StageResult result = leases.processDueDeadlines(limit);
+                refreshRuntimePressure();
+                return result;
             }
 
             @Override
             public SchedulerLoop.StageResult dispatchPendingTasks(int limit) {
-                return assignments.dispatchPendingTasks(limit);
+                SchedulerLoop.StageResult result = assignments.dispatchPendingTasks(limit);
+                refreshRuntimePressure();
+                return result;
             }
 
             @Override
             public SchedulerLoop.StageResult retryPendingOutbound(int limit) {
-                return jobCompletions.retryPendingJobResults(limit);
+                SchedulerLoop.StageResult result = jobCompletions.retryPendingJobResults(limit);
+                refreshRuntimePressure();
+                return result;
             }
 
             @Override
             public void updateMetrics() {
+                refreshRuntimePressure();
                 metricUpdates.updateAndMaybeLog();
             }
 
@@ -223,6 +245,7 @@ public class TaskScheduler implements Runnable {
                 );
             }
         }, effectiveConfig);
+        refreshRuntimePressure();
     }
 
     private static String newLeaseOwnerId() {
@@ -250,6 +273,18 @@ public class TaskScheduler implements Runnable {
         return metrics.snapshot();
     }
 
+    public SchedulerOverloadSnapshot getOverloadSnapshot() {
+        return overloadStatus.snapshot();
+    }
+
+    public void refreshMailboxPressure() {
+        overloadStatus.refreshMailbox(SchedulerMailbox.depthSnapshot(mailbox));
+    }
+
+    public void refreshPendingOutboxPressure(long pendingRows, boolean observationHealthy) {
+        overloadStatus.refreshPendingOutbox(pendingRows, observationHealthy);
+    }
+
     SchedulerWorkloadIndex.Snapshot getWorkloadSnapshot() {
         return state.workloadSnapshot();
     }
@@ -267,5 +302,11 @@ public class TaskScheduler implements Runnable {
                             Map<String, String> restoredRequesterTokenHashes,
                             Map<String, String> restoredRequesterIdentityKeys) {
         recovery.restoreJobs(jobs, restoredRequesterTokenHashes, restoredRequesterIdentityKeys);
+        refreshRuntimePressure();
+    }
+
+    private void refreshRuntimePressure() {
+        overloadStatus.refreshMailbox(SchedulerMailbox.depthSnapshot(mailbox));
+        overloadStatus.refreshActive(state.activeJobCount(), state.activeTaskCount());
     }
 }

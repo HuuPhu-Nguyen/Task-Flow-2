@@ -53,15 +53,40 @@ class RabbitMqOutboxReplayerTest {
     void replayMarksPublishedRowsSent() {
         RecordingOutboxStore store = new RecordingOutboxStore(List.of(outboxRecord(1L)));
         RecordingPublisher publisher = new RecordingPublisher(true);
-        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(store, publisher, 10, 100L);
+        AtomicInteger pressureRefreshes = new AtomicInteger();
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(
+                store,
+                publisher,
+                10,
+                100L,
+                pressureRefreshes::incrementAndGet
+        );
 
         int published = replayer.replayOnce();
 
         assertEquals(1, published);
+        assertEquals(1, pressureRefreshes.get());
         assertEquals(List.of(1L), publisher.publishedIds);
         assertEquals(Set.of(1L), store.publishedIds);
         assertEquals(List.of(), store.failedIds);
         assertEquals(List.of(), store.loadPendingBrokerOutbox(10));
+        replayer.close();
+    }
+
+    @Test
+    void emptyReplayDoesNotEmitSpuriousOutboxPressureRefresh() {
+        RecordingOutboxStore store = new RecordingOutboxStore(List.of());
+        AtomicInteger pressureRefreshes = new AtomicInteger();
+        RabbitMqOutboxReplayer replayer = new RabbitMqOutboxReplayer(
+                store,
+                new RecordingPublisher(true),
+                10,
+                100L,
+                pressureRefreshes::incrementAndGet
+        );
+
+        assertEquals(0, replayer.replayOnce());
+        assertEquals(0, pressureRefreshes.get());
         replayer.close();
     }
 

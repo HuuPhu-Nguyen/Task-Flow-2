@@ -7,15 +7,31 @@ final class SchedulerOutboxService {
     private final SchedulerPersistence persistence;
     private final SchedulerOutput output;
     private final TaskFlowClock clock;
+    private final SchedulerOverloadStatus overloadStatus;
     private final SchedulerEventLog events;
 
     SchedulerOutboxService(SchedulerPersistence persistence,
                            SchedulerOutput output,
                            TaskFlowClock clock,
                            SchedulerEventLog events) {
+        this(
+                persistence,
+                output,
+                clock,
+                new SchedulerOverloadStatus(SchedulerConfig.defaults(), clock, events),
+                events
+        );
+    }
+
+    SchedulerOutboxService(SchedulerPersistence persistence,
+                           SchedulerOutput output,
+                           TaskFlowClock clock,
+                           SchedulerOverloadStatus overloadStatus,
+                           SchedulerEventLog events) {
         this.persistence = persistence;
         this.output = output;
         this.clock = clock;
+        this.overloadStatus = overloadStatus;
         this.events = events;
     }
 
@@ -73,6 +89,19 @@ final class SchedulerOutboxService {
                     "error", e.getMessage()
             ));
             return false;
+        } finally {
+            refreshPendingOutbox(outboxStore);
+        }
+    }
+
+    private void refreshPendingOutbox(BrokerOutboxStore outboxStore) {
+        try {
+            overloadStatus.refreshPendingOutbox(outboxStore.countPendingBrokerOutbox());
+        } catch (RuntimeException e) {
+            overloadStatus.refreshPendingOutbox(0L, false);
+            events.error("scheduler_overload_outbox_count_failed", events.fields(
+                    "error", e.getMessage()
+            ));
         }
     }
 }

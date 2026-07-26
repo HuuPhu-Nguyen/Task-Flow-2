@@ -8,6 +8,7 @@ import protocol.PeerIdentity;
 import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
+import server.db.BrokerOutboxStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
@@ -105,13 +106,6 @@ public class RabbitMqTaskCoordinatorServer {
 
         PeerRegistry registry = new InMemoryPeerRegistry(db);
         RabbitMqSchedulerOutput schedulerOutput = new RabbitMqSchedulerOutput(transport);
-        RabbitMqOutboxReplayer outboxReplayer = db == null
-                ? null
-                : new RabbitMqOutboxReplayer(
-                        db,
-                        schedulerOutput,
-                        schedulerConfig.schedulerOutboxBatchSize()
-                );
         TaskScheduler schedulerLogic = new TaskScheduler(
                 inboundMailbox,
                 registry,
@@ -122,17 +116,37 @@ public class RabbitMqTaskCoordinatorServer {
                 assignmentIdGenerator
         );
         schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
+        DatabaseManager finalDb = db;
+        if (finalDb != null) {
+            refreshPendingOutboxPressure(schedulerLogic, finalDb);
+        }
+        RabbitMqOutboxReplayer outboxReplayer = finalDb == null
+                ? null
+                : new RabbitMqOutboxReplayer(
+                        finalDb,
+                        schedulerOutput,
+                        schedulerConfig.schedulerOutboxBatchSize(),
+                        () -> refreshPendingOutboxPressure(schedulerLogic, finalDb)
+                );
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,
                 HEARTBEAT_TIMEOUT_MILLIS,
-                peer -> enqueuePeerUnavailable(inboundMailbox, peer, "heartbeat_timeout")
+                peer -> enqueuePeerUnavailable(
+                        inboundMailbox,
+                        schedulerLogic,
+                        peer,
+                        "heartbeat_timeout"
+                )
         );
 
-        String jobSubmitConsumerTag = transport.subscribe(TransportRoute.JOB_SUBMIT,
-                delivery -> enqueueForScheduler(brokerIngress, delivery));
+        String jobSubmitConsumerTag = transport.subscribe(
+                TransportRoute.JOB_SUBMIT,
+                schedulerLogic.getOverloadSnapshot().jobSubmitPrefetch(),
+                delivery -> enqueueForScheduler(brokerIngress, schedulerLogic, delivery)
+        );
         String taskResultConsumerTag = transport.subscribe(TransportRoute.TASK_RESULT,
-                delivery -> enqueueForScheduler(brokerIngress, delivery));
+                delivery -> enqueueForScheduler(brokerIngress, schedulerLogic, delivery));
         String heartbeatConsumerTag = transport.subscribe(TransportRoute.HEARTBEAT,
                 delivery -> handleHeartbeat(
                         registry,
@@ -141,7 +155,6 @@ public class RabbitMqTaskCoordinatorServer {
                         delivery
                 ));
 
-        DatabaseManager finalDb = db;
         RabbitMqOutboxReplayer finalOutboxReplayer = outboxReplayer;
         RabbitMqCoordinatorShutdown shutdown = new RabbitMqCoordinatorShutdown(
                 brokerIngress::stopIntake,
@@ -169,21 +182,32 @@ public class RabbitMqTaskCoordinatorServer {
     }
 
     private static void enqueueForScheduler(SchedulerMailbox.BrokerIngress brokerIngress,
+                                            TaskScheduler scheduler,
                                             InboundTransportMessage delivery) throws Exception {
-        SchedulerMailbox.BrokerOfferOutcome outcome = brokerIngress.offer(delivery);
-        if (outcome == SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY) {
-            LOGGER.warn("event=scheduler_ingress_retry_requested reason=mailbox_full route={} from_node_id={} queue_depth={}",
-                    delivery.route(),
-                    delivery.fromNodeId(),
-                    brokerIngress.queueDepth());
-        } else if (outcome == SchedulerMailbox.BrokerOfferOutcome.INTAKE_STOPPED_UNACKNOWLEDGED) {
-            LOGGER.info("event=scheduler_ingress_stopped route={} from_node_id={} action=broker_requeue_on_transport_close",
-                    delivery.route(),
-                    delivery.fromNodeId());
+        try {
+            SchedulerMailbox.BrokerOfferOutcome outcome = brokerIngress.offer(delivery);
+            if (outcome == SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY) {
+                SchedulerMailbox.DepthSnapshot depth = brokerIngress.depthSnapshot();
+                LOGGER.warn("event=scheduler_ingress_retry_requested reason=mailbox_full route={} from_node_id={} queue_depth={} submission_depth={} submission_limit={} task_result_depth={} task_result_limit={}",
+                        delivery.route(),
+                        delivery.fromNodeId(),
+                        brokerIngress.queueDepth(),
+                        depth.submissionDepth(),
+                        depth.submissionCapacity(),
+                        depth.taskResultDepth(),
+                        depth.taskResultCapacity());
+            } else if (outcome == SchedulerMailbox.BrokerOfferOutcome.INTAKE_STOPPED_UNACKNOWLEDGED) {
+                LOGGER.info("event=scheduler_ingress_stopped route={} from_node_id={} action=broker_requeue_on_transport_close",
+                        delivery.route(),
+                        delivery.fromNodeId());
+            }
+        } finally {
+            scheduler.refreshMailboxPressure();
         }
     }
 
     private static void enqueuePeerUnavailable(BlockingQueue<MessageEnvelope> inboundMailbox,
+                                               TaskScheduler scheduler,
                                                PeerInfo peer,
                                                String reason) {
         if (peer == null) {
@@ -196,6 +220,28 @@ public class RabbitMqTaskCoordinatorServer {
         if (!queued) {
             LOGGER.error("event=peer_unavailable_event_dropped peer_id={} reason={}", peer.getNodeId(), reason);
         }
+        scheduler.refreshMailboxPressure();
+    }
+
+    private static void refreshPendingOutboxPressure(TaskScheduler scheduler,
+                                                     BrokerOutboxStore outboxStore) {
+        BrokerOutboxStore.PendingOutboxCount observed;
+        try {
+            observed = outboxStore.countPendingBrokerOutbox();
+        } catch (RuntimeException e) {
+            scheduler.refreshPendingOutboxPressure(0L, false);
+            LOGGER.error(
+                    "event=scheduler_overload_outbox_count_failed error={}",
+                    e.getMessage(),
+                    e
+            );
+            return;
+        }
+        if (observed == null || !observed.counted()) {
+            scheduler.refreshPendingOutboxPressure(0L, false);
+            return;
+        }
+        scheduler.refreshPendingOutboxPressure(observed.count(), true);
     }
 
     private static void handleHeartbeat(PeerRegistry registry,

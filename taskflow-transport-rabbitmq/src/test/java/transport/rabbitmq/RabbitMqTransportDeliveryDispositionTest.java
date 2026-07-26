@@ -22,8 +22,33 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqTransportDeliveryDispositionTest {
+    @Test
+    void routeLocalPrefetchUsesDedicatedChannelAndStableConsumerTag() throws Exception {
+        RecordingChannel primary = new RecordingChannel();
+        RecordingChannel dedicated = new RecordingChannel();
+
+        try (RabbitMqTransport transport = transport(primary, dedicated)) {
+            String consumerTag = transport.subscribe(
+                    TransportRoute.JOB_SUBMIT,
+                    1,
+                    delivery -> {
+                    }
+            );
+
+            assertTrue(consumerTag.startsWith("taskflow-job-submit-"));
+            assertEquals(RabbitMqTransportConfig.localDefaults().prefetchCount(),
+                    primary.prefetchCount);
+            assertEquals(1, dedicated.prefetchCount);
+            assertEquals(consumerTag, dedicated.requestedConsumerTag);
+
+            transport.cancel(consumerTag);
+            assertEquals(consumerTag, dedicated.cancelledConsumerTag);
+        }
+    }
+
     @Test
     void successfulHandlerDefaultsToAckSuccess() throws Exception {
         RecordingChannel channel = new RecordingChannel();
@@ -132,12 +157,18 @@ class RabbitMqTransportDeliveryDispositionTest {
     }
 
     private static RabbitMqTransport transport(RecordingChannel recording) throws Exception {
+        return transport(recording, null);
+    }
+
+    private static RabbitMqTransport transport(RecordingChannel recording,
+                                               RecordingChannel dedicated) throws Exception {
         Channel channel = recording.proxy();
         Connection connection = (Connection) Proxy.newProxyInstance(
                 Connection.class.getClassLoader(),
                 new Class<?>[]{Connection.class},
                 (proxy, method, args) -> switch (method.getName()) {
                     case "close" -> null;
+                    case "createChannel" -> dedicated == null ? null : dedicated.proxy();
                     case "isOpen" -> true;
                     default -> defaultValue(method.getReturnType());
                 }
@@ -176,6 +207,9 @@ class RabbitMqTransportDeliveryDispositionTest {
         private int publishCount;
         private String publishedExchange;
         private AMQP.BasicProperties publishedProperties;
+        private int prefetchCount;
+        private String requestedConsumerTag;
+        private String cancelledConsumerTag;
         private final AtomicReference<RabbitMqAcknowledgement> acknowledgement = new AtomicReference<>();
 
         private Channel proxy() {
@@ -189,8 +223,20 @@ class RabbitMqTransportDeliveryDispositionTest {
         private Object invoke(Object proxy, Method method, Object[] args) {
             return switch (method.getName()) {
                 case "basicConsume" -> {
-                    deliverCallback = (DeliverCallback) args[2];
-                    yield "consumer-1";
+                    int callbackIndex = args[2] instanceof String ? 3 : 2;
+                    deliverCallback = (DeliverCallback) args[callbackIndex];
+                    requestedConsumerTag = args[2] instanceof String
+                            ? (String) args[2]
+                            : "consumer-1";
+                    yield requestedConsumerTag;
+                }
+                case "basicQos" -> {
+                    prefetchCount = (Integer) args[0];
+                    yield null;
+                }
+                case "basicCancel" -> {
+                    cancelledConsumerTag = (String) args[0];
+                    yield null;
                 }
                 case "basicAck" -> {
                     ackCount++;
@@ -213,7 +259,7 @@ class RabbitMqTransportDeliveryDispositionTest {
                     yield null;
                 }
                 case "waitForConfirms" -> true;
-                case "close", "basicQos", "confirmSelect", "addReturnListener" -> null;
+                case "close", "confirmSelect", "addReturnListener" -> null;
                 case "isOpen" -> true;
                 default -> defaultValue(method.getReturnType());
             };

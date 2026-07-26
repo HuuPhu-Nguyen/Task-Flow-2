@@ -10,8 +10,10 @@ import com.google.gson.JsonParser;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
+import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PongMessage;
+import protocol.TaskResultMessage;
 import transport.InboundTransportMessage;
 import transport.OutboundTransportMessage;
 import transport.TransportAcknowledgement;
@@ -134,7 +136,7 @@ class RabbitMqTransportLiveTest {
                 AtomicInteger deliveries = new AtomicInteger();
                 AtomicReference<Throwable> failure = new AtomicReference<>();
 
-                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                String consumer = transport.subscribe(TransportRoute.HEARTBEAT, 1, delivery -> {
                     try {
                         assertHeartbeatDelivery(delivery);
                         int deliveryNumber = deliveries.incrementAndGet();
@@ -154,6 +156,7 @@ class RabbitMqTransportLiveTest {
                         recoveredDelivery.countDown();
                     }
                 });
+                assertTrue(consumer.startsWith("taskflow-heartbeat-"));
 
                 publishHeartbeat(transport);
                 awaitDelivery(firstDelivered, failure, "initial HEARTBEAT before broker-side connection drop");
@@ -452,6 +455,93 @@ class RabbitMqTransportLiveTest {
         }
     }
 
+    @Test
+    void routeLocalJobPrefetchDoesNotBlockTaskResultIntakeAgainstLiveBroker() throws Exception {
+        Assumptions.assumeTrue(liveTestEnabled(),
+                "Set -D" + LIVE_TEST_PROPERTY + "=true or " + LIVE_TEST_ENV
+                        + "=true to run live RabbitMQ tests.");
+
+        String token = "it-" + UUID.randomUUID().toString().replace("-", "");
+        RabbitMqTransportConfig config = liveConfig(
+                token,
+                RabbitMqTransportConfig.fromEnvironment().retryDelaysMillis(),
+                3
+        );
+        RabbitMqTopology topology = new RabbitMqTopology(config);
+
+        try {
+            cleanup(config, topology, "peer-live");
+
+            try (RabbitMqTransport transport = new RabbitMqTransport(config)) {
+                transport.declareTopology();
+
+                CountDownLatch firstJobDelivered = new CountDownLatch(1);
+                CountDownLatch secondJobDelivered = new CountDownLatch(1);
+                CountDownLatch resultDelivered = new CountDownLatch(1);
+                AtomicInteger jobDeliveries = new AtomicInteger();
+                AtomicReference<TransportAcknowledgement> firstJobAcknowledgement =
+                        new AtomicReference<>();
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+
+                String jobConsumer = transport.subscribe(TransportRoute.JOB_SUBMIT, 1, delivery -> {
+                    try {
+                        assertInstanceOf(JobSubmitMessage.class, delivery.message());
+                        int deliveryNumber = jobDeliveries.incrementAndGet();
+                        if (deliveryNumber == 1) {
+                            delivery.acknowledgement().defer();
+                            firstJobAcknowledgement.set(delivery.acknowledgement());
+                            firstJobDelivered.countDown();
+                        } else if (deliveryNumber == 2) {
+                            secondJobDelivered.countDown();
+                        } else {
+                            failure.compareAndSet(
+                                    null,
+                                    new AssertionError(
+                                            "Unexpected JOB_SUBMIT delivery count: "
+                                                    + deliveryNumber
+                                    )
+                            );
+                        }
+                    } catch (Throwable assertionError) {
+                        failure.set(assertionError);
+                        firstJobDelivered.countDown();
+                        secondJobDelivered.countDown();
+                    }
+                });
+                String resultConsumer = transport.subscribe(TransportRoute.TASK_RESULT, delivery -> {
+                    assertDelivery(resultDelivered, failure, () -> {
+                        assertEquals(TransportRoute.TASK_RESULT, delivery.route());
+                        assertInstanceOf(TaskResultMessage.class, delivery.message());
+                    });
+                });
+
+                publishJobSubmit(transport, "job-prefetch-1");
+                publishJobSubmit(transport, "job-prefetch-2");
+                awaitDelivery(firstJobDelivered, failure, "first route-limited JOB_SUBMIT");
+                assertEquals(1, jobDeliveries.get());
+                assertFalse(secondJobDelivered.await(500L, TimeUnit.MILLISECONDS),
+                        "The second submission must wait for route-local credit.");
+
+                publishTaskResult(transport);
+                awaitDelivery(resultDelivered, failure,
+                        "TASK_RESULT while JOB_SUBMIT credit remains exhausted");
+
+                TransportAcknowledgement acknowledgement = firstJobAcknowledgement.get();
+                assertNotNull(acknowledgement);
+                acknowledgement.ack();
+                awaitDelivery(secondJobDelivered, failure,
+                        "second JOB_SUBMIT after route-local acknowledgement");
+
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.JOB_SUBMIT));
+                waitForQueueToDrain(config, topology.queueName(TransportRoute.TASK_RESULT));
+                transport.cancel(jobConsumer);
+                transport.cancel(resultConsumer);
+            }
+        } finally {
+            cleanup(config, topology, "peer-live");
+        }
+    }
+
     private static void assertHeartbeatDelivery(InboundTransportMessage delivery) {
         assertEquals(TransportRoute.HEARTBEAT, delivery.route());
         assertEquals("peer-live", delivery.fromNodeId());
@@ -586,6 +676,12 @@ class RabbitMqTransportLiveTest {
     }
 
     private static RabbitMqTransportConfig liveConfig(String token, List<Long> retryDelaysMillis) {
+        return liveConfig(token, retryDelaysMillis, 1);
+    }
+
+    private static RabbitMqTransportConfig liveConfig(String token,
+                                                      List<Long> retryDelaysMillis,
+                                                      int prefetchCount) {
         RabbitMqTransportConfig base = RabbitMqTransportConfig.fromEnvironment();
         String name = "taskflow.live." + token;
         return new RabbitMqTransportConfig(
@@ -597,7 +693,7 @@ class RabbitMqTransportLiveTest {
                 name + ".exchange",
                 name,
                 false,
-                1,
+                prefetchCount,
                 base.publisherConfirmTimeoutMillis(),
                 true,
                 name + ".dlx",
@@ -605,6 +701,41 @@ class RabbitMqTransportLiveTest {
                 "dead-letter",
                 retryDelaysMillis
         );
+    }
+
+    private static void publishJobSubmit(RabbitMqTransport transport, String jobId)
+            throws Exception {
+        transport.publish(new OutboundTransportMessage(
+                TransportRoute.JOB_SUBMIT,
+                "requester-live",
+                new JobSubmitMessage(
+                        "requester-live",
+                        Instant.now().toString(),
+                        jobId,
+                        "TEXT_ANALYSIS",
+                        List.of("payload"),
+                        "",
+                        "token-" + jobId
+                )
+        ));
+    }
+
+    private static void publishTaskResult(RabbitMqTransport transport) throws Exception {
+        transport.publish(new OutboundTransportMessage(
+                TransportRoute.TASK_RESULT,
+                "peer-live",
+                new TaskResultMessage(
+                        "peer-live",
+                        Instant.now().toString(),
+                        "task-prefetch-1",
+                        "job-prefetch-accepted",
+                        1,
+                        "00000000-0000-0000-0000-000000000001",
+                        "result",
+                        true,
+                        ""
+                )
+        ));
     }
 
     private static boolean liveTestEnabled() {

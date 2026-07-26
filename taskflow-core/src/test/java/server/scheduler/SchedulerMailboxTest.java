@@ -2,6 +2,7 @@ package server.scheduler;
 
 import org.junit.jupiter.api.Test;
 import protocol.PongMessage;
+import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import transport.DeliveryDisposition;
 import transport.InboundTransportMessage;
@@ -31,6 +32,61 @@ class SchedulerMailboxTest {
 
         assertTrue(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-1")));
         assertFalse(SchedulerMailbox.offer(mailbox, new MessageEnvelope(heartbeat(), "peer-2")));
+    }
+
+    @Test
+    void fullSubmissionLaneRetainsOneTaskResultReserveAndDequeuesResultFirst() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(
+                        java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1")
+                )
+        );
+        MessageEnvelope submission = new MessageEnvelope(heartbeat(), "requester-1");
+        MessageEnvelope result = new MessageEnvelope(taskResult("task-1"), "executor-1");
+
+        assertTrue(SchedulerMailbox.offer(mailbox, submission));
+        assertFalse(SchedulerMailbox.offer(
+                mailbox,
+                new MessageEnvelope(heartbeat(), "requester-overflow")
+        ));
+        assertTrue(SchedulerMailbox.offer(mailbox, result));
+
+        assertEquals(
+                new SchedulerMailbox.DepthSnapshot(1, 1, 1, 1, false),
+                SchedulerMailbox.depthSnapshot(mailbox)
+        );
+        assertEquals(2, mailbox.size());
+        assertSame(result, mailbox.take());
+        assertSame(submission, mailbox.take());
+    }
+
+    @Test
+    void occupiedTaskResultReserveRetriesNextResultWithoutReplacingFirst() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = SchedulerMailbox.create(
+                SchedulerConfig.fromEnvironment(
+                        java.util.Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "1")
+                )
+        );
+        MessageEnvelope accepted = new MessageEnvelope(taskResult("task-accepted"), "executor-1");
+        assertTrue(SchedulerMailbox.offer(mailbox, accepted));
+        RecordingAcknowledgement overflow = new RecordingAcknowledgement();
+        SchedulerMailbox.BrokerIngress ingress = SchedulerMailbox.brokerIngress(mailbox);
+
+        assertEquals(
+                SchedulerMailbox.BrokerOfferOutcome.MAILBOX_FULL_RETRY,
+                ingress.offer(new InboundTransportMessage(
+                        TransportRoute.TASK_RESULT,
+                        "executor-2",
+                        taskResult("task-overflow"),
+                        overflow
+                ))
+        );
+
+        assertEquals(1, overflow.deferCount());
+        assertEquals(1, overflow.requeueCount());
+        assertEquals(DeliveryDisposition.RETRY_TRANSIENT, overflow.disposition());
+        assertSame(accepted, mailbox.take());
+        assertTrue(mailbox.isEmpty());
     }
 
     @Test
@@ -149,6 +205,20 @@ class SchedulerMailboxTest {
 
     private static PongMessage heartbeat() {
         return new PongMessage("peer", Instant.now().toString(), List.of("TEST_TASK"));
+    }
+
+    private static TaskResultMessage taskResult(String taskId) {
+        return new TaskResultMessage(
+                "executor",
+                Instant.EPOCH.toString(),
+                taskId,
+                "job-1",
+                1,
+                "assignment-1",
+                "result",
+                true,
+                null
+        );
     }
 
     private static class RecordingAcknowledgement implements TransportAcknowledgement {
