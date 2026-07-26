@@ -65,6 +65,10 @@ the large binary data plane.
   single-broker restart recovery during active work. The broader Phase 7
   process-kill/chaos matrix and remaining operational gates must pass before
   production-strength RabbitMQ claims are made.
+- Coordinator submission intake uses one dedicated RabbitMQ channel with
+  route-local prefetch `1`; task-result and heartbeat intake retain configured
+  credit. This is transport-owned flow control, while admission and durable
+  transition authority remain in core/SQLite.
 
 ## Conditions That Would Invalidate This Decision
 
@@ -92,3 +96,4 @@ not invalidate the decision.
 
 - [Superseded ADR 0001: RabbitMQ default and TCP deprecation](0001-rabbitmq-planned-primary-runtime.md)
 - [ADR 0011: Object storage for large payloads](0011-object-storage-large-payloads.md)
+- [ADR 0014: Persistent overload intake and result reserve](0014-persistent-overload-intake.md)

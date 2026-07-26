@@ -10,6 +10,11 @@ TF-0405 bounds new coordinator admission before durable J0/T0 acceptance.
 This experiment checks the memory consequence of that boundary; it does not
 claim the persistent-overload progress policy assigned to TF-0406.
 
+TF-0406 subsequently implemented that policy. Current result-reserve,
+route-local intake, and automatic-recovery evidence is recorded in
+[`persistent-overload.md`](persistent-overload.md); the measurements below
+remain the historical TF-0405 admission baseline.
+
 The opt-in test installs exactly 64 accepted jobs with 64 tasks each
 (4,096 active tasks), then submits five waves of 20,000 unique jobs while the
 active-job bound remains full. Rejected jobs are not retained, no additional
@@ -78,4 +83,5 @@ latency model.
 This experiment does not simulate a persistent RabbitMQ submission flood,
 prove task-result or expiry progress while intake stays saturated, test
 adaptive broker intake, or prove automatic recovery after pressure falls.
-Those behaviors remain explicitly assigned to TF-0406.
+Those behaviors were explicitly assigned to TF-0406 and are now covered by the
+separate persistent-overload report linked above.

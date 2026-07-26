@@ -101,6 +101,17 @@ The current RabbitMQ path includes:
   produces RabbitMQ redelivery. If SQLite committed the result before that
   connection loss, the next delivery is typed as a duplicate, acknowledged,
   and cannot increment authoritative success or close the attempt twice.
+- `JOB_SUBMIT` alone uses a dedicated consumer channel with route-local
+  `basicQos(1)` and an explicit stable consumer tag. Task-result and heartbeat
+  consumers retain the configured prefetch on the primary channel, so one
+  held submission cannot consume task-result credit. Automatic connection and
+  topology recovery restore the dedicated channel, QoS, and consumer without
+  a cancel/resubscribe state machine.
+- The scheduler mailbox reserves one fixed slot beyond the configured
+  submission/control capacity for `TASK_RESULT`. A queued result is selected
+  before ordinary FIFO work but consumes the same bounded message-stage
+  budget. A second result receives the existing finite delayed-retry contract;
+  neither result nor submission is silently replaced.
 - Coordinator shutdown stops the synchronized ingress gate, cancels all three
   consumers, stops the peer monitor and outbox replayer, requests a bounded
   scheduler drain, then closes the RabbitMQ transport before SQLite. Admitted
@@ -117,7 +128,8 @@ The current RabbitMQ path includes:
   and TTL are configurable, and capacity/TTL eviction counters are exposed.
   Cache eviction or participant restart permits re-execution, with SQLite
   generation fencing remaining authoritative.
-- RabbitMQ prefetch configuration.
+- RabbitMQ prefetch configuration, plus the fixed coordinator-only
+  `JOB_SUBMIT` prefetch-`1` safety policy above.
 - Dead-letter exchange, dead-letter queue, final quarantine queue, and explicit
   per-delay retry exchange/queue topology declaration. Retry queue TTL expiry
   routes the message back through its original routing key without a
@@ -161,6 +173,10 @@ The current RabbitMQ path includes:
   active work, offline SQLite/outbox continuity, shared and peer consumer
   restoration, exact pending assignment replay, stale-result fencing, and
   eventual valid completion after participant recovery.
+- Live persistent-overload coverage proves route-local submission credit does
+  not block task-result delivery, a capacity-`1` submission flood cannot
+  exclude an accepted fenced result, active-limit overflow returns typed
+  rejection, and cleanup permits a fresh job without coordinator restart.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
   transport/coordinator gates, including the managed stop/restart scenario,
@@ -204,8 +220,9 @@ TaskFlow does not yet provide:
   added and tested.
 - A DLQ dashboard, bulk editor, or automatic message repair workflow. Current
   DLQ actions are explicit command-line operator decisions.
-- Adaptive broker/participant backpressure beyond bounded scheduler ingress and
-  broker prefetch.
+- Participant-driven adaptive throttling, broker-management queue polling, and
+  dynamic consumer cancellation. Coordinator submission intake is already
+  reduced to prefetch `1` and automatically recovers without cancellation.
 
 Because these pieces are missing, docs should keep RabbitMQ language scoped to
 the tested behavior above.

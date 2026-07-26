@@ -29,7 +29,8 @@ and the conditional store transition still decide whether an event may act.
 | Deadlines | Priority-ordered timeout and lease sets keyed by exact assignment identity | At most two entries per live indexed assignment |
 | Worker assignments | Worker ID to exact assignment keys | At most one entry per live indexed assignment |
 | Worker capacity | Task type to capable live worker IDs plus an exact assignment-ID reservation ledger with per-worker unit/type counters | One capability membership per advertised worker/task-type pair and one reservation per current durable assignment |
-| Inbound mailbox | Bounded blocking queue | `inboundQueueCapacity`, default `1000` |
+| Inbound submission/control lane | Bounded FIFO lane | `inboundQueueCapacity`, default `1000` |
+| Inbound task-result reserve | Bounded priority lane | Fixed capacity `1`; total envelope capacity is configured capacity plus one |
 | Active jobs/tasks | Scheduler-owned map plus exact task counter | `maxActiveJobs`, default `1000`; `maxActiveTasks`, default `100000` |
 | Terminal retry deadlines | Priority-ordered due times keyed by job ID | At most one entry per pending terminal delivery |
 
@@ -160,6 +161,34 @@ normal terminal cleanup returns active counts within range. The pending-outbox
 threshold gates only new J0/T0. Assignment and final-result transactions for
 already accepted work may add required outbox rows.
 
+## Persistent overload
+
+The production mailbox has two internal lanes behind the existing
+`BlockingQueue<MessageEnvelope>` surface. Ordinary submissions and control
+events use the configured capacity. A validated `TaskResultMessage` uses one
+fixed reserve slot. Polling selects a queued result before ordinary FIFO work,
+but the result still consumes one `schedulerMessageBatchSize` unit. A second
+result offered while the reserve is occupied receives the existing bounded
+transient broker handoff; no envelope is evicted or replaced. Deadlines still
+run after every bounded message stage.
+
+RabbitMQ `JOB_SUBMIT` intake uses route-local prefetch `1` on one dedicated
+channel. Result and heartbeat intake keep the configured prefetch on the
+primary channel. Intake remains continuously subscribed: exact replay can
+still be classified before capacity admission, a genuinely new request at a
+dynamic limit receives its typed pre-J0/T0 rejection, and the next eligible
+request can commit immediately after terminal/outbox/lane cleanup without a
+restart or consumer transition.
+
+`SchedulerOverloadStatus` is an infrastructure-free, thread-safe projection,
+not an admission authority. Its immutable snapshot orders active reasons as
+result reserve, submission lane, pending outbox, active jobs, then active
+tasks. Each active reason includes its configured maximum, observed value, and
+activation time. A failed pending-outbox observation retains its last known
+value and marks health false rather than clearing pressure. Startup recovery,
+lane ownership boundaries, active-state changes, outbox commits, and outbox
+sent replay refresh the projection.
+
 ## Deadline fencing
 
 Each scheduled deadline carries:
@@ -212,6 +241,13 @@ assignment-generation reservation/release.
 
 Periodic `scheduler_metrics` events include:
 
+- `overloaded`
+- `overload_primary_reason`
+- `overload_configured_maximum`
+- `overload_observed_value`
+- `overload_reasons`
+- `job_submit_prefetch`
+- `pending_outbox_observation_healthy`
 - `pending_tasks_indexed`
 - `runnable_jobs_indexed`
 - `capacity_waiting_jobs_indexed`
@@ -296,6 +332,12 @@ Additional boundary evidence:
 - [`AdmissionOverloadExperiment#coordinatorHeapPlateausAtConfiguredBounds`](../taskflow-core/src/test/java/server/scheduler/AdmissionOverloadExperiment.java)
   provides the opt-in fixed-heap overload evidence recorded in
   [`reports/admission-overload.md`](reports/admission-overload.md).
+- [`SchedulerOverloadTest#persistentMailboxSaturationPreservesAcceptedWorkAndProgress`](../taskflow-core/src/test/java/server/scheduler/SchedulerOverloadTest.java)
+  provides the fixed-heap capacity-`1` baseline/changed result-progress record
+  in [`reports/persistent-overload.md`](reports/persistent-overload.md).
+- [`SchedulerOverloadTest#activeLimitClearsAndAllowsFreshAdmissionWithoutSchedulerRestart`](../taskflow-core/src/test/java/server/scheduler/SchedulerOverloadTest.java)
+  proves typed rejection performs no candidate commit and cleanup permits a
+  fresh durable admission on the same scheduler thread.
 - [`SchedulerLoopTest#oneCycleAppliesExactStageLimitsInRequiredOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java),
   [`SchedulerLoopTest#continuousMailboxBacklogStillProcessesDeadlinesEveryCycle`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java), and
   [`SchedulerLoopTest#continuousDueDeadlineBacklogCannotStarveQueuedTaskResult`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)

@@ -19,6 +19,9 @@ metrics.
 Queue pressure and scheduler health:
 
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`, `active_tasks`,
+  `overloaded`, `overload_primary_reason`, `overload_configured_maximum`,
+  `overload_observed_value`, `overload_reasons`, `job_submit_prefetch`, and
+  `pending_outbox_observation_healthy`,
   `pending_tasks_indexed`, `runnable_jobs_indexed`,
   `capacity_waiting_jobs_indexed`,
   `live_assignments_indexed`, `deadline_entries_indexed`,
@@ -43,6 +46,20 @@ Queue pressure and scheduler health:
 - `scheduler_ingress_stopped action=broker_requeue_on_transport_close` records
   a delivery that reached the closed coordinator ingress gate and was
   deliberately left unsettled for RabbitMQ ownership recovery.
+- `scheduler_overload_started`, `scheduler_overload_changed`, and
+  `scheduler_overload_recovered` expose the immutable process-local overload
+  projection. Active reasons use stable bounded enum values:
+  `TASK_RESULT_RESERVE_CAPACITY`, `SUBMISSION_MAILBOX_CAPACITY`,
+  `MAX_PENDING_OUTBOX_ROWS`, `MAX_ACTIVE_JOBS`, and `MAX_ACTIVE_TASKS`.
+  Events include primary reason, configured maximum, observed value, the full
+  bounded reason summary, fixed job-submit prefetch, and outbox-observation
+  health; they contain no job IDs.
+- `rabbitmq_route_prefetch_applied` records the dedicated `JOB_SUBMIT`
+  consumer's route, prefetch `1`, and explicit stable consumer tag.
+- `scheduler_overload_outbox_count_failed` and
+  `rabbitmq_outbox_pressure_refresh_failed` distinguish failed overload
+  observations from an observed zero. A failure cannot clear the last known
+  outbox pressure.
 
 Job lifecycle:
 

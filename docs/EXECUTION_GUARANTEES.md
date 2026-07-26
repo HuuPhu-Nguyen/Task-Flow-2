@@ -278,7 +278,11 @@ nodes may enable the requester role, executor role, or both.
 
 ## Scheduler Ingress and Backpressure
 
-- Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
+- Scheduler ingress uses a bounded ordinary submission/control lane controlled
+  by `inboundQueueCapacity` /
+  `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`, plus one fixed
+  task-result reserve. Total envelope capacity is therefore the configured
+  capacity plus one.
 - New-job admission allows resulting active jobs up to
   `maxActiveJobs` / `TASKFLOW_MAX_ACTIVE_JOBS`, default `1000`, and resulting
   retained active tasks up to `maxActiveTasks` /
@@ -328,15 +332,21 @@ nodes may enable the requester role, executor role, or both.
   outside its mailbox.
 - Continuous messages cannot starve deadlines because the message stage ends at
   its limit. Continuous deadlines cannot starve task results because mailbox
-  messages are always processed first.
+  messages are always processed first. Within that stage, one queued task result
+  is selected before ordinary FIFO work; it still consumes one message unit.
 - When no stage leaves immediate work, the scheduler blocks until a mailbox
   message or the earliest assignment, terminal-retry, no-capacity-recheck, or
   metrics due time. Shutdown interrupts that wait before draining admitted
   envelopes.
 - The independent SQLite broker-outbox replayer retains durable replay
   ownership and loads at most `schedulerOutboxBatchSize` rows per pass.
-- RabbitMQ job submissions and task results receive bounded delayed retry when the scheduler mailbox is full instead of being accepted into process memory.
-- RabbitMQ transport channels apply `TASKFLOW_RABBITMQ_PREFETCH` with `basicQos`.
+- RabbitMQ job submissions and task results receive bounded delayed retry when
+  their bounded mailbox lane is full instead of being accepted into process
+  memory.
+- RabbitMQ transport channels normally apply `TASKFLOW_RABBITMQ_PREFETCH` with
+  `basicQos`. Coordinator `JOB_SUBMIT` uses a dedicated channel with fixed
+  route-local prefetch `1`; result and heartbeat intake retain the configured
+  value.
 - Broker deliveries use manual acknowledgement.
 - Deferred acknowledgements keep deliveries unacknowledged until the scheduler or participant explicitly settles them.
 - Live broker coverage verifies `prefetch=1` prevents a second shared-route delivery while the first delivery remains unacknowledged.
@@ -344,10 +354,11 @@ nodes may enable the requester role, executor role, or both.
   mailbox enters the bounded broker retry topology, while stopped intake leaves
   the delivery unsettled for channel-close redelivery. Neither path allocates
   an overflow queue.
-- Adaptive intake reduction and persistent-overload recovery across broker
-  queue depth, executor capacity, and external autoscaling remain TF-0406
-  work. `docs/BACKPRESSURE_SCOPE.md` records the implemented admission
-  boundaries and that remaining scope.
+- Intake remains continuously subscribed, so exact replay is still classified
+  first, new work at a dynamic limit receives typed pre-J0/T0 rejection, and
+  cleanup permits eligible new work without restart. Dynamic participant
+  throttling, broker-management polling, and external autoscaling remain out
+  of scope; `docs/BACKPRESSURE_SCOPE.md` records that boundary.
 
 ## Authoritative Successful-Result Commit
 
@@ -605,6 +616,13 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 
 - `queue_depth`
 - `active_jobs`
+- `overloaded`
+- `overload_primary_reason`
+- `overload_configured_maximum`
+- `overload_observed_value`
+- `overload_reasons`
+- `job_submit_prefetch`
+- `pending_outbox_observation_healthy`
 - `pending_tasks_indexed`
 - `runnable_jobs_indexed`
 - `live_assignments_indexed`

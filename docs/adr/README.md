@@ -20,10 +20,11 @@ record.
 - [0011: Use object storage for large payloads](0011-object-storage-large-payloads.md)
 - [0012: Use simple weighted-capacity scheduling](0012-simple-weighted-capacity-scheduling.md)
 - [0013: Use requester-scoped job-submission idempotency](0013-requester-scoped-job-submission-idempotency.md)
+- [0014: Reserve result progress and reduce submission intake](0014-persistent-overload-intake.md)
 
 ## Format
 
-ADRs 0007–0013 use:
+ADRs 0007–0014 use:
 
 - Status
 - Context

@@ -82,9 +82,13 @@ decision.
 - TF-0405 implements pre-J0/T0 active-job/task, submitted/plugin task,
   inline/reference payload, pending-outbox, and mailbox bounds with typed
   limit responses and fixed-heap plateau evidence.
-- TF-0406 still owns adaptive intake and persistent-overload recovery.
+- TF-0406 implements one fixed task-result reserve, route-local
+  `JOB_SUBMIT` prefetch `1`, immutable overload projection/events, and
+  automatic new-admission recovery after cleanup. It does not change weighted
+  executor eligibility or add a public capacity knob.
 
 ## Related Documents
 
 - [ADR 0007: Single authoritative coordinator](0007-single-authoritative-coordinator.md)
 - [ADR 0011: Object storage for large payloads](0011-object-storage-large-payloads.md)
+- [ADR 0014: Persistent overload intake and result reserve](0014-persistent-overload-intake.md)

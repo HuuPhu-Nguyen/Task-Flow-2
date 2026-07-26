@@ -170,6 +170,22 @@ evicted when an operator lowers a bound: they remain eligible to progress, and
 new admission resumes only after active cleanup returns the projection within
 the configured limits.
 
+Persistent submission pressure cannot consume the scheduler slot needed by
+already accepted task results. The configured inbound capacity is the bounded
+submission/control lane, and the scheduler adds one fixed `TASK_RESULT`
+reserve. Result envelopes are dequeued first but still consume the existing
+per-cycle message budget. The RabbitMQ coordinator consumes `JOB_SUBMIT` on
+one dedicated prefetch-`1` channel, while task results and heartbeats retain
+the configured `TASKFLOW_RABBITMQ_PREFETCH`.
+
+`TaskScheduler.getOverloadSnapshot()` exposes an immutable process-local view
+of submission-lane, result-reserve, pending-outbox, active-job, and active-task
+pressure. The same bounded reason/limit/value fields appear in
+`scheduler_overload_started`, `scheduler_overload_changed`,
+`scheduler_overload_recovered`, and `scheduler_metrics` events. This projection
+is recomputed from authoritative owners, is not persisted, and never grants
+durable acceptance.
+
 For every correctness-relevant runtime transition, the scheduler decides first, attempts a conditional durable write, and changes its `TaskUnit`, active-job, participant-capacity, and metric projections only after `COMMITTED` or an exact `ALREADY_APPLIED` replay. `STALE_STATE` preserves memory and is classified; `UNKNOWN_ENTITY` or `STORAGE_FAILURE` never produces the requested projection or outbound message. Non-outbox and outbox assignment creation, failed-attempt retry/terminal release, successful result commitment, job completion/failure, and final-result outbox creation all use this order. Failed-attempt writes are fenced by task ID, attempt number, assignment ID, and assigned participant just like successful-result writes.
 
 With SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. The last successful task-result transaction also moves its parent job from `RUNNING` to durable `FINALIZING` after verifying that the complete expected task set and every result snapshot are present. Final aggregation runs deterministically from those committed snapshots; terminal job state, semantic final payload, and one outbound `JOB_RESULT` outbox row then commit together before immediate publish or replay. When persistence/outbox storage is unavailable, the same RabbitMQ output follows the non-outbox durable-first boundary that is applicable to the configured state store, but it cannot claim transactional outbound intent.
@@ -560,6 +576,11 @@ $env:TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE = "100"
 ## RabbitMQ Transport
 
 RabbitMQ is TaskFlow's sole supported runtime transport.
+
+`TASKFLOW_RABBITMQ_PREFETCH` remains the normal transport setting. The
+coordinator deliberately overrides only `JOB_SUBMIT` to prefetch `1` on a
+dedicated consumer channel, so held submissions cannot consume result-channel
+credit. This is a fixed safety policy rather than a new public tuning knob.
 
 The RabbitMQ transport module uses the following routes:
 
