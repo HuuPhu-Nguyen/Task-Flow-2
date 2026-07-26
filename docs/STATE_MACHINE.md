@@ -176,8 +176,11 @@ safe.
 
 - **Trigger:** a validated job submission creates its plugin-defined task set.
 - **Preconditions:** the requester-owner/job-ID pair is new after typed durable
-  submission inspection; plugin initialization produced at least one uniquely
-  identified task; the job startup transaction has not already committed.
+  submission inspection; submitted task/inline/reference limits passed;
+  active-job, active-task, and pending-outbox admission allowed the new work;
+  plugin initialization produced at least one uniquely identified task within
+  the per-job and resulting active-task bounds; the job startup transaction has
+  not already committed.
 - **Durable writes:** one `RUNNING` job row and every `PENDING` task row are
   inserted in one SQLite transaction. Task payload snapshots, requester
   ownership fields, job parameters, and the versioned canonical submission
@@ -193,10 +196,14 @@ safe.
   `OWNER_CONFLICT`; a pre-schema-v12 row without a request hash is
   `LEGACY_CONFLICT`. The atomic insert repeats this classification to close the
   preflight/commit race.
-- **Metrics/events:** active-job gauge is refreshed and `job_started` records
-  job ID, type, requester, and task count after acceptance.
+- **Metrics/events:** active-job and active-task gauges are refreshed and
+  `job_started` records job ID, type, requester, and task count after
+  acceptance. `job_admission_rejected` carries the exact limit, configured
+  maximum, and observed value before J0/T0.
 - **Forbidden transitions:** a failed startup transaction must not leave only
-  some task rows, admit the job to `activeJobs`, or dispatch a task.
+  some task rows, admit the job to `activeJobs`, increment the active-task
+  counter, or dispatch a task. A pending-outbox count failure must not be
+  interpreted as zero.
 
 ### T1 — Create assignment generation: `PENDING -> ASSIGNED`
 
@@ -385,14 +392,19 @@ terminalize an `ASSIGNED` task; that assigned branch is T4b with attempt outcome
 - **Preconditions:** the requester token/optional identity signature and route
   binding are valid; the owner/job-ID pair is classified `NEW_SUBMISSION`; the
   server plugin has a non-null retry-safety declaration compatible with the
-  configured retry policy; at least one task was created; T0 can commit for the
-  complete task set. With the current positive `maxTaskRetries` contract,
-  `UNSAFE_TO_RETRY` fails before plugin job construction or T0.
+  configured retry policy; submitted and plugin-produced task counts, inline
+  bytes, per-reference bytes, resulting active job/task counts, and current
+  pending-outbox rows are within their exact admission boundaries; at least one
+  task was created; T0 can commit for the complete task set. Exact replay is
+  handled before those capacity checks. With the current positive
+  `maxTaskRetries` contract, `UNSAFE_TO_RETRY` fails before plugin job
+  construction or T0.
 - **Durable writes:** the job row is inserted as `RUNNING` in the same
   transaction as all T0 rows and the schema-v12 canonical request hash.
 - **Emitted outbox messages:** none.
 - **In-memory projection:** after commit, the job enters `activeJobs`, requester
-  authorization metadata is indexed, and scheduler dispatch may begin.
+  authorization metadata and its exact task count are indexed, and scheduler
+  dispatch may begin.
 - **Idempotent replay:** `REPLAY` sends the same running-status shape used by
   `JOB_RESULT_REQUEST`, an in-memory durable pending result, or a reconstructed
   completed result. Request, owner, and unverifiable-legacy conflicts return a

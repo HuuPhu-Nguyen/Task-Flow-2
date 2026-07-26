@@ -30,6 +30,7 @@ and the conditional store transition still decide whether an event may act.
 | Worker assignments | Worker ID to exact assignment keys | At most one entry per live indexed assignment |
 | Worker capacity | Task type to capable live worker IDs plus an exact assignment-ID reservation ledger with per-worker unit/type counters | One capability membership per advertised worker/task-type pair and one reservation per current durable assignment |
 | Inbound mailbox | Bounded blocking queue | `inboundQueueCapacity`, default `1000` |
+| Active jobs/tasks | Scheduler-owned map plus exact task counter | `maxActiveJobs`, default `1000`; `maxActiveTasks`, default `100000` |
 | Terminal retry deadlines | Priority-ordered due times keyed by job ID | At most one entry per pending terminal delivery |
 
 ## Fair bounded cycle
@@ -50,9 +51,9 @@ overrides are `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`,
 dispatch additionally uses `schedulerMaxAssignmentsPerJobPerRound`, default
 `1`, with environment override
 `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND`. The quota must not
-exceed `schedulerDispatchBatchSize`. The pre-TF-0402 13-argument and TF-0402
-17-argument `SchedulerConfig` constructors remain compatibility overloads and
-supply the default quota.
+exceed `schedulerDispatchBatchSize`. The pre-TF-0402 13-argument, TF-0402
+17-argument, and TF-0403/0404 18-argument `SchedulerConfig` constructors remain
+compatibility overloads and supply the newer defaults.
 
 The work units deliberately count unsuccessful discovery:
 
@@ -118,11 +119,46 @@ an assignment-key map; assignment closure removes both timer entries in
 therefore do not accumulate timers: the index remains at two deadline entries
 for the one live assignment and returns to zero after its committed release.
 
-These are exact bounds relative to already accepted active work. TaskFlow does
-not yet impose absolute active-job or active-task admission limits; TF-0405
-owns those pre-acceptance limits. An index insertion is consequently not
-dropped or evicted under pressure, because silently losing already accepted
-work would violate scheduler progress.
+These are exact bounds relative to already accepted active work, and TF-0405
+now bounds that owner set absolutely. An index insertion is never dropped or
+evicted under pressure, because silently losing already accepted work would
+violate scheduler progress.
+
+## New-job admission
+
+`SchedulerMessageService` remains the single production owner of J0/T0. For a
+new `JOB_SUBMIT`, it validates protocol fields and the submitted task/inline/
+referenced-payload limits, calculates the canonical request hash, and
+classifies the idempotency key before capacity admission. Exact replay
+therefore bypasses admission and creates no task set while the coordinator is
+full.
+
+For a new key, the scheduler reads the constant-time active counts and the
+SQLite aggregate pending-outbox count, then the pure `AdmissionPolicy` checks:
+
+| Limit | Default | Admission boundary |
+|---|---:|---|
+| `maxActiveJobs` / `TASKFLOW_MAX_ACTIVE_JOBS` | `1000` | Allow resulting active jobs `<=`; reject `>` |
+| `maxActiveTasks` / `TASKFLOW_MAX_ACTIVE_TASKS` | `100000` | Allow resulting retained task objects `<=`; reject `>` |
+| `TASKFLOW_MAX_TASKS_PER_JOB` | `256` | Allow both submitted payload count and plugin-produced tasks `<=` |
+| `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` | `67108864` | Allow UTF-8 JSON bytes of submitted task payloads plus parameter `<=` |
+| `TASKFLOW_MAX_INPUT_BYTES` | `33554432` | Allow each recursively discovered `PayloadReference.sizeBytes` `<=` |
+| `maxPendingOutboxRows` / `TASKFLOW_MAX_PENDING_OUTBOX_ROWS` | `100000` | Reject when the current pending count is `>=` |
+| `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY` | `1000` | Queue exactly the capacity; the next broker delivery receives `RETRY_TRANSIENT` |
+
+The early dynamic check uses submitted task count and avoids plugin job
+construction when admission is already impossible. After initialization, the
+plugin-produced task count and resulting active-task count are checked again
+before the transaction. A limit rejection writes no job, task, attempt, lease,
+or outbox row. SQLite pending-count failure is a storage failure, never an
+observed zero. After `commitJobSubmission` returns `COMMITTED`, the active job
+and exact task count enter the projection.
+
+Recovery is deliberately not admission. It retains every accepted recovered
+job even if an operator lowered a bound; new submissions remain rejected until
+normal terminal cleanup returns active counts within range. The pending-outbox
+threshold gates only new J0/T0. Assignment and final-result transactions for
+already accepted work may add required outbox rows.
 
 ## Deadline fencing
 
@@ -229,7 +265,7 @@ RAM, 64-bit Windows 11 Pro 10.0.26200, and Oracle HotSpot Java 25.0.2. The
 operation-count assertion is the portable result; absolute time will vary by
 machine and JVM. The changed design moves work into `O(log A)` assignment
 deadline insertion/removal and still sorts the compatible-worker snapshot.
-Absolute active-work bounds remain assigned to TF-0405.
+TF-0405 now bounds the accepted active-work owner set.
 
 Additional boundary evidence:
 
@@ -251,6 +287,15 @@ Additional boundary evidence:
 - [`SchedulerArchitectureTest#normalSchedulerMaintenanceUsesIndexesInsteadOfFullTaskOrPeerScans`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
   prevents the normal timeout, lease, dispatch, and participant-loss paths from
   regressing to active-job/task/peer scans.
+- [`SchedulerAdmissionTest`](../taskflow-core/src/test/java/server/scheduler/SchedulerAdmissionTest.java)
+  proves typed job/task/payload rejection, exact replay while full, plugin task
+  recounting, and recovery above lowered bounds.
+- [`TaskSchedulerPersistenceTest#pendingOutboxThresholdRejectsWithoutDurableJobMutation`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
+  and its active-job/task/storage-failure companions prove no rejected J0/T0
+  commit or projection mutation.
+- [`AdmissionOverloadExperiment#coordinatorHeapPlateausAtConfiguredBounds`](../taskflow-core/src/test/java/server/scheduler/AdmissionOverloadExperiment.java)
+  provides the opt-in fixed-heap overload evidence recorded in
+  [`reports/admission-overload.md`](reports/admission-overload.md).
 - [`SchedulerLoopTest#oneCycleAppliesExactStageLimitsInRequiredOrder`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java),
   [`SchedulerLoopTest#continuousMailboxBacklogStillProcessesDeadlinesEveryCycle`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java), and
   [`SchedulerLoopTest#continuousDueDeadlineBacklogCannotStarveQueuedTaskResult`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)

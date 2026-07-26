@@ -407,6 +407,7 @@ final class JobCompletionService {
         state.removeJob(jobId);
         pendingCompletions.remove(jobId);
         metrics.setActiveJobs(state.activeJobCount());
+        metrics.setActiveTasks(state.activeTaskCount());
     }
 
     private void scheduleRetryIfPending(PendingJobCompletion completion, long attemptedAtMillis) {

@@ -2190,6 +2190,29 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     }
 
     @Override
+    public synchronized PendingOutboxCount countPendingBrokerOutbox() {
+        String sql = """
+                SELECT COUNT(*) AS pending_count
+                FROM broker_outbox
+                WHERE published_at IS NULL
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) {
+                logSqlFailure(
+                        "countPendingBrokerOutbox",
+                        new SQLException("Pending outbox aggregate returned no row.")
+                );
+                return PendingOutboxCount.storageFailure();
+            }
+            return PendingOutboxCount.counted(rs.getLong("pending_count"));
+        } catch (SQLException | RuntimeException e) {
+            logSqlFailure("countPendingBrokerOutbox", asSqlException(e));
+            return PendingOutboxCount.storageFailure();
+        }
+    }
+
+    @Override
     public synchronized boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
         String sql = """
                 UPDATE broker_outbox

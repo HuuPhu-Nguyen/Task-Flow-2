@@ -79,7 +79,10 @@ decision.
 - TF-0404 implements immutable plugin costs, versioned executor
   advertisements, hard unit/type eligibility, and exact assignment-generation
   reservations.
-- TF-0405 and TF-0406 still own admission and persistent-overload behavior.
+- TF-0405 implements pre-J0/T0 active-job/task, submitted/plugin task,
+  inline/reference payload, pending-outbox, and mailbox bounds with typed
+  limit responses and fixed-heap plateau evidence.
+- TF-0406 still owns adaptive intake and persistent-overload recovery.
 
 ## Related Documents
 

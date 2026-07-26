@@ -1,6 +1,7 @@
 package server.scheduler;
 
 import plugin.RetrySafety;
+import protocol.AdmissionRejection;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
@@ -8,11 +9,13 @@ import protocol.JobSubmissionHasher;
 import protocol.Message;
 import protocol.MessageValidationException;
 import protocol.MessageValidator;
+import protocol.PayloadLimits;
 import protocol.PeerDisconnectedMessage;
 import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
 import protocol.TaskResultMessage;
 import server.db.JobStateStore;
+import server.db.BrokerOutboxStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
 import server.model.MessageEnvelope;
@@ -141,6 +144,7 @@ final class SchedulerMessageService {
     }
 
     private void handleJobSubmit(MessageEnvelope envelope, JobSubmitMessage submit) throws Exception {
+        boolean failureResponseAttempted = false;
         try {
             MessageValidator.validate(submit);
             if (!Objects.equals(envelope.fromNodeId(), submit.getNodeId())) {
@@ -171,6 +175,17 @@ final class SchedulerMessageService {
                 return;
             }
 
+            BrokerOutboxStore.PendingOutboxCount pendingOutbox = pendingOutboxCount(store);
+            AdmissionPolicy.Decision earlyAdmission = evaluateAdmission(
+                    submit.getTaskPayloads().size(),
+                    pendingOutbox
+            );
+            if (!earlyAdmission.allowedDecision()) {
+                failureResponseAttempted = true;
+                rejectAdmission(envelope.fromNodeId(), submit, earlyAdmission);
+                return;
+            }
+
             RetrySafety retrySafety = validatePluginRetrySafety(submit.getTaskType());
             long acceptedAt = clock.nowEpochMillis();
             TransitionDecision decision = transitions.jobSubmitted(acceptedAt);
@@ -183,6 +198,29 @@ final class SchedulerMessageService {
             job.configureTransitionPorts(clock, assignmentIdGenerator);
             if (job.getTasks().isEmpty()) {
                 throw new IllegalArgumentException("Job must create at least one task.");
+            }
+            long pluginTaskCount = job.getTasks().size();
+            if (pluginTaskCount > PayloadLimits.maxTasksPerJob()) {
+                failureResponseAttempted = true;
+                sendAdmissionRejection(
+                        envelope.fromNodeId(),
+                        submit,
+                        new AdmissionRejection(
+                                AdmissionRejection.Limit.MAX_TASKS_PER_JOB,
+                                PayloadLimits.maxTasksPerJob(),
+                                pluginTaskCount
+                        )
+                );
+                return;
+            }
+            AdmissionPolicy.Decision finalAdmission = evaluateAdmission(
+                    pluginTaskCount,
+                    pendingOutbox
+            );
+            if (!finalAdmission.allowedDecision()) {
+                failureResponseAttempted = true;
+                rejectAdmission(envelope.fromNodeId(), submit, finalAdmission);
+                return;
             }
             JobStateStore.JobSubmissionDecision persisted = persistJobStartup(
                     job,
@@ -202,6 +240,7 @@ final class SchedulerMessageService {
             }
             state.addActiveJob(job, requesterTokenHash, requesterIdentityKey, requestHash);
             metrics.setActiveJobs(state.activeJobCount());
+            metrics.setActiveTasks(state.activeTaskCount());
             events.info("job_started", events.fields(
                     "job_id", job.getJobId(),
                     "task_type", job.getTaskType(),
@@ -216,8 +255,108 @@ final class SchedulerMessageService {
                     "requester_id", envelope.fromNodeId(),
                     "error", e.getMessage()
             ));
-            sendJobStartFailure(envelope.fromNodeId(), submit, e.getMessage());
+            if (failureResponseAttempted) {
+                throw e;
+            }
+            sendJobStartFailure(
+                    envelope.fromNodeId(),
+                    submit,
+                    e.getMessage(),
+                    admissionRejectionFor(submit, e)
+            );
         }
+    }
+
+    private AdmissionPolicy.Decision evaluateAdmission(
+            long candidateTasks,
+            BrokerOutboxStore.PendingOutboxCount pendingOutbox) {
+        BrokerOutboxStore.PendingOutboxCount normalized = pendingOutbox == null
+                ? BrokerOutboxStore.PendingOutboxCount.storageFailure()
+                : pendingOutbox;
+        return AdmissionPolicy.evaluate(
+                state.activeJobCount(),
+                state.activeTaskCount(),
+                candidateTasks,
+                normalized.count(),
+                normalized.counted(),
+                config
+        );
+    }
+
+    private static BrokerOutboxStore.PendingOutboxCount pendingOutboxCount(
+            JobStateStore store) {
+        if (!(store instanceof BrokerOutboxStore outboxStore)) {
+            return BrokerOutboxStore.PendingOutboxCount.counted(0L);
+        }
+        BrokerOutboxStore.PendingOutboxCount count = outboxStore.countPendingBrokerOutbox();
+        return count == null
+                ? BrokerOutboxStore.PendingOutboxCount.storageFailure()
+                : count;
+    }
+
+    private void rejectAdmission(String requesterNodeId,
+                                 JobSubmitMessage submit,
+                                 AdmissionPolicy.Decision decision) throws Exception {
+        if (decision.outcome() == AdmissionPolicy.Outcome.STORAGE_FAILURE) {
+            sendJobStartFailure(
+                    requesterNodeId,
+                    submit,
+                    "Job admission could not read the pending broker outbox count.",
+                    null
+            );
+            return;
+        }
+        sendAdmissionRejection(requesterNodeId, submit, decision.rejection());
+    }
+
+    private void sendAdmissionRejection(String requesterNodeId,
+                                        JobSubmitMessage submit,
+                                        AdmissionRejection rejection) throws Exception {
+        events.info("job_admission_rejected", events.fields(
+                "job_id", submit.getJobId(),
+                "task_type", submit.getTaskType(),
+                "requester_id", requesterNodeId,
+                "limit", rejection.limit(),
+                "configured_maximum", rejection.configuredMaximum(),
+                "observed_value", rejection.observedValue()
+        ));
+        sendJobStartFailure(
+                requesterNodeId,
+                submit,
+                "Job admission rejected by " + rejection.limit()
+                        + ": configured maximum " + rejection.configuredMaximum()
+                        + ", observed " + rejection.observedValue() + ".",
+                rejection
+        );
+    }
+
+    private static AdmissionRejection admissionRejectionFor(
+            JobSubmitMessage submit,
+            Exception error) {
+        if (!(error instanceof MessageValidationException validation)) {
+            return null;
+        }
+        return switch (validation.reasonCode()) {
+            case MessageValidator.REASON_MAX_TASKS_PER_JOB -> new AdmissionRejection(
+                    AdmissionRejection.Limit.MAX_TASKS_PER_JOB,
+                    PayloadLimits.maxTasksPerJob(),
+                    submit.getTaskPayloads().size()
+            );
+            case MessageValidator.REASON_MAX_INLINE_MESSAGE_BYTES -> new AdmissionRejection(
+                    AdmissionRejection.Limit.MAX_INLINE_MESSAGE_BYTES,
+                    PayloadLimits.maxJobPayloadBytes(),
+                    PayloadLimits.jobPayloadJsonBytes(
+                            submit.getTaskPayloads(),
+                            submit.getParameter()
+                    )
+            );
+            case MessageValidator.REASON_MAX_REFERENCED_PAYLOAD_BYTES -> new AdmissionRejection(
+                    AdmissionRejection.Limit.MAX_REFERENCED_PAYLOAD_BYTES,
+                    PayloadLimits.maxInputBytes(),
+                    PayloadLimits.maximumReferencedPayloadBytes(submit.getTaskPayloads())
+            );
+            default -> null;
+        };
     }
 
     private RetrySafety validatePluginRetrySafety(String taskType) {
@@ -551,14 +690,33 @@ final class SchedulerMessageService {
     private void sendJobStartFailure(String requesterNodeId,
                                      JobSubmitMessage submit,
                                      String reason) throws Exception {
-        JobResultMessage response = new JobResultMessage(
+        sendJobStartFailure(requesterNodeId, submit, reason, null);
+    }
+
+    private void sendJobStartFailure(String requesterNodeId,
+                                     JobSubmitMessage submit,
+                                     String reason,
+                                     AdmissionRejection admissionRejection) throws Exception {
+        String errorMessage = reason == null || reason.isBlank()
+                ? "Job could not be started."
+                : reason;
+        JobResultMessage response = admissionRejection == null
+                ? new JobResultMessage(
                 "COORDINATOR",
                 clock.now().toString(),
                 safeJobResultId(submit.getJobId()),
                 safeTaskType(submit.getTaskType()),
                 false,
                 List.of(),
-                reason == null || reason.isBlank() ? "Job could not be started." : reason
+                errorMessage
+        )
+                : JobResultMessage.admissionRejected(
+                "COORDINATOR",
+                clock.now().toString(),
+                safeJobResultId(submit.getJobId()),
+                safeTaskType(submit.getTaskType()),
+                errorMessage,
+                admissionRejection
         );
         try {
             if (!output.sendJobResult(requesterNodeId, response)) {

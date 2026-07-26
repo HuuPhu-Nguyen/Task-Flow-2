@@ -5,6 +5,14 @@ adaptive throttling remains deferred.
 
 ## Implemented Boundaries
 
+- New J0/T0 work is rejected explicitly before durable acceptance when
+  configured active-job, active-task, per-job task, inline-byte,
+  per-reference-byte, or pending SQLite-outbox bounds activate. Active limits
+  use resulting count `<=`; pending outbox rejects at the configured
+  threshold. Exact idempotent replay bypasses capacity admission.
+- Limit rejection returns failed protocol-v2 `JOB_RESULT` with a typed
+  `admissionRejection`; pending-outbox count failure is reported as storage
+  failure. Neither path mutates accepted state.
 - Scheduler ingress is bounded by `inboundQueueCapacity` /
   `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`.
 - Scheduler CPU work is also bounded per cycle: message, combined deadline,
@@ -82,12 +90,21 @@ ephemeral peer route disappears or adaptive capacity management.
 - `RabbitMqBrokerRecoveryIntegrationTest` proves the connection retry bound,
   offline coordinator outbox ownership, and exact replay after a real
   single-broker stop/restart while work is active.
+- `SchedulerAdmissionTest`, `TaskSchedulerPersistenceTest`, and
+  `DatabaseManagerTest` prove exact admission boundaries, no rejected J0/T0
+  mutation, replay while full, and aggregate outbox counting/storage failure.
+- `AdmissionOverloadExperiment#coordinatorHeapPlateausAtConfiguredBounds`
+  proves the configured active projection and durable commit count stop at 64
+  jobs / 4,096 tasks through 100,000 unique typed rejections; retained-heap
+  samples are recorded in `reports/admission-overload.md`.
 
 ## Deferred Adaptive Behavior
 
-Adaptive broker/participant backpressure remains deferred because no measured
-overload target currently requires dynamic tuning beyond the bounded mailbox,
-bounded broker retry, deferred acknowledgements, and prefetch controls.
+Adaptive broker/participant backpressure and persistent-overload recovery
+remain TF-0406 scope. TF-0405 now provides measured absolute admission bounds;
+it does not change consumer prefetch dynamically, prioritize result intake
+over submissions within a mailbox, expose a live overload-status API, or prove
+automatic recovery after persistent broker saturation.
 
 Do not add adaptive throttling knobs until a reproducible overload test or demo
 shows a specific failure mode these boundaries do not address. Any future

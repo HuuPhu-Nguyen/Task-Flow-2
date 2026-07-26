@@ -86,6 +86,82 @@ class MessageValidatorTest {
     }
 
     @Test
+    void taskCountLimitAllowsExactBoundaryAndRejectsNextTask() {
+        System.setProperty(PayloadLimits.MAX_TASKS_PER_JOB_PROPERTY, "2");
+        try {
+            JobSubmitMessage exact = submission("job-task-exact", List.of("a", "b"));
+            JobSubmitMessage over = submission("job-task-over", List.of("a", "b", "c"));
+
+            assertDoesNotThrow(() -> MessageValidator.validate(exact));
+            MessageValidationException error = assertThrows(
+                    MessageValidationException.class,
+                    () -> MessageValidator.validate(over)
+            );
+            assertEquals(MessageValidator.REASON_MAX_TASKS_PER_JOB, error.reasonCode());
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_TASKS_PER_JOB_PROPERTY);
+        }
+    }
+
+    @Test
+    void inlineByteLimitAllowsExactBoundaryAndRejectsOneByteLowerMaximum() {
+        JobSubmitMessage message = submission("job-inline-boundary", List.of("payload"));
+        long measured = PayloadLimits.jobPayloadJsonBytes(
+                message.getTaskPayloads(),
+                message.getParameter()
+        );
+        System.setProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY, String.valueOf(measured));
+        try {
+            assertDoesNotThrow(() -> MessageValidator.validate(message));
+            System.setProperty(
+                    PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY,
+                    String.valueOf(measured - 1L)
+            );
+
+            MessageValidationException error = assertThrows(
+                    MessageValidationException.class,
+                    () -> MessageValidator.validate(message)
+            );
+            assertEquals(
+                    MessageValidator.REASON_MAX_INLINE_MESSAGE_BYTES,
+                    error.reasonCode()
+            );
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY);
+        }
+    }
+
+    @Test
+    void referencedPayloadLimitAllowsExactBoundaryAndRejectsOneByteOver() {
+        PayloadReference reference = new PayloadReference(
+                PayloadReference.LOCAL_FILE,
+                "payloads/input.bin",
+                11L,
+                "a".repeat(64)
+        );
+        JobSubmitMessage message = submission(
+                "job-reference-boundary",
+                List.of(Map.of("nested", List.of(reference)))
+        );
+        System.setProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY, "11");
+        try {
+            assertDoesNotThrow(() -> MessageValidator.validate(message));
+            System.setProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY, "10");
+
+            MessageValidationException error = assertThrows(
+                    MessageValidationException.class,
+                    () -> MessageValidator.validate(message)
+            );
+            assertEquals(
+                    MessageValidator.REASON_MAX_REFERENCED_PAYLOAD_BYTES,
+                    error.reasonCode()
+            );
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY);
+        }
+    }
+
+    @Test
     void rejectsOversizeResultPayloads() {
         System.setProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY, "48");
         try {
@@ -211,6 +287,18 @@ class MessageValidatorTest {
                 limits
         );
         return new InvalidCapacity(message, expectedMessage);
+    }
+
+    private static JobSubmitMessage submission(String jobId, List<Object> payloads) {
+        return new JobSubmitMessage(
+                "requester-1",
+                "2026-07-26T00:00:00Z",
+                jobId,
+                "TEXT_ANALYSIS",
+                payloads,
+                "parameter",
+                "token-" + jobId
+        );
     }
 
     private record InvalidCapacity(PongMessage message, String expectedMessage) {

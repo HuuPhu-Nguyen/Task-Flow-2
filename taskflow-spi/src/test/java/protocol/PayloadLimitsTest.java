@@ -2,6 +2,9 @@ package protocol;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -61,5 +64,47 @@ class PayloadLimitsTest {
     void detectsPayloadLimitOverflow() {
         assertTrue(PayloadLimits.wouldExceed(7, 4, 10));
         assertTrue(PayloadLimits.wouldExceed(Long.MAX_VALUE - 1, 10, Long.MAX_VALUE));
+    }
+
+    @Test
+    void measuresNestedPayloadReferencesWithoutPluginTypes() {
+        PayloadReference small = reference(10L, "a");
+        Map<String, Object> serializedLarge = Map.of(
+                "storageType", "local-file",
+                "location", "payloads/b.bin",
+                "sizeBytes", 25L,
+                "sha256", "b".repeat(64)
+        );
+
+        long maximum = PayloadLimits.maximumReferencedPayloadBytes(Map.of(
+                "first", List.of(Map.of("nested", small)),
+                "second", Map.of("deeper", List.of(serializedLarge))
+        ));
+
+        assertEquals(25L, maximum);
+    }
+
+    @Test
+    void rejectsMalformedReferenceSizeMetadata() {
+        Map<String, Object> malformed = Map.of(
+                "storageType", "local-file",
+                "location", "payloads/b.bin",
+                "sizeBytes", 1.5,
+                "sha256", "b".repeat(64)
+        );
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> PayloadLimits.maximumReferencedPayloadBytes(malformed)
+        );
+    }
+
+    private static PayloadReference reference(long sizeBytes, String digestCharacter) {
+        return new PayloadReference(
+                PayloadReference.LOCAL_FILE,
+                "payloads/input.bin",
+                sizeBytes,
+                digestCharacter.repeat(64)
+        );
     }
 }

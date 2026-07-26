@@ -7,6 +7,9 @@ scheduler:
   taskLeaseMs: 120000
   maxTaskRetries: 20
   inboundQueueCapacity: 1000
+  maxActiveJobs: 1000
+  maxActiveTasks: 100000
+  maxPendingOutboxRows: 100000
   jobResultMaxDeliveryAttempts: 300
   schedulerMessageBatchSize: 100
   schedulerDeadlineBatchSize: 100

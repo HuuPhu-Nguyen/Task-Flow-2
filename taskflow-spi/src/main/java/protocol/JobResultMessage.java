@@ -10,6 +10,7 @@ public class JobResultMessage extends Message {
     private Object resultPayload;
     private List<Object> resultsByTaskId;
     private String errorMessage;
+    private AdmissionRejection admissionRejection;
 
     public JobResultMessage(String nodeId, String time,
                             String jobId, String taskType,
@@ -23,7 +24,18 @@ public class JobResultMessage extends Message {
                             boolean successful,
                             List<Object> resultsByTaskId,
                             String errorMessage) {
-        this(nodeId, time, jobId, taskType, successful, resultsByTaskId, resultsByTaskId, errorMessage, false);
+        this(
+                nodeId,
+                time,
+                jobId,
+                taskType,
+                successful,
+                resultsByTaskId,
+                resultsByTaskId,
+                errorMessage,
+                null,
+                false
+        );
     }
 
     public JobResultMessage(String nodeId, String time,
@@ -32,7 +44,18 @@ public class JobResultMessage extends Message {
                             Object resultPayload,
                             List<Object> resultsByTaskId,
                             String errorMessage) {
-        this(nodeId, time, jobId, taskType, successful, resultPayload, resultsByTaskId, errorMessage, true);
+        this(
+                nodeId,
+                time,
+                jobId,
+                taskType,
+                successful,
+                resultPayload,
+                resultsByTaskId,
+                errorMessage,
+                null,
+                true
+        );
     }
 
     public JobResultMessage(String nodeId, String time,
@@ -49,7 +72,13 @@ public class JobResultMessage extends Message {
                              Object resultPayload,
                              List<Object> resultsByTaskId,
                              String errorMessage,
+                             AdmissionRejection admissionRejection,
                              boolean deriveCompatibilityList) {
+        if (successful && admissionRejection != null) {
+            throw new IllegalArgumentException(
+                    "Successful job results cannot carry an admission rejection."
+            );
+        }
         this.type = MessageType.JOB_RESULT;
         this.nodeId = nodeId;
         this.time = time;
@@ -61,6 +90,30 @@ public class JobResultMessage extends Message {
                 ? compatibilityResultList(resultPayload)
                 : resultsByTaskId;
         this.errorMessage = errorMessage;
+        this.admissionRejection = admissionRejection;
+    }
+
+    public static JobResultMessage admissionRejected(String nodeId,
+                                                     String time,
+                                                     String jobId,
+                                                     String taskType,
+                                                     String errorMessage,
+                                                     AdmissionRejection rejection) {
+        if (rejection == null) {
+            throw new IllegalArgumentException("Admission rejection detail is required.");
+        }
+        return new JobResultMessage(
+                nodeId,
+                time,
+                jobId,
+                taskType,
+                false,
+                List.of(),
+                List.of(),
+                errorMessage,
+                rejection,
+                false
+        );
     }
 
     public JobResultMessage() {
@@ -94,6 +147,10 @@ public class JobResultMessage extends Message {
 
     public String getErrorMessage() {
         return errorMessage;
+    }
+
+    public AdmissionRejection getAdmissionRejection() {
+        return admissionRejection;
     }
 
     private static List<Object> compatibilityResultList(Object payload) {

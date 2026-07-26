@@ -22,6 +22,9 @@ class SchedulerConfigTest {
         assertEquals(120_000L, config.taskLeaseMillis());
         assertEquals(20, config.maxTaskRetries());
         assertEquals(1000, config.inboundQueueCapacity());
+        assertEquals(1_000L, config.maxActiveJobs());
+        assertEquals(100_000L, config.maxActiveTasks());
+        assertEquals(100_000L, config.maxPendingOutboxRows());
         assertEquals(300, config.jobResultMaxDeliveryAttempts());
         assertEquals(100, config.schedulerMessageBatchSize());
         assertEquals(100, config.schedulerDeadlineBatchSize());
@@ -45,6 +48,9 @@ class SchedulerConfigTest {
                 Map.entry("TASKFLOW_TASK_LEASE_MS", "180000"),
                 Map.entry("TASKFLOW_MAX_TASK_RETRIES", "5"),
                 Map.entry("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "77"),
+                Map.entry("TASKFLOW_MAX_ACTIVE_JOBS", "79"),
+                Map.entry("TASKFLOW_MAX_ACTIVE_TASKS", "81"),
+                Map.entry("TASKFLOW_MAX_PENDING_OUTBOX_ROWS", "83"),
                 Map.entry("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "11"),
                 Map.entry("TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE", "13"),
                 Map.entry("TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE", "17"),
@@ -65,6 +71,9 @@ class SchedulerConfigTest {
         assertEquals(180_000L, config.taskLeaseMillis());
         assertEquals(5, config.maxTaskRetries());
         assertEquals(77, config.inboundQueueCapacity());
+        assertEquals(79L, config.maxActiveJobs());
+        assertEquals(81L, config.maxActiveTasks());
+        assertEquals(83L, config.maxPendingOutboxRows());
         assertEquals(11, config.jobResultMaxDeliveryAttempts());
         assertEquals(13, config.schedulerMessageBatchSize());
         assertEquals(17, config.schedulerDeadlineBatchSize());
@@ -87,6 +96,12 @@ class SchedulerConfigTest {
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_TASK_LEASE_MS", "0")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_ACTIVE_JOBS", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_ACTIVE_TASKS", "0")));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_MAX_PENDING_OUTBOX_ROWS", "0")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS", "0")));
         assertThrows(IllegalArgumentException.class,
@@ -122,6 +137,9 @@ class SchedulerConfigTest {
                   taskLeaseMs: 150000
                   maxTaskRetries: 6
                   inboundQueueCapacity: 123
+                  maxActiveJobs: 125
+                  maxActiveTasks: 127
+                  maxPendingOutboxRows: 129
                   jobResultMaxDeliveryAttempts: 12
                   schedulerMessageBatchSize: 14
                   schedulerDeadlineBatchSize: 16
@@ -145,6 +163,9 @@ class SchedulerConfigTest {
         assertEquals(150_000L, config.taskLeaseMillis());
         assertEquals(6, config.maxTaskRetries());
         assertEquals(123, config.inboundQueueCapacity());
+        assertEquals(125L, config.maxActiveJobs());
+        assertEquals(127L, config.maxActiveTasks());
+        assertEquals(129L, config.maxPendingOutboxRows());
         assertEquals(12, config.jobResultMaxDeliveryAttempts());
         assertEquals(14, config.schedulerMessageBatchSize());
         assertEquals(16, config.schedulerDeadlineBatchSize());
@@ -221,6 +242,12 @@ class SchedulerConfigTest {
         );
 
         assertEquals(13, config.schedulerDispatchBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_MAX_ACTIVE_JOBS, config.maxActiveJobs());
+        assertEquals(SchedulerConfig.DEFAULT_MAX_ACTIVE_TASKS, config.maxActiveTasks());
+        assertEquals(
+                SchedulerConfig.DEFAULT_MAX_PENDING_OUTBOX_ROWS,
+                config.maxPendingOutboxRows()
+        );
         assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
                 config.schedulerMaxAssignmentsPerJobPerRound());
     }
@@ -255,5 +282,11 @@ class SchedulerConfigTest {
                 config.schedulerMaxAssignmentsPerJobPerRound());
         assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
                 config.schedulerOutboxBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_MAX_ACTIVE_JOBS, config.maxActiveJobs());
+        assertEquals(SchedulerConfig.DEFAULT_MAX_ACTIVE_TASKS, config.maxActiveTasks());
+        assertEquals(
+                SchedulerConfig.DEFAULT_MAX_PENDING_OUTBOX_ROWS,
+                config.maxPendingOutboxRows()
+        );
     }
 }

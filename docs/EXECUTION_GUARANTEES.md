@@ -279,6 +279,30 @@ nodes may enable the requester role, executor role, or both.
 ## Scheduler Ingress and Backpressure
 
 - Scheduler ingress uses a bounded mailbox controlled by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`, default `1000`.
+- New-job admission allows resulting active jobs up to
+  `maxActiveJobs` / `TASKFLOW_MAX_ACTIVE_JOBS`, default `1000`, and resulting
+  retained active tasks up to `maxActiveTasks` /
+  `TASKFLOW_MAX_ACTIVE_TASKS`, default `100000`.
+- `TASKFLOW_MAX_TASKS_PER_JOB`, default `256`, is enforced on the submitted
+  payload count and again on the plugin-produced task count.
+  `TASKFLOW_MAX_JOB_PAYLOAD_BYTES`, default `67108864`, measures UTF-8 JSON
+  bytes of the task payloads plus parameter. `TASKFLOW_MAX_INPUT_BYTES`,
+  default `33554432`, is enforced per recursively discovered
+  `PayloadReference.sizeBytes`.
+- A SQLite-backed coordinator rejects new work when the current unpublished
+  broker-outbox count is at least `maxPendingOutboxRows` /
+  `TASKFLOW_MAX_PENDING_OUTBOX_ROWS`, default `100000`. The count uses a SQL
+  aggregate; read failure is storage failure, not zero.
+- Submission validation and canonical request hashing precede capacity
+  admission. Exact replay bypasses the capacity checks and creates no tasks.
+  New work is checked before plugin construction when already impossible, then
+  checked again against the plugin-produced task count before J0/T0.
+- Limit rejection writes no job, task, attempt, lease, or outbox row and
+  returns unsuccessful protocol-v2 `JOB_RESULT` with typed
+  `admissionRejection`. The broker delivery is acknowledged only after that
+  response is routed. Recovered accepted work is retained above a newly
+  lowered bound and continues under the existing scheduling assumptions; only
+  new work waits for cleanup.
 - Each cycle processes at most the configured message, combined deadline,
   dispatch, and terminal/outbox budgets, in that order. The YAML fields are
   `schedulerMessageBatchSize`, `schedulerDeadlineBatchSize`,
@@ -320,7 +344,10 @@ nodes may enable the requester role, executor role, or both.
   mailbox enters the bounded broker retry topology, while stopped intake leaves
   the delivery unsettled for channel-close redelivery. Neither path allocates
   an overflow queue.
-- Adaptive backpressure across broker queue depth, executor capacity, and external autoscaling remains future work. `docs/BACKPRESSURE_SCOPE.md` records the current backpressure boundaries and the evidence required before adding adaptive throttling.
+- Adaptive intake reduction and persistent-overload recovery across broker
+  queue depth, executor capacity, and external autoscaling remain TF-0406
+  work. `docs/BACKPRESSURE_SCOPE.md` records the implemented admission
+  boundaries and that remaining scope.
 
 ## Authoritative Successful-Result Commit
 

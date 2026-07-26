@@ -6,6 +6,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.AppenderBase;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
+import protocol.AdmissionRejection;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
@@ -53,6 +54,203 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskSchedulerPersistenceTest {
+
+    @Test
+    void activeJobAdmissionRejectionPerformsNoSecondDurableCommit() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_ACTIVE_JOBS", "1",
+                "TASKFLOW_MAX_ACTIVE_TASKS", "10"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                config
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-active-job-admission-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(testJob("job-admitted", List.of("a")), "requester-1"));
+            mailbox.put(new MessageEnvelope(testJob("job-rejected", List.of("b")), "requester-1"));
+
+            assertTrue(output.awaitResult());
+            assertAdmissionRejection(
+                    output.result(),
+                    AdmissionRejection.Limit.MAX_ACTIVE_JOBS,
+                    1L,
+                    2L
+            );
+            assertEquals(1L, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1L, scheduler.getMetricsSnapshot().activeTasks());
+            assertEquals(1L, startupCommitCount(store));
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
+
+    @Test
+    void activeTaskAdmissionRejectionPerformsNoSecondDurableCommit() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_ACTIVE_JOBS", "10",
+                "TASKFLOW_MAX_ACTIVE_TASKS", "2"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                config
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-active-task-admission-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-two-tasks", List.of("a", "b")),
+                    "requester-1"
+            ));
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-task-rejected", List.of("c")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertAdmissionRejection(
+                    output.result(),
+                    AdmissionRejection.Limit.MAX_ACTIVE_TASKS,
+                    2L,
+                    3L
+            );
+            assertEquals(1L, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(2L, scheduler.getMetricsSnapshot().activeTasks());
+            assertEquals(1L, startupCommitCount(store));
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
+
+    @Test
+    void pendingOutboxThresholdRejectsWithoutDurableJobMutation() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.enqueueBrokerOutbox(testPendingOutboxMessage());
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_PENDING_OUTBOX_ROWS", "1"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                config
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-admission-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-outbox-rejected", List.of("a")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertAdmissionRejection(
+                    output.result(),
+                    AdmissionRejection.Limit.MAX_PENDING_OUTBOX_ROWS,
+                    1L,
+                    1L
+            );
+            assertEquals(0L, startupCommitCount(store));
+            assertEquals(0L, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, store.pendingOutboxCountReads());
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
+
+    @Test
+    void exactReplayBypassesPendingOutboxThreshold() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_ACTIVE_JOBS", "1",
+                "TASKFLOW_MAX_PENDING_OUTBOX_ROWS", "1"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                config
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-replay-admission-test");
+        schedulerThread.start();
+        JobSubmitMessage submit = testJob("job-replay-outbox-full", List.of("a"));
+
+        try {
+            mailbox.put(new MessageEnvelope(submit, "requester-1"));
+            assertTrue(awaitActiveJobs(scheduler, 1L));
+            store.enqueueBrokerOutbox(testPendingOutboxMessage());
+            mailbox.put(new MessageEnvelope(submit, "requester-1"));
+
+            assertTrue(output.awaitResult());
+            assertEquals("Job is still running.", output.result().getErrorMessage());
+            assertNull(output.result().getAdmissionRejection());
+            assertEquals(1L, startupCommitCount(store));
+            assertEquals(1, store.pendingOutboxCountReads());
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
+
+    @Test
+    void pendingOutboxCountFailureRejectsWithoutPretendingCountIsZero() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        OutboxRecordingJobStateStore store = new OutboxRecordingJobStateStore();
+        store.failPendingOutboxCount();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        TaskScheduler scheduler = new TaskScheduler(
+                mailbox,
+                new InMemoryPeerRegistry(),
+                store,
+                output,
+                SchedulerConfig.defaults()
+        );
+        Thread schedulerThread = new Thread(scheduler, "scheduler-outbox-count-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-outbox-count-failure", List.of("a")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertTrue(output.result().getErrorMessage().contains("could not read"));
+            assertNull(output.result().getAdmissionRejection());
+            assertEquals(0L, startupCommitCount(store));
+            assertEquals(0L, scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(1, store.pendingOutboxCountReads());
+        } finally {
+            scheduler.requestShutdownAfterDrain();
+            schedulerThread.join(2_000L);
+        }
+    }
 
     @Test
     void successfulJobPersistsLifecycleTransitions() throws Exception {
@@ -1663,6 +1861,41 @@ class TaskSchedulerPersistenceTest {
         );
     }
 
+    private static BrokerOutboxStore.OutboxMessage testPendingOutboxMessage() {
+        return new BrokerOutboxStore.OutboxMessage(
+                TransportRoute.JOB_RESULT,
+                "requester-1",
+                "COORDINATOR",
+                new JobResultMessage(
+                        "COORDINATOR",
+                        "2026-07-26T00:00:00Z",
+                        "job-pending-outbox",
+                        TestTaskPlugin.TASK_TYPE,
+                        false,
+                        List.of(),
+                        "pending"
+                )
+        );
+    }
+
+    private static long startupCommitCount(RecordingJobStateStore store) {
+        return store.events().stream()
+                .filter(event -> event.startsWith("insertJobWithTasks:"))
+                .count();
+    }
+
+    private static void assertAdmissionRejection(JobResultMessage result,
+                                                 AdmissionRejection.Limit limit,
+                                                 long configuredMaximum,
+                                                 long observedValue) {
+        assertNotNull(result);
+        assertFalse(result.isSuccessful());
+        assertNotNull(result.getAdmissionRejection());
+        assertEquals(limit, result.getAdmissionRejection().limit());
+        assertEquals(configuredMaximum, result.getAdmissionRejection().configuredMaximum());
+        assertEquals(observedValue, result.getAdmissionRejection().observedValue());
+    }
+
     private static JobSubmitMessage signedTestJob(String jobId,
                                                   List<Object> payloads,
                                                   String requesterToken,
@@ -2689,6 +2922,8 @@ class TaskSchedulerPersistenceTest {
         private int assignmentOutboxAttempts;
         private boolean failNextFinalOutbox;
         private int finalOutboxAttempts;
+        private boolean failPendingOutboxCount;
+        private int pendingOutboxCountReads;
 
         @Override
         public synchronized Optional<OutboxRecord> enqueueBrokerOutbox(OutboxMessage message) {
@@ -2854,6 +3089,17 @@ class TaskSchedulerPersistenceTest {
         }
 
         @Override
+        public synchronized PendingOutboxCount countPendingBrokerOutbox() {
+            pendingOutboxCountReads++;
+            if (failPendingOutboxCount) {
+                return PendingOutboxCount.storageFailure();
+            }
+            return PendingOutboxCount.counted(outboxRecords.stream()
+                    .filter(record -> !publishedOutboxIds.contains(record.outboxId()))
+                    .count());
+        }
+
+        @Override
         public synchronized boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
             publishedOutboxIds.add(outboxId);
             return true;
@@ -2867,6 +3113,14 @@ class TaskSchedulerPersistenceTest {
 
         synchronized List<OutboxRecord> allOutboxRecords() {
             return List.copyOf(outboxRecords);
+        }
+
+        synchronized void failPendingOutboxCount() {
+            failPendingOutboxCount = true;
+        }
+
+        synchronized int pendingOutboxCountReads() {
+            return pendingOutboxCountReads;
         }
 
         synchronized List<Long> failedOutboxIds() {

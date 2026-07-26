@@ -938,6 +938,10 @@ class DatabaseManagerTest {
 
             List<BrokerOutboxStore.OutboxRecord> pending = db.loadPendingBrokerOutbox(10);
             assertEquals(1, pending.size());
+            assertEquals(
+                    BrokerOutboxStore.PendingOutboxCount.counted(1L),
+                    db.countPendingBrokerOutbox()
+            );
             assertEquals(committed.outboxRecord().outboxId(), pending.getFirst().outboxId());
             assertEquals(123L, pending.getFirst().createdAt());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
@@ -970,7 +974,27 @@ class DatabaseManagerTest {
 
             assertTrue(reopened.markBrokerOutboxPublished(committed.outboxRecord().outboxId(), 789L));
             assertEquals(List.of(), reopened.loadPendingBrokerOutbox(10));
+            assertEquals(
+                    BrokerOutboxStore.PendingOutboxCount.counted(0L),
+                    reopened.countPendingBrokerOutbox()
+            );
         }
+    }
+
+    @Test
+    void pendingOutboxAggregateDistinguishesStorageFailure() throws Exception {
+        DatabaseManager db = new DatabaseManager(
+                tempDir.resolve("taskflow-outbox-count-failure.db").toString()
+        );
+        db.close();
+
+        BrokerOutboxStore.PendingOutboxCount count = db.countPendingBrokerOutbox();
+
+        assertEquals(
+                BrokerOutboxStore.PendingOutboxCountOutcome.STORAGE_FAILURE,
+                count.outcome()
+        );
+        assertEquals(0L, count.count());
     }
 
     @Test

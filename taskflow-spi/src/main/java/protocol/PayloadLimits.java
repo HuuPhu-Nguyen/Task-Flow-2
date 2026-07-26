@@ -1,9 +1,21 @@
 package protocol;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 /**
  * Shared client-payload guardrails for plugins that inline task data in messages.
  */
 public final class PayloadLimits {
+    private static final Gson GSON = new Gson();
     public static final long DEFAULT_MAX_INPUT_BYTES = 32L * 1024L * 1024L;
     public static final int DEFAULT_MAX_TASKS_PER_JOB = 256;
     public static final long DEFAULT_MAX_JOB_PAYLOAD_BYTES = 64L * 1024L * 1024L;
@@ -50,6 +62,92 @@ public final class PayloadLimits {
 
     public static boolean wouldExceed(long currentBytes, long nextBytes, long maxBytes) {
         return nextBytes > maxBytes || currentBytes > maxBytes - nextBytes;
+    }
+
+    /**
+     * Measures the exact UTF-8 JSON bytes governed by the submitted-job inline
+     * payload limit.
+     */
+    public static long jobPayloadJsonBytes(List<Object> taskPayloads, String parameter) {
+        Map<String, Object> payloadEnvelope = new LinkedHashMap<>();
+        payloadEnvelope.put("taskPayloads", taskPayloads);
+        payloadEnvelope.put("parameter", parameter == null ? "" : parameter);
+        return GSON.toJson(payloadEnvelope).getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /**
+     * Finds the largest protocol payload reference recursively without
+     * depending on any plugin payload type.
+     */
+    public static long maximumReferencedPayloadBytes(Object value) {
+        return maximumReferencedPayloadBytes(GSON.toJsonTree(value));
+    }
+
+    private static long maximumReferencedPayloadBytes(JsonElement value) {
+        if (value == null || value.isJsonNull() || value.isJsonPrimitive()) {
+            return 0L;
+        }
+        if (value.isJsonArray()) {
+            long maximum = 0L;
+            for (JsonElement element : value.getAsJsonArray()) {
+                maximum = Math.max(maximum, maximumReferencedPayloadBytes(element));
+            }
+            return maximum;
+        }
+
+        JsonObject object = value.getAsJsonObject();
+        if (looksLikePayloadReference(object)) {
+            return payloadReferenceSize(object);
+        }
+        long maximum = 0L;
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            maximum = Math.max(maximum, maximumReferencedPayloadBytes(entry.getValue()));
+        }
+        return maximum;
+    }
+
+    private static boolean looksLikePayloadReference(JsonObject object) {
+        return object.has("storageType")
+                && object.has("location")
+                && object.has("sizeBytes")
+                && object.has("sha256");
+    }
+
+    private static long payloadReferenceSize(JsonObject object) {
+        JsonElement storageType = object.get("storageType");
+        JsonElement location = object.get("location");
+        JsonElement sizeBytes = object.get("sizeBytes");
+        JsonElement sha256 = object.get("sha256");
+        if (!isString(storageType) || !isString(location) || !isString(sha256)
+                || sizeBytes == null || !sizeBytes.isJsonPrimitive()
+                || !sizeBytes.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("Payload reference metadata is malformed.");
+        }
+
+        long size;
+        try {
+            size = new BigDecimal(sizeBytes.getAsString()).longValueExact();
+        } catch (ArithmeticException | NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "Payload reference sizeBytes must be an integer.",
+                    e
+            );
+        }
+        new PayloadReference(
+                storageType.getAsString(),
+                location.getAsString(),
+                size,
+                sha256.getAsString()
+        );
+        return size;
+    }
+
+    private static boolean isString(JsonElement value) {
+        if (value == null || !value.isJsonPrimitive()) {
+            return false;
+        }
+        JsonPrimitive primitive = value.getAsJsonPrimitive();
+        return primitive.isString();
     }
 
     private static long positiveLong(String propertyName, String envName, long defaultValue) {

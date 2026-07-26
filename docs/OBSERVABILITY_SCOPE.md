@@ -18,7 +18,7 @@ metrics.
 
 Queue pressure and scheduler health:
 
-- `scheduler_metrics` includes `queue_depth`, `active_jobs`,
+- `scheduler_metrics` includes `queue_depth`, `active_jobs`, `active_tasks`,
   `pending_tasks_indexed`, `runnable_jobs_indexed`,
   `capacity_waiting_jobs_indexed`,
   `live_assignments_indexed`, `deadline_entries_indexed`,
@@ -54,6 +54,10 @@ Job lifecycle:
 - `job_submission_conflict` distinguishes `REQUEST_CONFLICT`,
   `OWNER_CONFLICT`, and `LEGACY_CONFLICT` without logging the requester token or
   canonical request hash.
+- `job_admission_rejected` identifies a pre-J0/T0 limit rejection with
+  `job_id`, `task_type`, requester, typed `limit`, `configured_maximum`, and
+  `observed_value`. Pending-outbox count read failure remains the distinct
+  `job_start_failed` storage-failure path.
 - `job_completed` records terminal scheduler completion with success and result
   count.
 - `job_failed` records terminal scheduler failure reasons.

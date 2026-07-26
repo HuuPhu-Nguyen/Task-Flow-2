@@ -24,6 +24,7 @@ public class TaskScheduler implements Runnable {
     private final SchedulerLoop loop;
     private final RecoveryService recovery;
     private final SchedulerMetrics metrics;
+    private final SchedulerState state;
 
     public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
                          PeerRegistry registry,
@@ -89,6 +90,7 @@ public class TaskScheduler implements Runnable {
         }
 
         SchedulerState state = new SchedulerState(effectiveConfig);
+        this.state = state;
         this.metrics = new SchedulerMetrics();
         SchedulerEventLog events = new SchedulerEventLog();
         SchedulerPersistence persistence = new SchedulerPersistence(db, events);
@@ -246,6 +248,10 @@ public class TaskScheduler implements Runnable {
 
     public SchedulerMetrics.Snapshot getMetricsSnapshot() {
         return metrics.snapshot();
+    }
+
+    SchedulerWorkloadIndex.Snapshot getWorkloadSnapshot() {
+        return state.workloadSnapshot();
     }
 
     public void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs) {

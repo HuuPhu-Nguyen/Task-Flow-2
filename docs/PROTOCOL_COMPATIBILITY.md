@@ -31,7 +31,7 @@ below.
 | `PONG` | v3 | Yes, with all required capacity fields | Yes, liveness only | Yes, liveness only | Yes, liveness only | Legacy heartbeats clear scheduling capacity; reject unsupported or invalid versions. |
 | `JOB_SUBMIT` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before scheduler/plugin dispatch. |
 | `JOB_RESULT_REQUEST` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before authorization. |
-| `JOB_RESULT` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before requester/result-handler dispatch. |
+| `JOB_RESULT` | v2 | No | Yes | Yes | Yes | Additive optional `admissionRejection` is ignored by older readers; reject invalid versions or fields before requester/result-handler dispatch. |
 | `PEER_DISCONNECTED` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
 | `TASK_ASSIGN` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it. |
 | `TASK_RESULT` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
@@ -183,12 +183,34 @@ to version-2 assignment identity and version-3 capacity fields, it enforces:
   and `-`;
 - `TASKFLOW_MAX_TASKS_PER_JOB` on submitted payloads and advertised task types;
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` on job payloads and task assignments;
+- `TASKFLOW_MAX_INPUT_BYTES` on each recursively discovered submitted
+  `PayloadReference.sizeBytes`;
 - `TASKFLOW_MAX_RESULT_BYTES` on task and final job results.
 
 Invalid `JOB_SUBMIT` and `JOB_RESULT_REQUEST` messages that reach the scheduler
 are converted to failed `JOB_RESULT` responses when the requester can be
 routed. Invalid non-submit messages are rejected or dropped. This is a
 message-safety boundary, not user/account authentication.
+
+Task-count, inline-byte, referenced-payload, active-job, active-task, and
+pending-outbox admission failures use unsuccessful protocol-v2 `JOB_RESULT`
+with the existing human-readable `errorMessage` plus optional:
+
+```json
+{
+  "admissionRejection": {
+    "limit": "MAX_ACTIVE_TASKS",
+    "configuredMaximum": 100000,
+    "observedValue": 100001
+  }
+}
+```
+
+No message type or version changed. Legacy JSON without the field deserializes
+with no rejection detail, and older readers may ignore the additive field.
+Ordinary successful and terminal-result constructors never attach it.
+Mailbox-full deliveries have not entered scheduler admission, so they retain
+the broker `RETRY_TRANSIENT` disposition and do not invent a requester result.
 
 ## Current Fencing Boundary
 

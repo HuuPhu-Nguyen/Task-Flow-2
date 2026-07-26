@@ -12,6 +12,39 @@ import java.util.List;
 import java.util.Optional;
 
 public interface BrokerOutboxStore {
+    enum PendingOutboxCountOutcome {
+        COUNTED,
+        STORAGE_FAILURE
+    }
+
+    record PendingOutboxCount(PendingOutboxCountOutcome outcome, long count) {
+        public PendingOutboxCount {
+            outcome = outcome == null
+                    ? PendingOutboxCountOutcome.STORAGE_FAILURE
+                    : outcome;
+            if (count < 0L) {
+                throw new IllegalArgumentException("Pending outbox count must not be negative");
+            }
+            if (outcome == PendingOutboxCountOutcome.STORAGE_FAILURE && count != 0L) {
+                throw new IllegalArgumentException(
+                        "Storage-failure pending outbox count must be zero"
+                );
+            }
+        }
+
+        public static PendingOutboxCount counted(long count) {
+            return new PendingOutboxCount(PendingOutboxCountOutcome.COUNTED, count);
+        }
+
+        public static PendingOutboxCount storageFailure() {
+            return new PendingOutboxCount(PendingOutboxCountOutcome.STORAGE_FAILURE, 0L);
+        }
+
+        public boolean counted() {
+            return outcome == PendingOutboxCountOutcome.COUNTED;
+        }
+    }
+
     record OutboxMessage(TransportRoute route,
                          String peerNodeId,
                          String fromNodeId,
@@ -225,6 +258,8 @@ public interface BrokerOutboxStore {
     }
 
     List<OutboxRecord> loadPendingBrokerOutbox(int limit);
+
+    PendingOutboxCount countPendingBrokerOutbox();
 
     boolean markBrokerOutboxPublished(long outboxId, long publishedAt);
 

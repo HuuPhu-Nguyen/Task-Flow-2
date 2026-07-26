@@ -31,6 +31,10 @@ public final class MessageValidator {
     public static final String REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED = "assignment_protocol_v2_required";
     public static final String REASON_INVALID_ASSIGNMENT_IDENTITY = "invalid_assignment_identity";
     public static final String REASON_INVALID_CAPACITY_ADVERTISEMENT = "invalid_capacity_advertisement";
+    public static final String REASON_MAX_TASKS_PER_JOB = "max_tasks_per_job";
+    public static final String REASON_MAX_INLINE_MESSAGE_BYTES = "max_inline_message_bytes";
+    public static final String REASON_MAX_REFERENCED_PAYLOAD_BYTES = "max_referenced_payload_bytes";
+    public static final String REASON_INVALID_PAYLOAD_REFERENCE = "invalid_payload_reference";
 
     private MessageValidator() {
     }
@@ -69,7 +73,8 @@ public final class MessageValidator {
             throw new MessageValidationException("Job submit taskPayloads field is required.");
         }
         if (submit.getTaskPayloads().size() > PayloadLimits.maxTasksPerJob()) {
-            throw new MessageValidationException("Job submit task payload count exceeds "
+            throw new MessageValidationException(REASON_MAX_TASKS_PER_JOB,
+                    "Job submit task payload count exceeds "
                     + PayloadLimits.MAX_TASKS_PER_JOB_ENV + " (" + PayloadLimits.maxTasksPerJob()
                     + "): " + submit.getTaskPayloads().size());
         }
@@ -77,11 +82,38 @@ public final class MessageValidator {
         optionalTextBytes(submit.getRequesterPublicKey(), "Requester public key", MAX_TEXT_FIELD_BYTES);
         optionalTextBytes(submit.getRequesterSignature(), "Requester signature", MAX_TEXT_FIELD_BYTES);
 
-        Map<String, Object> payloadEnvelope = new LinkedHashMap<>();
-        payloadEnvelope.put("taskPayloads", submit.getTaskPayloads());
-        payloadEnvelope.put("parameter", submit.getParameter() == null ? "" : submit.getParameter());
-        validateJsonBytes(payloadEnvelope, PayloadLimits.maxJobPayloadBytes(),
-                "Job submit payload", PayloadLimits.MAX_JOB_PAYLOAD_BYTES_ENV);
+        long inlineBytes = PayloadLimits.jobPayloadJsonBytes(
+                submit.getTaskPayloads(),
+                submit.getParameter()
+        );
+        if (inlineBytes > PayloadLimits.maxJobPayloadBytes()) {
+            throw new MessageValidationException(
+                    REASON_MAX_INLINE_MESSAGE_BYTES,
+                    "Job submit payload exceeds " + PayloadLimits.MAX_JOB_PAYLOAD_BYTES_ENV
+                            + " (" + PayloadLimits.maxJobPayloadBytes() + " bytes): "
+                            + inlineBytes
+            );
+        }
+
+        long maximumReferenceBytes;
+        try {
+            maximumReferenceBytes = PayloadLimits.maximumReferencedPayloadBytes(
+                    submit.getTaskPayloads()
+            );
+        } catch (IllegalArgumentException e) {
+            throw new MessageValidationException(
+                    REASON_INVALID_PAYLOAD_REFERENCE,
+                    e.getMessage()
+            );
+        }
+        if (maximumReferenceBytes > PayloadLimits.maxInputBytes()) {
+            throw new MessageValidationException(
+                    REASON_MAX_REFERENCED_PAYLOAD_BYTES,
+                    "Job submit payload reference exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
+                            + " (" + PayloadLimits.maxInputBytes() + " bytes): "
+                            + maximumReferenceBytes
+            );
+        }
     }
 
     public static void validateJobResultRequest(JobResultRequestMessage request) {
@@ -201,6 +233,11 @@ public final class MessageValidator {
     }
 
     private static void validateJobResult(JobResultMessage result) {
+        if (result.isSuccessful() && result.getAdmissionRejection() != null) {
+            throw new MessageValidationException(
+                    "Successful job result cannot carry an admission rejection."
+            );
+        }
         if (result.isSuccessful()) {
             validateJobId(result.getJobId(), "Job id");
             validateTaskType(result.getTaskType(), "Task type");

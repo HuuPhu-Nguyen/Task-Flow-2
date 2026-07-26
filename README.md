@@ -158,6 +158,18 @@ conditional writes remain the correctness authority.
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. A client-supplied `jobId` is an idempotency key scoped to the existing requester-token hash plus optional verified requester public key. Schema-v12 submissions atomically store a versioned canonical request hash with the job and task set. Repeating the same owner, job ID, task type, parameter, and ordered canonical payload list creates no tasks and returns the existing running status or terminal result; a changed request is an idempotency conflict, a changed owner is an ownership conflict, and pre-v12 rows with no trustworthy original request hash are rejected as unverifiable legacy collisions.
 
+New submissions are admitted only while the configured active-job,
+active-task, submitted-task, inline-byte, per-reference byte, and pending
+SQLite-outbox limits allow them. Exact idempotent replay is classified before
+capacity admission, so retrying an already accepted request creates no second
+job even while full. A limit rejection happens before the J0/T0 transaction
+and returns failed protocol-v2 `JOB_RESULT` with a machine-readable
+`admissionRejection`; a pending-outbox count failure returns storage failure
+without pretending the count is zero. Recovered accepted jobs are never
+evicted when an operator lowers a bound: they remain eligible to progress, and
+new admission resumes only after active cleanup returns the projection within
+the configured limits.
+
 For every correctness-relevant runtime transition, the scheduler decides first, attempts a conditional durable write, and changes its `TaskUnit`, active-job, participant-capacity, and metric projections only after `COMMITTED` or an exact `ALREADY_APPLIED` replay. `STALE_STATE` preserves memory and is classified; `UNKNOWN_ENTITY` or `STORAGE_FAILURE` never produces the requested projection or outbound message. Non-outbox and outbox assignment creation, failed-attempt retry/terminal release, successful result commitment, job completion/failure, and final-result outbox creation all use this order. Failed-attempt writes are fenced by task ID, attempt number, assignment ID, and assigned participant just like successful-result writes.
 
 With SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. The last successful task-result transaction also moves its parent job from `RUNNING` to durable `FINALIZING` after verifying that the complete expected task set and every result snapshot are present. Final aggregation runs deterministically from those committed snapshots; terminal job state, semantic final payload, and one outbound `JOB_RESULT` outbox row then commit together before immediate publish or replay. When persistence/outbox storage is unavailable, the same RabbitMQ output follows the non-outbox durable-first boundary that is applicable to the configured state store, but it cannot claim transactional outbound intent.
@@ -464,6 +476,9 @@ scheduler:
   taskLeaseMs: 120000
   maxTaskRetries: 20
   inboundQueueCapacity: 1000
+  maxActiveJobs: 1000
+  maxActiveTasks: 100000
+  maxPendingOutboxRows: 100000
   jobResultMaxDeliveryAttempts: 300
   schedulerMessageBatchSize: 100
   schedulerDeadlineBatchSize: 100
@@ -488,6 +503,11 @@ Environment overrides:
 - `TASKFLOW_TASK_LEASE_MS`
 - `TASKFLOW_MAX_TASK_RETRIES`
 - `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`
+- `TASKFLOW_MAX_ACTIVE_JOBS` - maximum retained nonterminal jobs, default `1000`
+- `TASKFLOW_MAX_ACTIVE_TASKS` - maximum task objects retained by active jobs,
+  default `100000`
+- `TASKFLOW_MAX_PENDING_OUTBOX_ROWS` - reject new work when the current pending
+  SQLite broker-outbox count is at least this value, default `100000`
 - `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`
 - `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`
 - `TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE`
@@ -506,7 +526,9 @@ Environment overrides:
   defaults to the available processor count
 - `TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS` - optional comma-separated
   `TASK_TYPE:LIMIT` overrides; each limit defaults to the executor pool size
-- `TASKFLOW_MAX_INPUT_BYTES` - maximum per-file client payload input size for conversion/text plugins, default `33554432` bytes
+- `TASKFLOW_MAX_INPUT_BYTES` - maximum declared byte size of each recursively
+  discovered submitted payload reference, default `33554432` bytes; payload
+  readers still verify the actual referenced content independently
 - `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
 - `TASKFLOW_MAX_RESULT_BYTES` - maximum single conversion result payload size before saving/sending, default `67108864` bytes
@@ -522,6 +544,9 @@ $env:TASKFLOW_MAX_TASK_RETRIES = "8"
 $env:TASKFLOW_EXECUTOR_TOTAL_CAPACITY_UNITS = "8"
 $env:TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS = "TEXT_ANALYSIS:4,IMAGE_CONVERSION:2,VIDEO_TRANSCODING:1"
 $env:TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY = "2000"
+$env:TASKFLOW_MAX_ACTIVE_JOBS = "1000"
+$env:TASKFLOW_MAX_ACTIVE_TASKS = "100000"
+$env:TASKFLOW_MAX_PENDING_OUTBOX_ROWS = "100000"
 $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 $env:TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE = "100"
 $env:TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE = "100"
@@ -746,7 +771,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 
 ## Known Limitations
 
-- RabbitMQ live broker tests cover transport delivery, delayed transient-handler retry, exact-bound deterministic-poison quarantine with metadata and manual redrive, ordinary DLQ inspect/redrive/quarantine behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, coordinator end-to-end job completion, pre-ack and post-commit/pre-ack redelivery, graceful-shutdown delivery ownership, persistent/confirmed coordinator publication, coordinator outbox replay after seeded intent, connection loss, unroutable assignment, and failed sent marking, plus a managed real-broker stop/restart during active work. Unit coverage verifies all five typed dispositions, bounded scheduler ingress, bounded interruptible connection ownership, retry topology and header propagation, centralized protocol validation, coordinator outbox behavior, participant publish failures, deterministic execution quarantine, and DLQ/quarantine decisions. Durable peer queues, participant-side result persistence, and adaptive broker/executor throttling are not complete; `docs/BACKPRESSURE_SCOPE.md` records current boundaries.
+- RabbitMQ live broker tests cover transport delivery, delayed transient-handler retry, exact-bound deterministic-poison quarantine with metadata and manual redrive, ordinary DLQ inspect/redrive/quarantine behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, coordinator end-to-end job completion, pre-ack and post-commit/pre-ack redelivery, graceful-shutdown delivery ownership, persistent/confirmed coordinator publication, coordinator outbox replay after seeded intent, connection loss, unroutable assignment, and failed sent marking, plus a managed real-broker stop/restart during active work. Unit coverage verifies all five typed dispositions, bounded scheduler ingress, explicit active-work and pending-outbox admission, bounded interruptible connection ownership, retry topology and header propagation, centralized protocol validation, coordinator outbox behavior, participant publish failures, deterministic execution quarantine, and DLQ/quarantine decisions. Durable peer queues, participant-side result persistence, and adaptive broker/executor throttling are not complete; `docs/BACKPRESSURE_SCOPE.md` records current boundaries.
 - RabbitMQ is the sole supported transport, but the runtime remains transitional rather than production-ready. Implemented pieces include peer-specific routing, explicit peer IDs, peer-scoped job IDs, persisted peer registry metadata, publisher confirms, typed delivery dispositions, bounded delayed retry and automatic final quarantine, coordinator outbox replay, acknowledgement crash-window coverage, ordered shutdown, managed single-broker outage/restart recovery, command-line and JavaFX submit/result handling, automated JavaFX desktop smoke coverage, broker-backed CI, and DLQ/quarantine commands. Remaining support-promotion gaps are listed in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md`.
 - The JavaFX GUI can use RabbitMQ for live submit, execute, and result delivery, but it does not send RabbitMQ `JOB_RESULT_REQUEST` messages for post-restart result replay.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.

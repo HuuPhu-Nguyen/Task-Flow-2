@@ -16,6 +16,7 @@ public class SchedulerMetrics {
 
     private final AtomicLong queueDepth = new AtomicLong(0);
     private final AtomicLong activeJobs = new AtomicLong(0);
+    private final AtomicLong activeTasks = new AtomicLong(0);
     private final AtomicLong assignmentGenerationsTotal = new AtomicLong(0);
     private final AtomicLong retryCount = new AtomicLong(0);
     private final AtomicLong taskResultsCommittedTotal = new AtomicLong(0);
@@ -34,6 +35,10 @@ public class SchedulerMetrics {
 
     public void setActiveJobs(long count) {
         activeJobs.set(Math.max(0L, count));
+    }
+
+    public void setActiveTasks(long count) {
+        activeTasks.set(Math.max(0L, count));
     }
 
     public void recordAssignmentGeneration(long dispatchLatencyMs) {
@@ -98,6 +103,7 @@ public class SchedulerMetrics {
         return new Snapshot(
                 queueDepth.get(),
                 activeJobs.get(),
+                activeTasks.get(),
                 assignmentGenerationsTotal.get(),
                 retryCount.get(),
                 successes,
@@ -115,6 +121,7 @@ public class SchedulerMetrics {
     public record Snapshot(
             long queueDepth,
             long activeJobs,
+            long activeTasks,
             long assignmentGenerationsTotal,
             long retryCount,
             long taskResultsCommittedTotal,

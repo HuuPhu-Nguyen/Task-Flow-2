@@ -205,6 +205,53 @@ class SchedulerArchitectureTest {
         assertTrue(peerUnavailableStage.contains("currentAssignmentsForWorker("));
     }
 
+    @Test
+    void schedulerMessageOwnerSerializesAdmissionBeforeDurableSubmission() throws IOException {
+        Path schedulerRoot = schedulerSourceRoot();
+        String messages = read(schedulerRoot, "SchedulerMessageService.java");
+        String admission = read(schedulerRoot, "AdmissionPolicy.java");
+
+        assertOrdered(messages, "inspectSubmission(", "pendingOutboxCount(store)");
+        assertOrdered(messages, "pendingOutboxCount(store)", "JobFactory.create(");
+        assertOrdered(messages, "JobFactory.create(", "persistJobStartup(");
+        assertOrdered(messages, "persistJobStartup(", "state.addActiveJob(");
+        assertTrue(admission.contains("final class AdmissionPolicy"));
+        for (String forbidden : List.of(
+                "com.google.gson",
+                "java.sql",
+                "com.rabbitmq",
+                "transport.rabbitmq",
+                "SchedulerState",
+                "SchedulerOutput",
+                "TaskFlowClock",
+                "JobFactory"
+        )) {
+            assertFalse(
+                    admission.contains(forbidden),
+                    "AdmissionPolicy crosses its pure primitive boundary: " + forbidden
+            );
+        }
+
+        try (var sources = Files.list(schedulerRoot)) {
+            List<Path> submissionOwners = sources
+                    .filter(path -> path.toString().endsWith(".java"))
+                    .filter(path -> {
+                        try {
+                            return Files.readString(path).contains("store.commitJobSubmission(");
+                        } catch (IOException e) {
+                            throw new IllegalStateException(e);
+                        }
+                    })
+                    .toList();
+            assertTrue(
+                    submissionOwners.size() == 1
+                            && submissionOwners.getFirst().endsWith("SchedulerMessageService.java"),
+                    "Scheduler must retain one production owner for new-job commits: "
+                            + submissionOwners
+            );
+        }
+    }
+
     private static String read(Path schedulerRoot, String file) throws IOException {
         return Files.readString(schedulerRoot.resolve(file));
     }

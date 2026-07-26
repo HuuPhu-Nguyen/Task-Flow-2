@@ -66,9 +66,18 @@ result handling fails clearly instead of falling back to unsafe path reads.
 
 ## Limits And Failure Behavior
 
-`TASKFLOW_MAX_INPUT_BYTES` and `TASKFLOW_MAX_RESULT_BYTES` still apply to raw
-referenced bytes. `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` applies to inline data and
-reference metadata sent in a job submission.
+`TASKFLOW_MAX_INPUT_BYTES`, default `33554432`, applies per input reference.
+The coordinator recursively traverses submitted JSON maps/lists without a
+plugin-specific type dependency and rejects a new job before J0/T0 when any
+`PayloadReference.sizeBytes` is greater than that value. This is admission
+metadata enforcement; readers still verify the actual length and SHA-256
+digest before returning bytes to plugin code.
+
+`TASKFLOW_MAX_RESULT_BYTES` still applies to raw referenced result bytes.
+`TASKFLOW_MAX_JOB_PAYLOAD_BYTES`, default `67108864`, applies to the exact
+UTF-8 JSON bytes of submitted task payloads plus parameter, including inline
+data and reference metadata. Both limits allow the exact configured maximum
+and reject one byte over.
 
 Invalid references, missing storage roots, missing files, size mismatches,
 checksum mismatches, and unsupported storage types fail the current task or

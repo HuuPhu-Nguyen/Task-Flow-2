@@ -92,6 +92,7 @@ final class RecoveryService {
             ));
         }
         metrics.setActiveJobs(state.activeJobCount());
+        metrics.setActiveTasks(state.activeTaskCount());
 
         for (EmbarrassinglyParallelJob<?, ?> job : state.activeJobsSnapshot()) {
             if (job.isJobComplete()) {

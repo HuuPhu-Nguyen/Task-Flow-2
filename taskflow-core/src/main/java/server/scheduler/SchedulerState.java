@@ -24,6 +24,7 @@ final class SchedulerState {
     private final Map<String, String> requestHashes = new LinkedHashMap<>();
     private final SchedulerWorkloadIndex workloadIndex = new SchedulerWorkloadIndex();
     private final long taskTimeoutMillis;
+    private long activeTaskCount;
 
     SchedulerState(SchedulerConfig config) {
         SchedulerConfig effectiveConfig = config == null ? SchedulerConfig.defaults() : config;
@@ -46,6 +47,10 @@ final class SchedulerState {
         return activeJobs.size();
     }
 
+    long activeTaskCount() {
+        return activeTaskCount;
+    }
+
     void addActiveJob(EmbarrassinglyParallelJob<?, ?> job,
                       String requesterTokenHash,
                       String requesterIdentityKey) {
@@ -56,10 +61,16 @@ final class SchedulerState {
                       String requesterTokenHash,
                       String requesterIdentityKey,
                       String requestHash) {
-        if (activeJobs.containsKey(job.getJobId())) {
+        EmbarrassinglyParallelJob<?, ?> replaced = activeJobs.get(job.getJobId());
+        long retainedTasks = replaced == null
+                ? activeTaskCount
+                : checkedSubtract(activeTaskCount, replaced.getTasks().size());
+        long nextActiveTaskCount = checkedAdd(retainedTasks, job.getTasks().size());
+        if (replaced != null) {
             workloadIndex.removeJob(job.getJobId());
         }
         activeJobs.put(job.getJobId(), job);
+        activeTaskCount = nextActiveTaskCount;
         workloadIndex.indexJob(job, taskTimeoutMillis);
         if (RequesterTokens.hasTokenHash(requesterTokenHash)) {
             requesterTokenHashes.put(job.getJobId(), requesterTokenHash);
@@ -73,7 +84,16 @@ final class SchedulerState {
     }
 
     void removeJob(String jobId) {
+        EmbarrassinglyParallelJob<?, ?> removed = activeJobs.get(jobId);
+        if (removed == null) {
+            return;
+        }
+        long nextActiveTaskCount = checkedSubtract(
+                activeTaskCount,
+                removed.getTasks().size()
+        );
         activeJobs.remove(jobId);
+        activeTaskCount = nextActiveTaskCount;
         workloadIndex.removeJob(jobId);
         requesterTokenHashes.remove(jobId);
         requesterIdentityKeys.remove(jobId);
@@ -267,6 +287,30 @@ final class SchedulerState {
 
     private static boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private static long checkedAdd(long current, long added) {
+        try {
+            long result = Math.addExact(current, added);
+            if (result < 0L) {
+                throw new IllegalStateException("Active task count overflowed.");
+            }
+            return result;
+        } catch (ArithmeticException e) {
+            throw new IllegalStateException("Active task count overflowed.", e);
+        }
+    }
+
+    private static long checkedSubtract(long current, long removed) {
+        try {
+            long result = Math.subtractExact(current, removed);
+            if (result < 0L) {
+                throw new IllegalStateException("Active task count underflowed.");
+            }
+            return result;
+        } catch (ArithmeticException e) {
+            throw new IllegalStateException("Active task count underflowed.", e);
+        }
     }
 
     private DeadlineTarget pollDueDeadline(SchedulerWorkloadIndex.DeadlineKind kind,

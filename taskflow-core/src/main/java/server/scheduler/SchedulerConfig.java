@@ -16,6 +16,9 @@ public record SchedulerConfig(
         long taskLeaseMillis,
         int maxTaskRetries,
         int inboundQueueCapacity,
+        long maxActiveJobs,
+        long maxActiveTasks,
+        long maxPendingOutboxRows,
         int jobResultMaxDeliveryAttempts,
         int schedulerMessageBatchSize,
         int schedulerDeadlineBatchSize,
@@ -35,6 +38,9 @@ public record SchedulerConfig(
     public static final long DEFAULT_TASK_LEASE_MILLIS = 120_000L;
     public static final int DEFAULT_MAX_TASK_RETRIES = 20;
     public static final int DEFAULT_INBOUND_QUEUE_CAPACITY = 1000;
+    public static final long DEFAULT_MAX_ACTIVE_JOBS = 1_000L;
+    public static final long DEFAULT_MAX_ACTIVE_TASKS = 100_000L;
+    public static final long DEFAULT_MAX_PENDING_OUTBOX_ROWS = 100_000L;
     public static final int DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = 300;
     public static final int DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE = 100;
     public static final int DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE = 100;
@@ -57,6 +63,9 @@ public record SchedulerConfig(
         requirePositive(taskLeaseMillis, "taskLeaseMillis");
         requirePositive(maxTaskRetries, "maxTaskRetries");
         requirePositive(inboundQueueCapacity, "inboundQueueCapacity");
+        requirePositive(maxActiveJobs, "maxActiveJobs");
+        requirePositive(maxActiveTasks, "maxActiveTasks");
+        requirePositive(maxPendingOutboxRows, "maxPendingOutboxRows");
         requirePositive(jobResultMaxDeliveryAttempts, "jobResultMaxDeliveryAttempts");
         requirePositive(schedulerMessageBatchSize, "schedulerMessageBatchSize");
         requirePositive(schedulerDeadlineBatchSize, "schedulerDeadlineBatchSize");
@@ -82,6 +91,55 @@ public record SchedulerConfig(
         if (peerScoreEwmaAlpha <= 0.0 || peerScoreEwmaAlpha > 1.0) {
             throw new IllegalArgumentException("peerScoreEwmaAlpha must be in (0, 1].");
         }
+    }
+
+    /**
+     * Compatibility constructor retained for callers using the TF-0403/0404
+     * scheduler configuration surface.
+     */
+    public SchedulerConfig(
+            long taskTimeoutMillis,
+            long taskLeaseMillis,
+            int maxTaskRetries,
+            int inboundQueueCapacity,
+            int jobResultMaxDeliveryAttempts,
+            int schedulerMessageBatchSize,
+            int schedulerDeadlineBatchSize,
+            int schedulerDispatchBatchSize,
+            int schedulerMaxAssignmentsPerJobPerRound,
+            int schedulerOutboxBatchSize,
+            long metricsLogIntervalMillis,
+            double peerScoreLoadWeight,
+            double peerScoreLatencyWeight,
+            double peerScoreDurationWeight,
+            double peerScoreFailureWeight,
+            double peerScoreLatencyBaselineMillis,
+            double peerScoreDurationBaselineMillis,
+            double peerScoreEwmaAlpha
+    ) {
+        this(
+                taskTimeoutMillis,
+                taskLeaseMillis,
+                maxTaskRetries,
+                inboundQueueCapacity,
+                DEFAULT_MAX_ACTIVE_JOBS,
+                DEFAULT_MAX_ACTIVE_TASKS,
+                DEFAULT_MAX_PENDING_OUTBOX_ROWS,
+                jobResultMaxDeliveryAttempts,
+                schedulerMessageBatchSize,
+                schedulerDeadlineBatchSize,
+                schedulerDispatchBatchSize,
+                schedulerMaxAssignmentsPerJobPerRound,
+                schedulerOutboxBatchSize,
+                metricsLogIntervalMillis,
+                peerScoreLoadWeight,
+                peerScoreLatencyWeight,
+                peerScoreDurationWeight,
+                peerScoreFailureWeight,
+                peerScoreLatencyBaselineMillis,
+                peerScoreDurationBaselineMillis,
+                peerScoreEwmaAlpha
+        );
     }
 
     /**
@@ -112,6 +170,9 @@ public record SchedulerConfig(
                 taskLeaseMillis,
                 maxTaskRetries,
                 inboundQueueCapacity,
+                DEFAULT_MAX_ACTIVE_JOBS,
+                DEFAULT_MAX_ACTIVE_TASKS,
+                DEFAULT_MAX_PENDING_OUTBOX_ROWS,
                 jobResultMaxDeliveryAttempts,
                 schedulerMessageBatchSize,
                 schedulerDeadlineBatchSize,
@@ -153,6 +214,9 @@ public record SchedulerConfig(
                 taskLeaseMillis,
                 maxTaskRetries,
                 inboundQueueCapacity,
+                DEFAULT_MAX_ACTIVE_JOBS,
+                DEFAULT_MAX_ACTIVE_TASKS,
+                DEFAULT_MAX_PENDING_OUTBOX_ROWS,
                 jobResultMaxDeliveryAttempts,
                 DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
@@ -176,6 +240,9 @@ public record SchedulerConfig(
                 DEFAULT_TASK_LEASE_MILLIS,
                 DEFAULT_MAX_TASK_RETRIES,
                 DEFAULT_INBOUND_QUEUE_CAPACITY,
+                DEFAULT_MAX_ACTIVE_JOBS,
+                DEFAULT_MAX_ACTIVE_TASKS,
+                DEFAULT_MAX_PENDING_OUTBOX_ROWS,
                 DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS,
                 DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
@@ -233,6 +300,12 @@ public record SchedulerConfig(
                 intValue(scheduler, env, "maxTaskRetries", "TASKFLOW_MAX_TASK_RETRIES", defaults.maxTaskRetries()),
                 intValue(scheduler, env, "inboundQueueCapacity", "TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY",
                         defaults.inboundQueueCapacity()),
+                longValue(scheduler, env, "maxActiveJobs", "TASKFLOW_MAX_ACTIVE_JOBS",
+                        defaults.maxActiveJobs()),
+                longValue(scheduler, env, "maxActiveTasks", "TASKFLOW_MAX_ACTIVE_TASKS",
+                        defaults.maxActiveTasks()),
+                longValue(scheduler, env, "maxPendingOutboxRows", "TASKFLOW_MAX_PENDING_OUTBOX_ROWS",
+                        defaults.maxPendingOutboxRows()),
                 intValue(scheduler, env, "jobResultMaxDeliveryAttempts", "TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS",
                         defaults.jobResultMaxDeliveryAttempts()),
                 intValue(scheduler, env, "schedulerMessageBatchSize",

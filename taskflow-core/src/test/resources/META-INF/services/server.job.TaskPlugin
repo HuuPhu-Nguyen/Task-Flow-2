@@ -1,2 +1,3 @@
 server.scheduler.TestTaskPlugin
 server.scheduler.UnsafeTestTaskPlugin
+server.scheduler.ExpandingTestTaskPlugin

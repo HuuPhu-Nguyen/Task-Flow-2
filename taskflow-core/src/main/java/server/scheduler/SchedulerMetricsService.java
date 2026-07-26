@@ -39,6 +39,7 @@ final class SchedulerMetricsService {
         long now = clock.nowEpochMillis();
         metrics.setQueueDepth(inboundMailbox.size());
         metrics.setActiveJobs(state.activeJobCount());
+        metrics.setActiveTasks(state.activeTaskCount());
         if (now - lastMetricsLogAtMillis < config.metricsLogIntervalMillis()) {
             return;
         }
@@ -49,6 +50,7 @@ final class SchedulerMetricsService {
         events.info("scheduler_metrics", events.fields(
                 "queue_depth", snapshot.queueDepth(),
                 "active_jobs", snapshot.activeJobs(),
+                "active_tasks", snapshot.activeTasks(),
                 "pending_tasks_indexed", workload.pendingTasks(),
                 "runnable_jobs_indexed", workload.runnableJobs(),
                 "capacity_waiting_jobs_indexed", workload.capacityWaitingJobs(),

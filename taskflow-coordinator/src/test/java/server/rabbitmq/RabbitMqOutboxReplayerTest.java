@@ -336,6 +336,13 @@ class RabbitMqOutboxReplayerTest {
         }
 
         @Override
+        public PendingOutboxCount countPendingBrokerOutbox() {
+            return PendingOutboxCount.counted(records.stream()
+                    .filter(record -> !publishedIds.contains(record.outboxId()))
+                    .count());
+        }
+
+        @Override
         public boolean markBrokerOutboxPublished(long outboxId, long publishedAt) {
             if (failedPublishedMarksRemaining > 0) {
                 failedPublishedMarksRemaining--;
