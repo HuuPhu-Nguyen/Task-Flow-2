@@ -6,9 +6,11 @@ import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
 import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
+import server.job.JobFactory;
 import server.job.TaskUnit;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
+import server.registry.AssignmentCapacityReservation;
 import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
@@ -100,7 +102,7 @@ final class AssignmentService {
             while (attempts < limit
                     && assignmentsForJob < config.schedulerMaxAssignmentsPerJobPerRound()
                     && !turnComplete) {
-                PeerInfo bestPeer = bestAvailablePeer(job.getTaskType());
+                PeerInfo bestPeer = bestAvailablePeer(job);
                 attempts++;
                 if (bestPeer == null) {
                     state.waitForCapacity(job.getJobId(), capacitySignalGeneration);
@@ -236,12 +238,8 @@ final class AssignmentService {
                 : now + NO_CAPACITY_RECHECK_MILLIS;
     }
 
-    private PeerInfo bestAvailablePeer(String taskType) {
-        Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(taskType));
-        while (!candidates.isEmpty()
-                && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
-            candidates.removeFirst();
-        }
+    private PeerInfo bestAvailablePeer(EmbarrassinglyParallelJob<?, ?> job) {
+        Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(job));
         return candidates.peekFirst();
     }
 
@@ -325,7 +323,15 @@ final class AssignmentService {
 
         state.indexAssignedTask(task, assignmentIdentity);
         metrics.recordAssignmentGeneration(dispatchLatencyMs);
-        registry.reserveTaskCapacity(peer);
+        AssignmentCapacityReservation reservation =
+                CapacityReservations.forAssignment(job, task, assignmentIdentity);
+        if (!registry.reserveTaskCapacity(reservation)) {
+            jobCompletions.failJob(
+                    job,
+                    "Coordinator capacity projection is invalid; restart is required."
+            );
+            return false;
+        }
         events.info("task_assignment_created", events.assignmentTraceFields(
                 job.getJobId(),
                 task.getTaskId(),
@@ -366,7 +372,7 @@ final class AssignmentService {
             }
             task.resetToPending();
             state.indexClosedAssignment(task, assignmentIdentity);
-            registry.releaseTaskCapacity(peer);
+            registry.releaseTaskCapacity(reservation, "DISPATCH_FAILED");
             events.error("task_dispatch_failed", events.fields(
                     "job_id", job.getJobId(),
                     "task_id", task.getTaskId(),
@@ -456,7 +462,15 @@ final class AssignmentService {
 
         state.indexAssignedTask(task, committed.identity());
         metrics.recordAssignmentGeneration(dispatchLatencyMs);
-        registry.reserveTaskCapacity(peer);
+        AssignmentCapacityReservation reservation =
+                CapacityReservations.forAssignment(job, task, committed.identity());
+        if (!registry.reserveTaskCapacity(reservation)) {
+            jobCompletions.failJob(
+                    job,
+                    "Coordinator capacity projection is invalid; restart is required."
+            );
+            return false;
+        }
         BrokerOutboxStore.OutboxRecord outboxRecord = committed.outboxRecord();
         boolean published = outbox.publish(outboxRecord);
         events.info("task_assignment_created", events.assignmentTraceFields(
@@ -479,10 +493,12 @@ final class AssignmentService {
                 : startedAt + leaseMillis;
     }
 
-    private List<PeerInfo> getAvailablePeers(String taskType) {
+    private List<PeerInfo> getAvailablePeers(EmbarrassinglyParallelJob<?, ?> job) {
         // RabbitMQ participants are eligible while present in the live registry;
         // heartbeat timeout removes them before a later dispatch cycle.
-        return registry.getAvailablePeers(taskType, config.maxTasksPerPeer());
+        int capacityUnitCost = JobFactory.resourceProfile(job.getTaskType())
+                .capacityUnitCost();
+        return registry.getAvailablePeers(job.getTaskType(), capacityUnitCost);
     }
 
     private static boolean durableStorageFailed(JobStateStore.DurableTransitionOutcome outcome) {

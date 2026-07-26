@@ -3,6 +3,8 @@ package server.registry;
 import java.util.Collection;
 import java.util.List;
 
+import protocol.PongMessage;
+
 public interface PeerRegistry {
     void register(String nodeId, PeerInfo peer);
 
@@ -16,9 +18,11 @@ public interface PeerRegistry {
         updateHeartbeat(nodeId);
         PeerInfo peer = get(nodeId);
         if (peer != null) {
-            peer.setSupportedTaskTypes(supportedTaskTypes);
+            peer.applyLegacyHeartbeat(supportedTaskTypes);
         }
     }
+
+    PeerInfo.CapacitySnapshotOutcome updateHeartbeat(String nodeId, PongMessage pong);
 
     default void updateMetricsSnapshot(String nodeId) {
     }
@@ -29,9 +33,9 @@ public interface PeerRegistry {
 
     /**
      * Returns only live peers that support the requested task type and have
-     * scheduler capacity under the supplied limit.
+     * enough advertised and locally projected capacity for the task cost.
      */
-    List<PeerInfo> getAvailablePeers(String taskType, int maxTasksPerPeer);
+    List<PeerInfo> getAvailablePeers(String taskType, int capacityUnitCost);
 
     /**
      * Monotonic process-local signal changed whenever compatible scheduling
@@ -44,15 +48,19 @@ public interface PeerRegistry {
     /**
      * Projects one already-authoritative assignment into worker capacity.
      */
-    void reserveTaskCapacity(PeerInfo peer);
+    boolean reserveTaskCapacity(AssignmentCapacityReservation reservation);
 
     /**
      * Releases one capacity slot using the exact peer object selected at T1.
      */
-    void releaseTaskCapacity(PeerInfo peer);
+    boolean releaseTaskCapacity(
+            AssignmentCapacityReservation reservation,
+            String releaseReason
+    );
 
-    /**
-     * Releases one capacity slot after a result/failure identified its worker.
-     */
-    void releaseTaskCapacity(String nodeId);
+    boolean capacityProjectionValid();
+
+    default CapacityMetricsSnapshot capacityMetricsSnapshot() {
+        return CapacityMetricsSnapshot.EMPTY;
+    }
 }

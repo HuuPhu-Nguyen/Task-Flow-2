@@ -207,7 +207,11 @@ cardinality bounds, exact stale-deadline fencing, complexity, and 100,000-task
 profile are documented in [`docs/SCHEDULER.md`](docs/SCHEDULER.md).
 
 **Load Balancing**
-- Default maximum of **3 concurrent tasks per executor participant**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`
+- Executor participants advertise scalar capacity units and per-task-type
+  concurrency limits. The coordinator subtracts exact reservations for current
+  assignment generations before placing more work.
+- Built-in task costs are text/example **1 unit**, image conversion **2 units**,
+  and video transcoding **8 units**.
 - Cross-job dispatch is round-robin. Each job receives at most one assignment
   per persistent scheduler round by default; configure
   `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND` to raise that quota
@@ -237,8 +241,9 @@ A participant node may enable the requester role, executor role, or both. The ex
 
 **Executor-role responsibilities:**
 - Maintain the RabbitMQ connection and peer-specific consumers
-- Publish periodic `PONG` heartbeat messages
-- Advertise supported task types through heartbeat metadata
+- Publish initial, periodic, and capacity-change `PONG` heartbeat messages
+- Advertise supported task types, scalar capacity, and per-type concurrency
+  limits through heartbeat metadata
 - Receive `TASK_ASSIGN` messages
 - Execute tasks using the execution engine
 - Send results back via `TASK_RESULT`
@@ -309,9 +314,12 @@ Each input is processed independently, allowing parallel execution across execut
 ## Message Protocol
 
 RabbitMQ carries TaskFlow protocol messages inside versioned broker envelopes.
-New messages carry `protocolVersion: 2`. Semantically unchanged message types
-still accept versions `0` and `1`, while `TASK_ASSIGN` and `TASK_RESULT` require
-version 2 plus a positive assignment attempt and UUID assignment ID.
+Broker envelopes and all new inner messages except capacity advertisements carry
+`protocolVersion: 2`. New `PONG` capacity advertisements use inner protocol
+version 3. Semantically unchanged message types still accept versions `0` and
+`1`, while `TASK_ASSIGN` and `TASK_RESULT` require version 2 plus a positive
+assignment attempt and UUID assignment ID. Legacy `PONG` messages remain valid
+for liveness and inspection but do not make an executor scheduling-eligible.
 Incompatible task messages are rejected without repeated broker requeue.
 Messages are validated for framework fields, safe identifiers, task type,
 configured task-count limits, inline payload size, and result size before
@@ -325,7 +333,8 @@ runtime dispatch. See `docs/PROTOCOL_COMPATIBILITY.md`.
 - `JOB_RESULT` - plugin-defined final `resultPayload` plus a compatibility ordered result list
 - `JOB_RESULT_REQUEST` - request resend or persisted reconstruction of an owned job result using the requester token, plus a requester identity signature for identity-bound jobs
 - `PING` - retained protocol heartbeat-request type
-- `PONG` - participant heartbeat, including executor capabilities
+- `PONG` - participant heartbeat, including executor capabilities and v3
+  capacity snapshots
 
 ---
 
@@ -437,7 +446,9 @@ is recorded in the [baseline report](docs/reports/baseline.md).
 
 ## Scheduler Configuration
 
-Scheduler retry and executor-selection behavior is externally configurable. Existing `*PER_PEER` configuration names remain compatibility names. Code defaults are only safe fallbacks.
+Scheduler retry and executor-selection behavior is externally configurable.
+Executor capacity is participant-owned and configured separately with the
+executor environment variables listed below. Code defaults are safe fallbacks.
 
 Configuration precedence:
 
@@ -451,7 +462,6 @@ Use [config/taskflow.example.yml](config/taskflow.example.yml) as the committed 
 scheduler:
   taskTimeoutMs: 60000
   taskLeaseMs: 120000
-  maxTasksPerPeer: 3
   maxTaskRetries: 20
   inboundQueueCapacity: 1000
   jobResultMaxDeliveryAttempts: 300
@@ -476,7 +486,6 @@ Environment overrides:
 - `TASKFLOW_CONFIG` - optional YAML config path, default `config/taskflow.yml` when present
 - `TASKFLOW_TASK_TIMEOUT_MS`
 - `TASKFLOW_TASK_LEASE_MS`
-- `TASKFLOW_MAX_TASKS_PER_PEER`
 - `TASKFLOW_MAX_TASK_RETRIES`
 - `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`
 - `TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS`
@@ -493,6 +502,10 @@ Environment overrides:
 - `TASKFLOW_SCORE_LATENCY_BASELINE_MS`
 - `TASKFLOW_SCORE_DURATION_BASELINE_MS`
 - `TASKFLOW_SCORE_EWMA_ALPHA`
+- `TASKFLOW_EXECUTOR_TOTAL_CAPACITY_UNITS` - participant scalar capacity;
+  defaults to the available processor count
+- `TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS` - optional comma-separated
+  `TASK_TYPE:LIMIT` overrides; each limit defaults to the executor pool size
 - `TASKFLOW_MAX_INPUT_BYTES` - maximum per-file client payload input size for conversion/text plugins, default `33554432` bytes
 - `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
@@ -505,8 +518,9 @@ PowerShell override example:
 ```powershell
 $env:TASKFLOW_CONFIG = "config\taskflow.yml"
 $env:TASKFLOW_TASK_TIMEOUT_MS = "120000"
-$env:TASKFLOW_MAX_TASKS_PER_PEER = "5"
 $env:TASKFLOW_MAX_TASK_RETRIES = "8"
+$env:TASKFLOW_EXECUTOR_TOTAL_CAPACITY_UNITS = "8"
+$env:TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS = "TEXT_ANALYSIS:4,IMAGE_CONVERSION:2,VIDEO_TRANSCODING:1"
 $env:TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY = "2000"
 $env:TASKFLOW_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = "120"
 $env:TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE = "100"

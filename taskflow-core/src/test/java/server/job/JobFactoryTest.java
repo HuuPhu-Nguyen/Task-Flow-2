@@ -2,12 +2,15 @@ package server.job;
 
 import org.junit.jupiter.api.Test;
 import plugin.RetrySafety;
+import plugin.TaskResourceCatalog;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,6 +55,21 @@ class JobFactoryTest {
     }
 
     @Test
+    void resourceProfilesAreCapturedImmutablyByNormalizedTaskType() {
+        StubPlugin plugin = new StubPlugin(" test_task ");
+
+        TaskResourceCatalog catalog = JobFactory.captureResourceProfiles(
+                JobFactory.loadPlugins(List.of(plugin))
+        );
+
+        assertEquals(1, catalog.require("TEST_TASK").capacityUnitCost());
+        assertThrows(
+                UnsupportedOperationException.class,
+                () -> catalog.asMap().put("OTHER", TaskResourceProfile.ofCapacityUnits(2))
+        );
+    }
+
+    @Test
     void createRunsPluginValidationBeforeCreatingJob() {
         ValidatingPlugin plugin = new ValidatingPlugin();
         JobSubmitMessage submit = new JobSubmitMessage(
@@ -76,6 +94,11 @@ class JobFactoryTest {
         }
 
         @Override
+        public TaskResourceProfile resourceProfile() {
+            return TaskResourceProfile.ofCapacityUnits(1);
+        }
+
+        @Override
         public EmbarrassinglyParallelJob<?, ?> createJob(JobSubmitMessage message, String requesterId) {
             throw new UnsupportedOperationException("Test plugin does not create jobs.");
         }
@@ -90,6 +113,11 @@ class JobFactoryTest {
         @Override
         public RetrySafety retrySafety() {
             return RetrySafety.IDEMPOTENT;
+        }
+
+        @Override
+        public TaskResourceProfile resourceProfile() {
+            return TaskResourceProfile.ofCapacityUnits(1);
         }
 
         @Override
@@ -112,6 +140,11 @@ class JobFactoryTest {
         @Override
         public RetrySafety retrySafety() {
             return null;
+        }
+
+        @Override
+        public TaskResourceProfile resourceProfile() {
+            return TaskResourceProfile.ofCapacityUnits(1);
         }
 
         @Override

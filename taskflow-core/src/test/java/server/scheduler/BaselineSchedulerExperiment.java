@@ -88,7 +88,14 @@ public class BaselineSchedulerExperiment {
             registry.register(workerId, new PeerInfo(workerId, config, List.of(TestTaskPlugin.TASK_TYPE)));
         }
 
-        BaselineOutput output = new BaselineOutput(mailbox, workerCount, config.maxTasksPerPeer(), workUnits);
+        int maxConcurrentTasksPerWorker =
+                Math.max(1, Runtime.getRuntime().availableProcessors());
+        BaselineOutput output = new BaselineOutput(
+                mailbox,
+                workerCount,
+                maxConcurrentTasksPerWorker,
+                workUnits
+        );
         TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
         Thread schedulerThread = Thread.ofPlatform()
                 .name("baseline-scheduler")
@@ -145,7 +152,7 @@ public class BaselineSchedulerExperiment {
             writeMetrics(outputPath, List.of(
                     "formatVersion=1",
                     "workerCount=" + workerCount,
-                    "maxConcurrentTasksPerWorker=" + config.maxTasksPerPeer(),
+                    "maxConcurrentTasksPerWorker=" + maxConcurrentTasksPerWorker,
                     "taskCount=" + taskCount,
                     "warmupTaskCount=" + warmupTaskCount,
                     "workUnitsPerTask=" + workUnits,

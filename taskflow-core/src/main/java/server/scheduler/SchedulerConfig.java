@@ -14,7 +14,6 @@ import java.util.Map;
 public record SchedulerConfig(
         long taskTimeoutMillis,
         long taskLeaseMillis,
-        int maxTasksPerPeer,
         int maxTaskRetries,
         int inboundQueueCapacity,
         int jobResultMaxDeliveryAttempts,
@@ -34,7 +33,6 @@ public record SchedulerConfig(
 ) {
     public static final long DEFAULT_TASK_TIMEOUT_MILLIS = 60_000L;
     public static final long DEFAULT_TASK_LEASE_MILLIS = 120_000L;
-    public static final int DEFAULT_MAX_TASKS_PER_PEER = 3;
     public static final int DEFAULT_MAX_TASK_RETRIES = 20;
     public static final int DEFAULT_INBOUND_QUEUE_CAPACITY = 1000;
     public static final int DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS = 300;
@@ -57,7 +55,6 @@ public record SchedulerConfig(
     public SchedulerConfig {
         requirePositive(taskTimeoutMillis, "taskTimeoutMillis");
         requirePositive(taskLeaseMillis, "taskLeaseMillis");
-        requirePositive(maxTasksPerPeer, "maxTasksPerPeer");
         requirePositive(maxTaskRetries, "maxTaskRetries");
         requirePositive(inboundQueueCapacity, "inboundQueueCapacity");
         requirePositive(jobResultMaxDeliveryAttempts, "jobResultMaxDeliveryAttempts");
@@ -94,7 +91,6 @@ public record SchedulerConfig(
     public SchedulerConfig(
             long taskTimeoutMillis,
             long taskLeaseMillis,
-            int maxTasksPerPeer,
             int maxTaskRetries,
             int inboundQueueCapacity,
             int jobResultMaxDeliveryAttempts,
@@ -114,7 +110,6 @@ public record SchedulerConfig(
         this(
                 taskTimeoutMillis,
                 taskLeaseMillis,
-                maxTasksPerPeer,
                 maxTaskRetries,
                 inboundQueueCapacity,
                 jobResultMaxDeliveryAttempts,
@@ -141,7 +136,6 @@ public record SchedulerConfig(
     public SchedulerConfig(
             long taskTimeoutMillis,
             long taskLeaseMillis,
-            int maxTasksPerPeer,
             int maxTaskRetries,
             int inboundQueueCapacity,
             int jobResultMaxDeliveryAttempts,
@@ -157,7 +151,6 @@ public record SchedulerConfig(
         this(
                 taskTimeoutMillis,
                 taskLeaseMillis,
-                maxTasksPerPeer,
                 maxTaskRetries,
                 inboundQueueCapacity,
                 jobResultMaxDeliveryAttempts,
@@ -181,7 +174,6 @@ public record SchedulerConfig(
         return new SchedulerConfig(
                 DEFAULT_TASK_TIMEOUT_MILLIS,
                 DEFAULT_TASK_LEASE_MILLIS,
-                DEFAULT_MAX_TASKS_PER_PEER,
                 DEFAULT_MAX_TASK_RETRIES,
                 DEFAULT_INBOUND_QUEUE_CAPACITY,
                 DEFAULT_JOB_RESULT_MAX_DELIVERY_ATTEMPTS,
@@ -238,7 +230,6 @@ public record SchedulerConfig(
         return new SchedulerConfig(
                 longValue(scheduler, env, "taskTimeoutMs", "TASKFLOW_TASK_TIMEOUT_MS", defaults.taskTimeoutMillis()),
                 longValue(scheduler, env, "taskLeaseMs", "TASKFLOW_TASK_LEASE_MS", defaults.taskLeaseMillis()),
-                intValue(scheduler, env, "maxTasksPerPeer", "TASKFLOW_MAX_TASKS_PER_PEER", defaults.maxTasksPerPeer()),
                 intValue(scheduler, env, "maxTaskRetries", "TASKFLOW_MAX_TASK_RETRIES", defaults.maxTaskRetries()),
                 intValue(scheduler, env, "inboundQueueCapacity", "TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY",
                         defaults.inboundQueueCapacity()),

@@ -1,6 +1,8 @@
 package server.job;
 
 import plugin.RetrySafety;
+import plugin.TaskResourceCatalog;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 
 import java.util.LinkedHashMap;
@@ -14,6 +16,8 @@ import java.util.ServiceLoader;
  */
 public class JobFactory {
     private static final Map<String, TaskPlugin> PLUGINS = loadPlugins();
+    private static final TaskResourceCatalog RESOURCE_PROFILES =
+            captureResourceProfiles(PLUGINS);
 
     public static EmbarrassinglyParallelJob<?,?> create(JobSubmitMessage msg, String requesterId) {
         return create(msg, requesterId, PLUGINS);
@@ -29,6 +33,14 @@ public class JobFactory {
 
     public static RetrySafety retrySafety(String taskType) {
         return retrySafety(taskType, PLUGINS);
+    }
+
+    public static TaskResourceProfile resourceProfile(String taskType) {
+        return RESOURCE_PROFILES.require(taskType);
+    }
+
+    public static TaskResourceCatalog resourceCatalog() {
+        return RESOURCE_PROFILES;
     }
 
     static RetrySafety retrySafety(String taskType, Map<String, TaskPlugin> plugins) {
@@ -49,6 +61,7 @@ public class JobFactory {
             Objects.requireNonNull(plugin, "Discovered task plugin is required.");
             String taskType = normalize(plugin.taskType());
             requireRetrySafety(plugin);
+            requireResourceProfile(plugin);
             TaskPlugin existing = plugins.putIfAbsent(taskType, plugin);
             if (existing != null) {
                 throw new IllegalStateException("Duplicate task plugin for type " + taskType
@@ -77,6 +90,25 @@ public class JobFactory {
             );
         }
         return retrySafety;
+    }
+
+    private static TaskResourceProfile requireResourceProfile(TaskPlugin plugin) {
+        TaskResourceProfile profile = plugin.resourceProfile();
+        if (profile == null) {
+            throw new IllegalStateException(
+                    "Task plugin " + plugin.getClass().getName()
+                            + " must declare a resource profile."
+            );
+        }
+        return profile;
+    }
+
+    static TaskResourceCatalog captureResourceProfiles(Map<String, TaskPlugin> plugins) {
+        Map<String, TaskResourceProfile> profiles = new LinkedHashMap<>();
+        for (Map.Entry<String, TaskPlugin> entry : plugins.entrySet()) {
+            profiles.put(entry.getKey(), requireResourceProfile(entry.getValue()));
+        }
+        return TaskResourceCatalog.capture(profiles);
     }
 
     private static String normalize(String taskType) {

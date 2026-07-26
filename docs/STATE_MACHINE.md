@@ -148,6 +148,28 @@ when durable state and memory disagree.
 | R1/T3 startup reconciliation and H1 hydration | `CoordinatorStartupRecovery` owns store reconstruction/reconciliation; `RecoveryService` installs the reconciled jobs and invokes terminal aggregation when needed. |
 | Composition and compatibility API | `TaskScheduler` constructs the services and delegates `Runnable`, metrics, and restore calls; it contains no transition rule or infrastructure effect. |
 
+### Transition-to-capacity effects
+
+SQLite assignment state remains authoritative. The coordinator capacity ledger
+is a bounded projection keyed by the exact assignment UUID and carrying the job,
+task, attempt, executor, task type, and immutable unit cost.
+
+| Transition or event | Capacity effect |
+|---|---|
+| T1 assignment commit | Reserve the exact assignment only after the durable assignment and required outbox intent commit. A stale, unknown, or failed write reserves nothing. |
+| T2 successful-result commit | Release that exact assignment after the fenced durable result commit. Duplicate/stale/unknown results and storage failure release nothing. |
+| T3 retry/dispatch release | Release after the exact durable transition makes the assignment noncurrent. A publish failure alone retains the reservation while SQLite still records the assignment current. |
+| T4a terminal attempt failure | Release after the exact terminal task transition commits. |
+| T4b/J2 job-failure cascade | Release each formerly assigned task after the atomic job/task failure transaction commits; pending T5 tasks have no reservation. |
+| J1 successful completion | No additional release; every task reservation already closed through T2. |
+| H1 startup hydration | Reconstruct one reservation for each reconciled assignment that remains current; assignments closed during cold-start reconciliation are excluded. |
+| Heartbeat replacement or participant disconnect | Change liveness/advertised eligibility only. Neither action releases an authoritative assignment reservation. |
+
+An exact reservation identity mismatch invalidates the process-local projection,
+disables further dispatch, and requires restart/reconstruction. Result,
+deadline, and terminal processing continues where its durable guards remain
+safe.
+
 ## Task Transitions
 
 ### T0 — Create task: `∅ -> PENDING`

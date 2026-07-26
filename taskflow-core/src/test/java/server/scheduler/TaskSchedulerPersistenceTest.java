@@ -836,6 +836,9 @@ class TaskSchedulerPersistenceTest {
             assertNotNull(peer);
             assertEquals(1, peer.getActiveTasks());
             assertEquals(0L, peer.getCompletedTasks());
+            assertEquals(1L, registry.capacityMetricsSnapshot().reservationsCreated());
+            assertEquals(0L, registry.capacityMetricsSnapshot().reservationsReleased());
+            assertEquals(1L, registry.capacityMetricsSnapshot().activeReservations());
             List<JobStateStore.TaskAttemptRecord> attempts =
                     store.loadTaskAttempts("job-completion-persistence-failure");
             assertEquals(1, attempts.size());
@@ -895,6 +898,9 @@ class TaskSchedulerPersistenceTest {
             assertNotNull(peer);
             assertEquals(1, peer.getActiveTasks());
             assertEquals(0L, peer.getCompletedTasks());
+            assertEquals(1L, registry.capacityMetricsSnapshot().reservationsCreated());
+            assertEquals(0L, registry.capacityMetricsSnapshot().reservationsReleased());
+            assertEquals(1L, registry.capacityMetricsSnapshot().activeReservations());
             assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING,
                     store.loadTaskAttempts("job-stale-disposition").getFirst().outcome());
 
@@ -970,10 +976,15 @@ class TaskSchedulerPersistenceTest {
             assertNotNull(peer);
             assertEquals(1L, peer.getCompletedTasks());
             assertEquals(1, peer.getActiveTasks());
+            assertEquals(2L, registry.capacityMetricsSnapshot().reservationsCreated());
+            assertEquals(1L, registry.capacityMetricsSnapshot().reservationsReleased());
+            assertEquals(1L, registry.capacityMetricsSnapshot().activeReservations());
 
             mailbox.put(new MessageEnvelope(successResult(second, "second-result"), "peer-1"));
             assertTrue(output.awaitResult());
             assertEquals(2, output.result().getResultsByTaskId().size());
+            assertEquals(2L, registry.capacityMetricsSnapshot().reservationsReleased());
+            assertEquals(0L, registry.capacityMetricsSnapshot().activeReservations());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1782,6 +1793,14 @@ class TaskSchedulerPersistenceTest {
         assertTrue(event.contains(SchedulerMetrics.TASK_RESULTS_STALE_TOTAL_NAME + "="));
         assertTrue(event.contains(SchedulerMetrics.TASK_RESULTS_DUPLICATE_TOTAL_NAME + "="));
         assertTrue(event.contains(SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME + "="));
+        assertTrue(event.contains("taskflow_capacity_snapshots_accepted_total="));
+        assertTrue(event.contains("taskflow_capacity_snapshots_stale_total="));
+        assertTrue(event.contains("taskflow_capacity_snapshots_incompatible_total="));
+        assertTrue(event.contains("taskflow_capacity_reservations_created_total="));
+        assertTrue(event.contains("taskflow_capacity_reservations_released_total="));
+        assertTrue(event.contains("taskflow_capacity_projection_failures_total="));
+        assertTrue(event.contains("taskflow_capacity_active_reservations="));
+        assertTrue(event.contains("taskflow_capacity_reserved_units="));
     }
 
     private static final class ThreadSafeListAppender extends AppenderBase<ILoggingEvent> {

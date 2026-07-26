@@ -371,10 +371,25 @@ final class JobCompletionService {
         if (!completion.success) {
             for (TaskUnit<?> task : completion.job.getTasks().values()) {
                 AssignmentIdentity closedIdentity = task.getAssignmentIdentity().orElse(null);
-                task.projectCommittedJobFailure().ifPresent(peerId -> {
+                java.util.Optional<String> releasedPeer =
+                        task.projectCommittedJobFailure();
+                releasedPeer.ifPresent(peerId -> {
+                    if (closedIdentity == null) {
+                        throw new IllegalStateException(
+                                "Assigned task is missing capacity reservation identity: "
+                                        + task.getTaskId()
+                        );
+                    }
+                    registry.releaseTaskCapacity(
+                            CapacityReservations.forAssignment(
+                                    completion.job,
+                                    task,
+                                    closedIdentity
+                            ),
+                            "JOB_FAILED"
+                    );
                     PeerInfo peer = registry.get(peerId);
                     if (peer != null) {
-                        registry.releaseTaskCapacity(peer);
                         registry.updateMetricsSnapshot(peerId);
                     }
                 });

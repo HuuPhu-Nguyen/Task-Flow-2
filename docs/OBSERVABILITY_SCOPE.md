@@ -110,6 +110,19 @@ Task assignment, retry, and failure:
 - `task_assignment_cache_conflict` and
   `gui_rabbitmq_task_assignment_cache_conflict` record permanent rejection when
   a live assignment ID is reused for a different task identity.
+- `executor_capacity_snapshot_accepted`,
+  `executor_capacity_snapshot_stale_ignored`, and
+  `executor_capacity_protocol_incompatible` classify executor advertisements.
+- `assignment_capacity_reserved` and `assignment_capacity_released` carry the
+  exact job, task, attempt, assignment, worker, type, and unit-cost tuple; the
+  release event also includes its authoritative reason/outcome.
+- `coordinator_capacity_projection_invalid` disables further dispatch after an
+  unexpected exact reservation-ledger mismatch; recovery requires coordinator
+  restart.
+- `scheduler_metrics` includes process-lifetime capacity snapshot,
+  reservation, and projection-failure counters plus current active-reservation
+  and reserved-unit gauges. Per-worker/type values stay in structured events
+  rather than creating high-cardinality metric keys.
 
 Final result delivery and abandoned states:
 

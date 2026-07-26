@@ -5,6 +5,7 @@ import server.db.JobStateStore;
 import server.job.AssignmentIdentity;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
+import server.registry.AssignmentCapacityReservation;
 import server.model.MessageEnvelope;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
@@ -243,7 +244,9 @@ final class ResultCommitService {
         state.indexClosedAssignment(task, activeAssignment);
 
         metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.COMMITTED);
-        attempts.onAttemptSuccess(envelope.fromNodeId(), completion.durationMs());
+        AssignmentCapacityReservation reservation =
+                CapacityReservations.forAssignment(job, task, activeAssignment);
+        attempts.onAttemptSuccess(reservation, completion.durationMs());
         events.info("task_result_committed", events.assignmentTraceFields(
                 job.getJobId(),
                 task.getTaskId(),

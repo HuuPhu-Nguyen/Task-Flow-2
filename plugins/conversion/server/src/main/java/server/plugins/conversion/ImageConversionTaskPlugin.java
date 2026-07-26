@@ -2,6 +2,7 @@ package server.plugins.conversion;
 
 import conversion.model.ConversionTaskTypes;
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskPlugin;
@@ -22,6 +23,11 @@ public class ImageConversionTaskPlugin implements TaskPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(2);
     }
 
     @Override

@@ -7,13 +7,14 @@ import org.slf4j.LoggerFactory;
 import peer.engine.AssignmentCacheConflictException;
 import peer.engine.AssignmentCacheSnapshot;
 import peer.engine.AssignmentExecution;
+import peer.engine.CoalescingCapacityHeartbeat;
+import peer.engine.ExecutorCapacityConfig;
 import peer.engine.PeerExecutionEngine;
 import protocol.JobResultMessage;
 import protocol.JobIds;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.PeerIdentity;
-import protocol.PongMessage;
 import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
 import protocol.TaskAssignMessage;
@@ -36,7 +37,6 @@ import transport.rabbitmq.RabbitMqTransportConnector;
 
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -85,13 +85,17 @@ public class RabbitMqPeerNode {
 
         BlockingQueue<ReceivedJobResult> jobResults = new LinkedBlockingQueue<>();
         PeerExecutionEngine engine = new PeerExecutionEngine(nodeId);
+        ExecutorCapacityConfig executorCapacity = engine.capacityConfig();
         LOGGER.info(
                 "event=peer_processors_registered transport=rabbitmq peer_id={} task_types={} "
-                        + "assignment_cache_max_entries={} assignment_cache_ttl_ms={}",
+                        + "assignment_cache_max_entries={} assignment_cache_ttl_ms={} "
+                        + "total_capacity_units={} max_concurrency_by_task_type={}",
                 nodeId,
                 engine.getRegisteredTaskTypes(),
                 engine.assignmentCacheConfig().maxEntries(),
-                engine.assignmentCacheConfig().ttlMillis()
+                engine.assignmentCacheConfig().ttlMillis(),
+                executorCapacity.totalCapacityUnits(),
+                executorCapacity.maxConcurrencyByTaskType()
         );
 
         transport.subscribePeer(TransportRoute.TASK_ASSIGN, nodeId,
@@ -99,12 +103,14 @@ public class RabbitMqPeerNode {
         transport.subscribePeer(TransportRoute.JOB_RESULT, nodeId,
                 delivery -> handleJobResult(jobResults, delivery));
 
-        ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId, engine.getRegisteredTaskTypes());
+        ScheduledExecutorService heartbeats = startHeartbeats(transport, nodeId, engine);
         AtomicBoolean shutdownStarted = new AtomicBoolean();
         Runnable peerShutdown = () -> {
             if (!shutdownStarted.compareAndSet(false, true)) {
                 return;
             }
+            engine.onCapacityChanged(() -> {
+            });
             heartbeats.shutdownNow();
             engine.shutdown();
             try {
@@ -284,7 +290,7 @@ public class RabbitMqPeerNode {
 
     private static ScheduledExecutorService startHeartbeats(RabbitMqTransport transport,
                                                             String nodeId,
-                                                            Collection<String> supportedTaskTypes) {
+                                                            PeerExecutionEngine engine) {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread thread = new Thread(r, "rabbitmq-peer-heartbeat");
             thread.setDaemon(true);
@@ -295,13 +301,16 @@ public class RabbitMqPeerNode {
                 publishConfirmed(transport, new OutboundTransportMessage(
                         TransportRoute.HEARTBEAT,
                         nodeId,
-                        new PongMessage(nodeId, Instant.now().toString(), supportedTaskTypes)
+                        engine.capacityHeartbeat(Instant.now().toString())
                 ), "Heartbeat publish was not confirmed");
             } catch (Exception e) {
                 LOGGER.warn("event=rabbitmq_heartbeat_failed peer_id={} error={}",
                         nodeId, e.getMessage(), e);
             }
         };
+        CoalescingCapacityHeartbeat immediateHeartbeat =
+                new CoalescingCapacityHeartbeat(scheduler, heartbeat);
+        engine.onCapacityChanged(immediateHeartbeat::request);
         heartbeat.run();
         scheduler.scheduleAtFixedRate(
                 heartbeat,

@@ -3,12 +3,16 @@ package protocol;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MessageValidatorTest {
+    private static final String EXECUTOR_INSTANCE_ID =
+            "550e8400-e29b-41d4-a716-446655440099";
     @Test
     void acceptsValidJobSubmissions() {
         JobSubmitMessage message = new JobSubmitMessage(
@@ -106,5 +110,109 @@ class MessageValidatorTest {
         } finally {
             System.clearProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY);
         }
+    }
+
+    @Test
+    void acceptsExecutorAndRequesterOnlyCapacityAdvertisements() {
+        PongMessage executor = new PongMessage(
+                "peer-1",
+                "2026-07-26T00:00:00Z",
+                List.of("TEXT_ANALYSIS", "IMAGE_CONVERSION"),
+                EXECUTOR_INSTANCE_ID,
+                1L,
+                8,
+                5,
+                Map.of("TEXT_ANALYSIS", 4, "IMAGE_CONVERSION", 2)
+        );
+        PongMessage requesterOnly = new PongMessage(
+                "requester-1",
+                "2026-07-26T00:00:00Z",
+                List.of(),
+                EXECUTOR_INSTANCE_ID,
+                1L,
+                0,
+                0,
+                Map.of()
+        );
+
+        assertDoesNotThrow(() -> MessageValidator.validate(executor));
+        assertDoesNotThrow(() -> MessageValidator.validate(requesterOnly));
+    }
+
+    @Test
+    void rejectsMalformedCapacityAdvertisementsWithStructuredReason() {
+        List<InvalidCapacity> invalidAdvertisements = List.of(
+                invalidCapacity(
+                        "not-a-uuid", 1L, 8, 8,
+                        Map.of("TEXT_ANALYSIS", 1), "executorInstanceId"
+                ),
+                invalidCapacity(
+                        EXECUTOR_INSTANCE_ID, 0L, 8, 8,
+                        Map.of("TEXT_ANALYSIS", 1), "capacitySnapshotSequence"
+                ),
+                invalidCapacity(
+                        EXECUTOR_INSTANCE_ID, 1L, 0, 0,
+                        Map.of("TEXT_ANALYSIS", 1), "totalCapacityUnits"
+                ),
+                invalidCapacity(
+                        EXECUTOR_INSTANCE_ID, 1L, 8, 9,
+                        Map.of("TEXT_ANALYSIS", 1), "availableCapacityUnits"
+                ),
+                invalidCapacity(
+                        EXECUTOR_INSTANCE_ID, 1L, 8, 8,
+                        Map.of("IMAGE_CONVERSION", 1), "exactly match"
+                ),
+                invalidCapacity(
+                        EXECUTOR_INSTANCE_ID, 1L, 8, 8,
+                        Map.of("TEXT_ANALYSIS", 0), "must be positive"
+                ),
+                new InvalidCapacity(
+                        new PongMessage(
+                                "requester-1",
+                                "2026-07-26T00:00:00Z",
+                                List.of(),
+                                EXECUTOR_INSTANCE_ID,
+                                1L,
+                                1,
+                                1,
+                                Map.of()
+                        ),
+                        "Requester-only"
+                )
+        );
+
+        for (InvalidCapacity invalid : invalidAdvertisements) {
+            MessageValidationException error = assertThrows(
+                    MessageValidationException.class,
+                    () -> MessageValidator.validate(invalid.message())
+            );
+            assertTrue(error.getMessage().contains(invalid.expectedMessage()));
+            assertEquals(
+                    MessageValidator.REASON_INVALID_CAPACITY_ADVERTISEMENT,
+                    error.reasonCode()
+            );
+        }
+    }
+
+    private static InvalidCapacity invalidCapacity(String instanceId,
+                                                    long sequence,
+                                                    int totalUnits,
+                                                    int availableUnits,
+                                                    Map<String, Integer> limits,
+                                                    String expectedMessage) {
+        PongMessage message = new PongMessage(
+                "peer-1",
+                "2026-07-26T00:00:00Z",
+                List.of("TEXT_ANALYSIS"),
+                instanceId,
+                sequence,
+                totalUnits,
+                availableUnits,
+                limits
+        );
+        return new InvalidCapacity(message, expectedMessage);
+    }
+
+    private record InvalidCapacity(PongMessage message, String expectedMessage) {
     }
 }

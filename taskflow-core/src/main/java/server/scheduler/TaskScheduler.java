@@ -166,6 +166,7 @@ public class TaskScheduler implements Runnable {
                 checkedMailbox,
                 state,
                 metrics,
+                checkedRegistry,
                 effectiveConfig,
                 checkedClock,
                 events
@@ -177,7 +178,8 @@ public class TaskScheduler implements Runnable {
                 metrics,
                 transitions,
                 jobCompletions,
-                events
+                events,
+                checkedRegistry
         );
         this.loop = new SchedulerLoop(checkedMailbox, new SchedulerLoop.Work() {
             @Override

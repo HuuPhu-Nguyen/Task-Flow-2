@@ -513,7 +513,6 @@ class RabbitMqBrokerRecoveryIntegrationTest {
         return new SchedulerConfig(
                 60_000L,
                 60_000L,
-                1,
                 3,
                 100,
                 20,

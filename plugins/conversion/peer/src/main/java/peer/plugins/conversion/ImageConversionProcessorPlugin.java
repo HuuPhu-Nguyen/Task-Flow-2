@@ -5,6 +5,7 @@ import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
 import peer.processors.ImageConversionProcessor;
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 
 public class ImageConversionProcessorPlugin implements PeerProcessorPlugin {
     @Override
@@ -15,6 +16,11 @@ public class ImageConversionProcessorPlugin implements PeerProcessorPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(2);
     }
 
     @Override

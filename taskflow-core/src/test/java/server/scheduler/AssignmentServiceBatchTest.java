@@ -3,6 +3,7 @@ package server.scheduler;
 import org.junit.jupiter.api.Test;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
@@ -15,6 +16,7 @@ import server.scheduler.transition.TaskStateMachine;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,7 +27,7 @@ class AssignmentServiceBatchTest {
 
     @Test
     void oneLargeJobAndTenSmallJobsAllDispatchInTheirFirstCompleteRound() {
-        SchedulerConfig config = config(20, 100, 1);
+        SchedulerConfig config = config(100, 1);
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(
                 "peer-1",
@@ -61,7 +63,7 @@ class AssignmentServiceBatchTest {
 
     @Test
     void configuredQuotaPersistsOneRoundAcrossDispatchBatchBoundaries() {
-        SchedulerConfig config = config(20, 3, 2);
+        SchedulerConfig config = config(3, 2);
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(
                 "peer-1",
@@ -87,7 +89,7 @@ class AssignmentServiceBatchTest {
 
     @Test
     void retryPriorityRemainsInsideOneJobsQuota() {
-        SchedulerConfig config = config(10, 10, 2);
+        SchedulerConfig config = config(10, 2);
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(
                 "peer-1",
@@ -113,7 +115,7 @@ class AssignmentServiceBatchTest {
         InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
         registry.register(
                 "peer-1",
-                new PeerInfo("peer-1", config, List.of(TestTaskPlugin.TASK_TYPE))
+                capacityPeer("peer-1", config, 3)
         );
         Fixture fixture = new Fixture(config, registry);
         fixture.addJob("job-bounded", 5);
@@ -136,6 +138,23 @@ class AssignmentServiceBatchTest {
         assertEquals(1, capacityExhausted.processed());
         assertFalse(capacityExhausted.immediateWorkRemaining());
         assertEquals(3, fixture.output.assignments.size());
+    }
+
+    private static PeerInfo capacityPeer(String peerId,
+                                         SchedulerConfig config,
+                                         int totalCapacityUnits) {
+        PeerInfo peer = new PeerInfo(peerId, config);
+        peer.applyCapacityHeartbeat(new PongMessage(
+                peerId,
+                "2026-07-26T00:00:00Z",
+                List.of(TestTaskPlugin.TASK_TYPE),
+                "550e8400-e29b-41d4-a716-446655440040",
+                1L,
+                totalCapacityUnits,
+                totalCapacityUnits,
+                Map.of(TestTaskPlugin.TASK_TYPE, totalCapacityUnits)
+        ));
+        return peer;
     }
 
     @Test
@@ -315,14 +334,12 @@ class AssignmentServiceBatchTest {
         }
     }
 
-    private static SchedulerConfig config(int maxTasksPerPeer,
-                                          int dispatchBatchSize,
+    private static SchedulerConfig config(int dispatchBatchSize,
                                           int assignmentsPerJobPerRound) {
         SchedulerConfig defaults = SchedulerConfig.defaults();
         return new SchedulerConfig(
                 defaults.taskTimeoutMillis(),
                 defaults.taskLeaseMillis(),
-                maxTasksPerPeer,
                 defaults.maxTaskRetries(),
                 defaults.inboundQueueCapacity(),
                 defaults.jobResultMaxDeliveryAttempts(),

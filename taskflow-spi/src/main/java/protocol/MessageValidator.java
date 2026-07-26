@@ -3,8 +3,10 @@ package protocol;
 import com.google.gson.Gson;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -28,6 +30,7 @@ public final class MessageValidator {
     public static final String REASON_UNSUPPORTED_PROTOCOL_VERSION = "unsupported_protocol_version";
     public static final String REASON_ASSIGNMENT_PROTOCOL_V2_REQUIRED = "assignment_protocol_v2_required";
     public static final String REASON_INVALID_ASSIGNMENT_IDENTITY = "invalid_assignment_identity";
+    public static final String REASON_INVALID_CAPACITY_ADVERTISEMENT = "invalid_capacity_advertisement";
 
     private MessageValidator() {
     }
@@ -110,8 +113,61 @@ public final class MessageValidator {
                     + PayloadLimits.MAX_TASKS_PER_JOB_ENV + " (" + PayloadLimits.maxTasksPerJob()
                     + "): " + supportedTaskTypes.size());
         }
+        Set<String> normalizedTypes = new HashSet<>();
         for (String taskType : supportedTaskTypes) {
             validateTaskType(taskType, "PONG supported task type");
+            String normalized = taskType.trim().toUpperCase(Locale.ROOT);
+            if (!normalizedTypes.add(normalized)) {
+                throw invalidCapacity("PONG contains duplicate normalized task type " + normalized + ".");
+            }
+        }
+        if (pong.getProtocolVersion() != ProtocolVersions.CAPACITY_ADVERTISEMENT) {
+            return;
+        }
+
+        validateCapacityInstanceId(pong.getExecutorInstanceId());
+        if (pong.getCapacitySnapshotSequence() <= 0L) {
+            throw invalidCapacity("PONG capacitySnapshotSequence must be positive.");
+        }
+        int totalUnits = pong.getTotalCapacityUnits();
+        int availableUnits = pong.getAvailableCapacityUnits();
+        Map<String, Integer> concurrency = pong.getMaxConcurrencyByTaskType();
+        if (normalizedTypes.isEmpty()) {
+            if (totalUnits != 0 || availableUnits != 0 || !concurrency.isEmpty()) {
+                throw invalidCapacity(
+                        "Requester-only PONG capacity units and concurrency must be empty/zero."
+                );
+            }
+            return;
+        }
+        if (totalUnits <= 0) {
+            throw invalidCapacity("Executor PONG totalCapacityUnits must be positive.");
+        }
+        if (availableUnits < 0 || availableUnits > totalUnits) {
+            throw invalidCapacity(
+                    "PONG availableCapacityUnits must be between zero and totalCapacityUnits."
+            );
+        }
+        Map<String, Integer> normalizedConcurrency = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> entry : concurrency.entrySet()) {
+            validateTaskType(entry.getKey(), "PONG concurrency task type");
+            String normalized = entry.getKey().trim().toUpperCase(Locale.ROOT);
+            if (normalizedConcurrency.containsKey(normalized)) {
+                throw invalidCapacity(
+                        "PONG contains duplicate normalized concurrency task type " + normalized + "."
+                );
+            }
+            normalizedConcurrency.put(normalized, entry.getValue());
+            if (entry.getValue() == null || entry.getValue() <= 0) {
+                throw invalidCapacity(
+                        "PONG maximum type concurrency must be positive for " + normalized + "."
+                );
+            }
+        }
+        if (!normalizedConcurrency.keySet().equals(normalizedTypes)) {
+            throw invalidCapacity(
+                    "PONG maximum-concurrency task types must exactly match supportedTaskTypes."
+            );
         }
     }
 
@@ -175,9 +231,17 @@ public final class MessageValidator {
 
     private static void validateProtocolCompatibility(Message message) {
         try {
-            ProtocolVersions.requireSupported(message.getProtocolVersion(), "Message");
+            ProtocolVersions.requireMessageSupported(message.getProtocolVersion(), "Message");
         } catch (IllegalArgumentException e) {
             throw new MessageValidationException(REASON_UNSUPPORTED_PROTOCOL_VERSION, e.getMessage());
+        }
+        if (message.getProtocolVersion() == ProtocolVersions.CAPACITY_ADVERTISEMENT
+                && !(message instanceof PongMessage)) {
+            throw new MessageValidationException(
+                    REASON_UNSUPPORTED_PROTOCOL_VERSION,
+                    message.getType() + " does not support protocolVersion "
+                            + ProtocolVersions.CAPACITY_ADVERTISEMENT + "."
+            );
         }
         if ((message instanceof TaskAssignMessage || message instanceof TaskResultMessage)
                 && message.getProtocolVersion() != ProtocolVersions.ASSIGNMENT_IDENTITY) {
@@ -189,6 +253,24 @@ public final class MessageValidator {
                             + message.getProtocolVersion() + "."
             );
         }
+    }
+
+    private static void validateCapacityInstanceId(String instanceId) {
+        if (instanceId == null || instanceId.isBlank()) {
+            throw invalidCapacity("PONG executorInstanceId is required.");
+        }
+        try {
+            String canonical = UUID.fromString(instanceId).toString();
+            if (!canonical.equalsIgnoreCase(instanceId)) {
+                throw new IllegalArgumentException("non-canonical UUID syntax");
+            }
+        } catch (IllegalArgumentException e) {
+            throw invalidCapacity("PONG executorInstanceId must be a UUID.");
+        }
+    }
+
+    private static MessageValidationException invalidCapacity(String message) {
+        return new MessageValidationException(REASON_INVALID_CAPACITY_ADVERTISEMENT, message);
     }
 
     private static void validateAssignmentIdentity(int attemptNumber, String assignmentId) {

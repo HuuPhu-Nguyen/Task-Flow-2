@@ -2,6 +2,8 @@ package server.scheduler;
 
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskUnit;
+import server.job.AssignmentIdentity;
+import server.registry.PeerRegistry;
 import server.runtime.AssignmentIdGenerator;
 import server.runtime.TaskFlowClock;
 
@@ -17,6 +19,7 @@ final class RecoveryService {
     private final TaskTransitionDecisions transitions;
     private final JobCompletionService jobCompletions;
     private final SchedulerEventLog events;
+    private final PeerRegistry registry;
 
     RecoveryService(SchedulerState state,
                     TaskFlowClock clock,
@@ -24,7 +27,8 @@ final class RecoveryService {
                     SchedulerMetrics metrics,
                     TaskTransitionDecisions transitions,
                     JobCompletionService jobCompletions,
-                    SchedulerEventLog events) {
+                    SchedulerEventLog events,
+                    PeerRegistry registry) {
         this.state = state;
         this.clock = clock;
         this.assignmentIdGenerator = assignmentIdGenerator;
@@ -32,6 +36,7 @@ final class RecoveryService {
         this.transitions = transitions;
         this.jobCompletions = jobCompletions;
         this.events = events;
+        this.registry = registry;
     }
 
     void restoreJobs(Collection<EmbarrassinglyParallelJob<?, ?>> jobs,
@@ -62,6 +67,23 @@ final class RecoveryService {
                     tokenHashes.get(job.getJobId()),
                     identityKeys.get(job.getJobId())
             );
+            for (TaskUnit<?> task : job.getTasks().values()) {
+                if (task.getStatus() != TaskUnit.TaskStatus.ASSIGNED) {
+                    continue;
+                }
+                AssignmentIdentity identity = task.getAssignmentIdentity()
+                        .orElseThrow(() -> new IllegalStateException(
+                                "Recovered assigned task is missing assignment identity: "
+                                        + task.getTaskId()
+                        ));
+                if (!registry.reserveTaskCapacity(
+                        CapacityReservations.forAssignment(job, task, identity)
+                )) {
+                    throw new IllegalStateException(
+                            "Recovered capacity projection is invalid; restart is required."
+                    );
+                }
+            }
             events.info("job_resumed", events.fields(
                     "job_id", job.getJobId(),
                     "task_type", job.getTaskType(),

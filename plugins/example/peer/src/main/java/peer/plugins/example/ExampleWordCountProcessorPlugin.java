@@ -5,6 +5,7 @@ import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
 import peer.processors.ExampleWordCountProcessor;
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 
 public class ExampleWordCountProcessorPlugin implements PeerProcessorPlugin {
     @Override
@@ -15,6 +16,11 @@ public class ExampleWordCountProcessorPlugin implements PeerProcessorPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(1);
     }
 
     @Override

@@ -5,10 +5,10 @@ import org.slf4j.LoggerFactory;
 import peer.engine.AssignmentCacheConflictException;
 import peer.engine.AssignmentCacheSnapshot;
 import peer.engine.AssignmentExecution;
+import peer.engine.CoalescingCapacityHeartbeat;
 import protocol.JobResultMessage;
 import protocol.Message;
 import protocol.PeerIdentity;
-import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 import transport.BrokerTransport;
@@ -98,6 +98,8 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
         }
         ScheduledExecutorService heartbeatExecutor = heartbeats;
         if (heartbeatExecutor != null) {
+            workerRuntime.onCapacityChanged(() -> {
+            });
             heartbeatExecutor.shutdownNow();
         }
         BrokerTransport currentTransport = transport;
@@ -327,6 +329,10 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                         peerId, e.getMessage(), e);
             }
         };
+        heartbeats = scheduler;
+        CoalescingCapacityHeartbeat immediateHeartbeat =
+                new CoalescingCapacityHeartbeat(scheduler, heartbeat);
+        workerRuntime.onCapacityChanged(immediateHeartbeat::request);
         publishHeartbeat(openedTransport);
         scheduler.scheduleAtFixedRate(
                 heartbeat,
@@ -334,14 +340,13 @@ final class RabbitMqCoordinatorConnection implements StartableCoordinatorConnect
                 heartbeatIntervalMillis,
                 TimeUnit.MILLISECONDS
         );
-        heartbeats = scheduler;
     }
 
     private void publishHeartbeat(BrokerTransport openedTransport) throws Exception {
         boolean published = openedTransport.publish(new OutboundTransportMessage(
                 TransportRoute.HEARTBEAT,
                 peerId,
-                new PongMessage(peerId, Instant.now().toString(), workerRuntime.supportedTaskTypes())
+                workerRuntime.capacityHeartbeat(peerId, Instant.now().toString())
         ));
         if (!published) {
             throw new TransientDeliveryException(

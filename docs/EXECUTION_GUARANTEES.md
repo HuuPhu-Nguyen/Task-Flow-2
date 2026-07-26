@@ -539,6 +539,16 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.
 - After startup, non-outbox assignment commits before task/capacity projection and dispatch. For RabbitMQ outbox assignment, the scheduler installs the identity returned by the committed SQLite transaction and publishes its returned outbox row; repeated or concurrent creation calls for a no-longer-`PENDING` task create neither a new generation nor a second outbox row.
 - Retry release and terminal task failure commit the exact current assignment generation and its attempt-audit outcome before changing task state, participant capacity, retry/failure metrics, or redispatch eligibility. Storage failure preserves the assigned projection; an ensuing job-failure decision must itself commit before terminal projection.
+- Executor PONG protocol v3 advertises a process-instance UUID, monotonic
+  snapshot sequence, scalar total/available units, and per-task-type maximum
+  concurrency while the RabbitMQ envelope and all non-PONG messages remain
+  protocol v2. Legacy PONGs remain live for inspection but are scheduling
+  ineligible.
+- Coordinator placement first applies hard weighted-unit and type-slot
+  eligibility, then scores only eligible peers. Capacity is reserved after the
+  durable assignment commits and released only after an exact current
+  assignment transition commits; stale, duplicate, unknown, disconnect-only,
+  and storage-failure events do not release it.
 - The last successful task transaction commits its task result, attempt outcome,
   and `FINALIZING` intent together. For non-outbox outputs, the subsequent
   terminal job state commits before final-result delivery. For RabbitMQ with
@@ -553,8 +563,9 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
 
 ## Heartbeat and Participant Liveness
 
-- RabbitMQ participants periodically publish `PONG` heartbeat messages with
-  their explicit peer ID and supported task types.
+- RabbitMQ participants publish initial, periodic, and coalesced
+  capacity-change `PONG` heartbeats with their explicit peer ID, supported task
+  types, scalar units, and per-type concurrency limits.
 - The coordinator accepts a heartbeat only when the broker envelope sender and
   inner message identity agree.
 - Missing heartbeats beyond timeout mark the participant stale, remove it from the

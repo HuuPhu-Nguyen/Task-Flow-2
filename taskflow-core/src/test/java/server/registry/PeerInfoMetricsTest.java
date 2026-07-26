@@ -1,6 +1,7 @@
 package server.registry;
 
 import org.junit.jupiter.api.Test;
+import protocol.PongMessage;
 import server.scheduler.SchedulerConfig;
 
 import java.util.List;
@@ -27,8 +28,8 @@ class PeerInfoMetricsTest {
     }
 
     @Test
-    void selectionScoreReflectsFailuresAndLoad() {
-        PeerInfo peer = new PeerInfo("peer-2");
+    void selectionScoreReflectsFailuresAndReservedCapacityLoad() {
+        PeerInfo peer = capacityPeer("peer-2", 4);
         double baseline = peer.getSelectionScore();
 
         peer.recordTaskFailure();
@@ -36,8 +37,7 @@ class PeerInfoMetricsTest {
         double withFailures = peer.getSelectionScore();
         assertTrue(withFailures > baseline);
 
-        peer.incrementTasks();
-        double withLoad = peer.getSelectionScore();
+        double withLoad = peer.getSelectionScore(1L);
         assertTrue(withLoad > withFailures);
     }
 
@@ -58,19 +58,26 @@ class PeerInfoMetricsTest {
     }
 
     @Test
-    void selectionScoreUsesConfiguredLoadLimitAndWeight() {
+    void selectionScoreUsesAdvertisedCapacityAndConfiguredLoadWeight() {
         SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
-                "TASKFLOW_MAX_TASKS_PER_PEER", "1",
                 "TASKFLOW_SCORE_LOAD_WEIGHT", "10",
                 "TASKFLOW_SCORE_LATENCY_WEIGHT", "0",
                 "TASKFLOW_SCORE_DURATION_WEIGHT", "0",
                 "TASKFLOW_SCORE_FAILURE_WEIGHT", "0"
         ));
         PeerInfo peer = new PeerInfo("peer-4", config);
+        peer.applyCapacityHeartbeat(new PongMessage(
+                "peer-4",
+                "2026-07-26T00:00:00Z",
+                List.of("TEST"),
+                "550e8400-e29b-41d4-a716-446655440004",
+                1L,
+                4,
+                4,
+                Map.of("TEST", 4)
+        ));
 
-        peer.incrementTasks();
-
-        assertEquals(10.0, peer.getSelectionScore());
+        assertEquals(5.0, peer.getSelectionScore(2L));
     }
 
     @Test
@@ -98,5 +105,20 @@ class PeerInfoMetricsTest {
         assertTrue(peer.supportsTaskType("image_conversion"));
         assertTrue(peer.supportsTaskType("VIDEO_TRANSCODING"));
         assertFalse(peer.supportsTaskType("UNKNOWN_TASK"));
+    }
+
+    private static PeerInfo capacityPeer(String peerId, int totalCapacityUnits) {
+        PeerInfo peer = new PeerInfo(peerId);
+        peer.applyCapacityHeartbeat(new PongMessage(
+                peerId,
+                "2026-07-26T00:00:00Z",
+                List.of("TEST"),
+                "550e8400-e29b-41d4-a716-446655440002",
+                1L,
+                totalCapacityUnits,
+                totalCapacityUnits,
+                Map.of("TEST", totalCapacityUnits)
+        ));
+        return peer;
     }
 }

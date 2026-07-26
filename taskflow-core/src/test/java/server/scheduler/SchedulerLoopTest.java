@@ -198,7 +198,6 @@ class SchedulerLoopTest {
         return new SchedulerConfig(
                 defaults.taskTimeoutMillis(),
                 defaults.taskLeaseMillis(),
-                defaults.maxTasksPerPeer(),
                 defaults.maxTaskRetries(),
                 defaults.inboundQueueCapacity(),
                 defaults.jobResultMaxDeliveryAttempts(),

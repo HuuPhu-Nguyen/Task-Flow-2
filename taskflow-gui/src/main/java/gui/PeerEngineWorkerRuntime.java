@@ -3,6 +3,7 @@ package gui;
 import peer.engine.AssignmentCacheSnapshot;
 import peer.engine.AssignmentExecution;
 import peer.engine.PeerExecutionEngine;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
@@ -39,6 +40,16 @@ final class PeerEngineWorkerRuntime implements GuiWorkerRuntime {
     @Override
     public AssignmentCacheSnapshot assignmentCacheSnapshot() {
         return engine.assignmentCacheSnapshot();
+    }
+
+    @Override
+    public PongMessage capacityHeartbeat(String peerId, String timestamp) {
+        return engine.capacityHeartbeat(timestamp);
+    }
+
+    @Override
+    public void onCapacityChanged(Runnable listener) {
+        engine.onCapacityChanged(listener);
     }
 
     @Override

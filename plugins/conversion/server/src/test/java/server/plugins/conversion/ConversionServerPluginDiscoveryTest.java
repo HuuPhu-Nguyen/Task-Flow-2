@@ -40,6 +40,22 @@ class ConversionServerPluginDiscoveryTest {
     }
 
     @Test
+    void declaresWeightedCapacityCosts() {
+        assertEquals(
+                2,
+                new ImageConversionTaskPlugin()
+                        .resourceProfile()
+                        .capacityUnitCost()
+        );
+        assertEquals(
+                8,
+                new VideoTranscodingTaskPlugin()
+                        .resourceProfile()
+                        .capacityUnitCost()
+        );
+    }
+
+    @Test
     void imagePluginAcceptsValidSubmission() {
         JobSubmitMessage submit = submit(
                 ConversionTaskTypes.IMAGE_CONVERSION,

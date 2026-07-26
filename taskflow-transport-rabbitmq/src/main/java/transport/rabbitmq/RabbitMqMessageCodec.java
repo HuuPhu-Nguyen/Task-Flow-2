@@ -34,7 +34,7 @@ public class RabbitMqMessageCodec {
         MessageValidator.validatePeerId(outbound.fromNodeId(), "RabbitMQ envelope fromNodeId");
         MessageValidator.validate(outbound.message());
         JsonObject root = new JsonObject();
-        root.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT);
+        root.addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.ENVELOPE_CURRENT);
         root.addProperty(FIELD_ROUTE, outbound.route().name());
         root.addProperty(FIELD_FROM_NODE_ID, outbound.fromNodeId());
         root.add(FIELD_MESSAGE, gson.toJsonTree(outbound.message()));
@@ -56,7 +56,7 @@ public class RabbitMqMessageCodec {
     }
 
     private Message parseMessage(JsonObject messageJson) {
-        ProtocolVersions.normalizeSupportedVersion(messageJson, "RabbitMQ message");
+        ProtocolVersions.normalizeSupportedMessageVersion(messageJson, "RabbitMQ message");
         JsonElement typeElement = messageJson.get("type");
         if (typeElement == null || typeElement.isJsonNull() || !typeElement.isJsonPrimitive()) {
             throw new IllegalArgumentException("RabbitMQ message JSON is missing required type field.");

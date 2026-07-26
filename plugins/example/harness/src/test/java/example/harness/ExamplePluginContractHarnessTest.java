@@ -42,6 +42,7 @@ class ExamplePluginContractHarnessTest {
 
         assertEquals(RetrySafety.PURE, taskPlugin.retrySafety());
         assertEquals(taskPlugin.retrySafety(), peerPlugin.retrySafety());
+        assertEquals(taskPlugin.resourceProfile(), peerPlugin.resourceProfile());
 
         Path first = tempDir.resolve("first.txt");
         Path second = tempDir.resolve("second.txt");

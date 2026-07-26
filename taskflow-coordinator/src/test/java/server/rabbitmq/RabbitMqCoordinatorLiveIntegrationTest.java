@@ -17,6 +17,7 @@ import server.db.BrokerOutboxStore;
 import server.db.DatabaseManager;
 import server.db.JobStateStore;
 import server.model.MessageEnvelope;
+import server.registry.CapacityMetricsSnapshot;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
 import server.scheduler.SchedulerConfig;
@@ -134,7 +135,16 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 peerTransport.publish(new OutboundTransportMessage(
                         TransportRoute.HEARTBEAT,
                         peerId,
-                        new PongMessage(peerId, Instant.now().toString(), List.of(TestTaskPlugin.TASK_TYPE))
+                        new PongMessage(
+                                peerId,
+                                Instant.now().toString(),
+                                List.of(TestTaskPlugin.TASK_TYPE),
+                                "550e8400-e29b-41d4-a716-446655440099",
+                                1L,
+                                8,
+                                8,
+                                java.util.Map.of(TestTaskPlugin.TASK_TYPE, 8)
+                        )
                 ));
                 awaitDelivery(heartbeatRegistered, heartbeatFailure, "peer heartbeat registration");
 
@@ -174,6 +184,12 @@ class RabbitMqCoordinatorLiveIntegrationTest {
                 awaitDelivery(jobResultSendCompleted, jobResultSendFailure, "scheduler job-result send completion");
                 awaitDelivery(taskResultAcknowledged, taskResultAckFailure, "scheduler task-result acknowledgement");
                 assertEquals(List.of("processed-alpha"), jobResult.get().getResultsByTaskId());
+                CapacityMetricsSnapshot capacity = registry.capacityMetricsSnapshot();
+                assertEquals(1L, capacity.acceptedSnapshots());
+                assertEquals(1L, capacity.reservationsCreated());
+                assertEquals(1L, capacity.reservationsReleased());
+                assertEquals(0L, capacity.activeReservations());
+                assertEquals(0L, capacity.reservedCapacityUnits());
                 assertQueueDrained(config, topology.queueName(TransportRoute.JOB_SUBMIT));
                 assertQueueDrained(config, topology.queueName(TransportRoute.TASK_RESULT));
             }
@@ -1205,12 +1221,10 @@ class RabbitMqCoordinatorLiveIntegrationTest {
             registry.register(peerNodeId, new PeerInfo(
                     peerNodeId,
                     SchedulerConfig.defaults(),
-                    heartbeat.getSupportedTaskTypes()
+                    List.of()
             ));
-        } else {
-            registry.updateHeartbeat(peerNodeId);
-            peer.setSupportedTaskTypes(heartbeat.getSupportedTaskTypes());
         }
+        registry.updateHeartbeat(peerNodeId, heartbeat);
         registered.countDown();
     }
 

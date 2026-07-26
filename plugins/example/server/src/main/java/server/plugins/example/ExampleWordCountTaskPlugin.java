@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import example.model.ExamplePayload;
 import example.model.ExampleTaskTypes;
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 import protocol.PayloadLimits;
 import server.job.EmbarrassinglyParallelJob;
@@ -23,6 +24,11 @@ public class ExampleWordCountTaskPlugin implements TaskPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(1);
     }
 
     @Override

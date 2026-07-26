@@ -3,6 +3,7 @@ package server;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
+import protocol.MessageValidator;
 import protocol.PeerIdentity;
 import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
@@ -206,6 +207,7 @@ public class RabbitMqTaskCoordinatorServer {
             settle(delivery, DeliveryDisposition.REJECT_INVALID, "heartbeat_message_type_invalid");
             return;
         }
+        MessageValidator.validate(pong);
         String envelopePeerId = delivery.fromNodeId();
         String messagePeerId = message.getNodeId();
         if (envelopePeerId != null
@@ -232,14 +234,28 @@ public class RabbitMqTaskCoordinatorServer {
         if (peer == null) {
             registry.registerIfAbsent(
                     peerNodeId,
-                    new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes(), PeerTransport.RABBITMQ));
-        } else {
-            registry.updateHeartbeat(peerNodeId, pong.getSupportedTaskTypes());
+                    new PeerInfo(peerNodeId, schedulerConfig, List.of(), PeerTransport.RABBITMQ));
         }
+        PeerInfo.CapacitySnapshotOutcome snapshotOutcome =
+                registry.updateHeartbeat(peerNodeId, pong);
         if (registry.capacityAvailabilityVersion() != capacityVersion) {
             scheduler.requestSchedulingRecheck();
         }
-        settle(delivery, DeliveryDisposition.ACK_SUCCESS, "heartbeat_registered");
+        if (snapshotOutcome == PeerInfo.CapacitySnapshotOutcome.INSTANCE_CONFLICT) {
+            settle(
+                    delivery,
+                    DeliveryDisposition.ACK_DUPLICATE_OR_STALE,
+                    "executor_instance_conflict"
+            );
+            return;
+        }
+        String reasonCode = switch (snapshotOutcome) {
+            case ACCEPTED -> "capacity_snapshot_accepted";
+            case STALE -> "capacity_snapshot_stale";
+            case INCOMPATIBLE -> "capacity_protocol_unsupported";
+            case INSTANCE_CONFLICT -> throw new IllegalStateException("Handled above.");
+        };
+        settle(delivery, DeliveryDisposition.ACK_SUCCESS, reasonCode);
     }
 
     private static void settle(InboundTransportMessage delivery,

@@ -3,6 +3,7 @@ package server.registry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.PeerIdentity;
+import protocol.PongMessage;
 
 import java.util.Collection;
 import java.util.Comparator;
@@ -11,6 +12,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class InMemoryPeerRegistry implements PeerRegistry {
@@ -19,10 +21,16 @@ public class InMemoryPeerRegistry implements PeerRegistry {
 
     private final ConcurrentHashMap<String, PeerInfo> peers = new ConcurrentHashMap<>();
     private final Map<String, LinkedHashSet<String>> capablePeerIdsByTaskType = new HashMap<>();
-    private final Map<String, LinkedHashSet<String>> availablePeerIdsByTaskType = new HashMap<>();
+    private final CoordinatorCapacityLedger capacityLedger = new CoordinatorCapacityLedger();
     private final PeerRegistryStore store;
-    private int capacityIndexLimit = -1;
     private long capacityAvailabilityVersion;
+    private boolean capacityProjectionValid = true;
+    private long acceptedCapacitySnapshots;
+    private long staleCapacitySnapshots;
+    private long incompatibleCapacitySnapshots;
+    private long capacityReservationsCreated;
+    private long capacityReservationsReleased;
+    private long capacityProjectionFailures;
 
     public InMemoryPeerRegistry() {
         this(null);
@@ -89,14 +97,83 @@ public class InMemoryPeerRegistry implements PeerRegistry {
             LinkedHashSet<String> previousTaskTypes =
                     new LinkedHashSet<>(peer.getSupportedTaskTypes());
             removeFromIndexes(peer);
-            peer.updateHeartbeatReceivedNow();
-            peer.setSupportedTaskTypes(supportedTaskTypes);
+            peer.applyLegacyHeartbeat(supportedTaskTypes);
+            incompatibleCapacitySnapshots++;
             addToIndexes(peer);
             if (!previousTaskTypes.equals(new LinkedHashSet<>(peer.getSupportedTaskTypes()))) {
                 capacityAvailabilityVersion++;
             }
             persistPeer(peer, PeerStatus.CONNECTED, 0L);
         }
+    }
+
+    @Override
+    public synchronized PeerInfo.CapacitySnapshotOutcome updateHeartbeat(
+            String nodeId,
+            PongMessage pong
+    ) {
+        Objects.requireNonNull(pong, "pong");
+        PeerInfo peer = peers.get(PeerIdentity.require(nodeId));
+        if (peer == null) {
+            return PeerInfo.CapacitySnapshotOutcome.INCOMPATIBLE;
+        }
+        if (!peer.getNodeId().equals(PeerIdentity.require(pong.getNodeId()))) {
+            throw new IllegalArgumentException(
+                    "Capacity heartbeat node id must match the registry peer."
+            );
+        }
+        LinkedHashSet<String> previousTaskTypes =
+                new LinkedHashSet<>(peer.getSupportedTaskTypes());
+        boolean previouslyEligible = peer.hasCapacityAdvertisement();
+        PeerInfo.CapacitySnapshotOutcome outcome = peer.applyCapacityHeartbeat(pong);
+        if (outcome == PeerInfo.CapacitySnapshotOutcome.INSTANCE_CONFLICT) {
+            staleCapacitySnapshots++;
+            LOGGER.warn(
+                    "event=executor_capacity_snapshot_stale_ignored peer_id={} "
+                            + "executor_instance_id={} capacity_snapshot_sequence={} "
+                            + "reason=executor_instance_conflict",
+                    nodeId,
+                    pong.getExecutorInstanceId(),
+                    pong.getCapacitySnapshotSequence()
+            );
+            return outcome;
+        }
+        removeFromIndexes(peer);
+        addToIndexes(peer);
+        boolean eligibilityChanged = previouslyEligible != peer.hasCapacityAdvertisement()
+                || !previousTaskTypes.equals(new LinkedHashSet<>(peer.getSupportedTaskTypes()))
+                || outcome == PeerInfo.CapacitySnapshotOutcome.ACCEPTED;
+        if (eligibilityChanged) {
+            capacityAvailabilityVersion++;
+        }
+        persistPeer(peer, PeerStatus.CONNECTED, 0L);
+        String event = switch (outcome) {
+            case ACCEPTED -> {
+                acceptedCapacitySnapshots++;
+                yield "executor_capacity_snapshot_accepted";
+            }
+            case STALE -> {
+                staleCapacitySnapshots++;
+                yield "executor_capacity_snapshot_stale_ignored";
+            }
+            case INCOMPATIBLE -> {
+                incompatibleCapacitySnapshots++;
+                yield "executor_capacity_protocol_incompatible";
+            }
+            case INSTANCE_CONFLICT -> throw new IllegalStateException("Handled above.");
+        };
+        LOGGER.info(
+                "event={} peer_id={} executor_instance_id={} capacity_snapshot_sequence={} "
+                        + "total_capacity_units={} available_capacity_units={} reason={}",
+                event,
+                nodeId,
+                pong.getExecutorInstanceId(),
+                pong.getCapacitySnapshotSequence(),
+                pong.getTotalCapacityUnits(),
+                pong.getAvailableCapacityUnits(),
+                peer.getCapacityIneligibilityReason()
+        );
+        return outcome;
     }
 
     @Override
@@ -118,21 +195,29 @@ public class InMemoryPeerRegistry implements PeerRegistry {
     }
 
     @Override
-    public synchronized List<PeerInfo> getAvailablePeers(String taskType, int maxTasksPerPeer) {
-        if (maxTasksPerPeer <= 0) {
-            throw new IllegalArgumentException("maxTasksPerPeer must be positive.");
+    public synchronized List<PeerInfo> getAvailablePeers(String taskType, int capacityUnitCost) {
+        if (capacityUnitCost <= 0) {
+            throw new IllegalArgumentException("capacityUnitCost must be positive.");
         }
-        if (capacityIndexLimit != maxTasksPerPeer) {
-            rebuildAvailableCapacityIndex(maxTasksPerPeer);
+        if (!capacityProjectionValid) {
+            return List.of();
         }
-        LinkedHashSet<String> peerIds = availablePeerIdsByTaskType.get(normalizeTaskType(taskType));
+        String normalizedType = normalizeTaskType(taskType);
+        LinkedHashSet<String> peerIds = capablePeerIdsByTaskType.get(normalizedType);
         if (peerIds == null || peerIds.isEmpty()) {
             return List.of();
         }
         return peerIds.stream()
                 .map(peers::get)
-                .filter(peer -> peer != null)
-                .sorted(Comparator.comparingDouble(PeerInfo::getSelectionScore))
+                .filter(peer -> peer != null && peer.hasCapacityFor(
+                        normalizedType,
+                        capacityUnitCost,
+                        capacityLedger.reservedUnits(peer.getNodeId()),
+                        capacityLedger.reservedTypeCount(peer.getNodeId(), normalizedType)
+                ))
+                .sorted(Comparator.comparingDouble(peer -> peer.getSelectionScore(
+                        capacityLedger.reservedUnits(peer.getNodeId())
+                )))
                 .toList();
     }
 
@@ -142,39 +227,111 @@ public class InMemoryPeerRegistry implements PeerRegistry {
     }
 
     @Override
-    public synchronized void reserveTaskCapacity(PeerInfo peer) {
-        if (peer == null) {
-            return;
+    public synchronized boolean reserveTaskCapacity(
+            AssignmentCapacityReservation reservation
+    ) {
+        Objects.requireNonNull(reservation, "reservation");
+        if (!capacityProjectionValid) {
+            return false;
         }
-        peer.incrementTasks();
-        refreshAvailableCapacity(peer);
+        CoordinatorCapacityLedger.ReserveOutcome outcome;
+        try {
+            outcome = capacityLedger.reserve(reservation);
+        } catch (RuntimeException failure) {
+            invalidateCapacityProjection(
+                    "reserve_exception_" + failure.getClass().getSimpleName(),
+                    reservation,
+                    failure
+            );
+            return false;
+        }
+        if (outcome == CoordinatorCapacityLedger.ReserveOutcome.ALREADY_RESERVED) {
+            return true;
+        }
+        if (outcome == CoordinatorCapacityLedger.ReserveOutcome.IDENTITY_MISMATCH) {
+            invalidateCapacityProjection("reserve_" + outcome, reservation);
+            return false;
+        }
+        capacityReservationsCreated++;
+        PeerInfo peer = peers.get(reservation.workerId());
+        if (peer != null) {
+            peer.incrementTasks();
+        }
+        LOGGER.info(
+                "event=assignment_capacity_reserved job_id={} task_id={} attempt_number={} "
+                        + "assignment_id={} worker_id={} task_type={} capacity_unit_cost={}",
+                reservation.jobId(),
+                reservation.taskId(),
+                reservation.attemptNumber(),
+                reservation.assignmentId(),
+                reservation.workerId(),
+                reservation.taskType(),
+                reservation.capacityUnitCost()
+        );
+        return true;
     }
 
     @Override
-    public synchronized void releaseTaskCapacity(PeerInfo peer) {
-        if (peer == null) {
-            return;
+    public synchronized boolean releaseTaskCapacity(
+            AssignmentCapacityReservation reservation,
+            String releaseReason
+    ) {
+        Objects.requireNonNull(reservation, "reservation");
+        String checkedReleaseReason = requireReleaseReason(releaseReason);
+        CoordinatorCapacityLedger.ReleaseOutcome outcome;
+        try {
+            outcome = capacityLedger.release(reservation);
+        } catch (RuntimeException failure) {
+            invalidateCapacityProjection(
+                    "release_exception_" + failure.getClass().getSimpleName(),
+                    reservation,
+                    failure
+            );
+            return false;
         }
-        int activeTasks = peer.getActiveTasks();
-        peer.decrementTasks();
-        refreshAvailableCapacity(peer);
-        if (peer.getActiveTasks() < activeTasks) {
-            capacityAvailabilityVersion++;
+        if (outcome != CoordinatorCapacityLedger.ReleaseOutcome.RELEASED) {
+            invalidateCapacityProjection("release_" + outcome, reservation);
+            return false;
         }
+        capacityReservationsReleased++;
+        PeerInfo peer = peers.get(reservation.workerId());
+        if (peer != null) {
+            peer.decrementTasks();
+        }
+        capacityAvailabilityVersion++;
+        LOGGER.info(
+                "event=assignment_capacity_released job_id={} task_id={} attempt_number={} "
+                        + "assignment_id={} worker_id={} task_type={} capacity_unit_cost={} "
+                        + "release_reason={} release_outcome=RELEASED",
+                reservation.jobId(),
+                reservation.taskId(),
+                reservation.attemptNumber(),
+                reservation.assignmentId(),
+                reservation.workerId(),
+                reservation.taskType(),
+                reservation.capacityUnitCost(),
+                checkedReleaseReason
+        );
+        return true;
     }
 
     @Override
-    public synchronized void releaseTaskCapacity(String nodeId) {
-        PeerInfo peer = peers.get(PeerIdentity.require(nodeId));
-        if (peer == null) {
-            return;
-        }
-        int activeTasks = peer.getActiveTasks();
-        peer.decrementTasks();
-        refreshAvailableCapacity(peer);
-        if (peer.getActiveTasks() < activeTasks) {
-            capacityAvailabilityVersion++;
-        }
+    public synchronized boolean capacityProjectionValid() {
+        return capacityProjectionValid;
+    }
+
+    @Override
+    public synchronized CapacityMetricsSnapshot capacityMetricsSnapshot() {
+        return new CapacityMetricsSnapshot(
+                acceptedCapacitySnapshots,
+                staleCapacitySnapshots,
+                incompatibleCapacitySnapshots,
+                capacityReservationsCreated,
+                capacityReservationsReleased,
+                capacityProjectionFailures,
+                capacityLedger.reservationCount(),
+                capacityLedger.reservedUnitsTotal()
+        );
     }
 
     private void verifyPeerInfo(String nodeId, PeerInfo peer) {
@@ -192,44 +349,11 @@ public class InMemoryPeerRegistry implements PeerRegistry {
                     .computeIfAbsent(taskType, ignored -> new LinkedHashSet<>())
                     .add(peer.getNodeId());
         }
-        refreshAvailableCapacity(peer);
     }
 
     private void removeFromIndexes(PeerInfo peer) {
         for (String taskType : peer.getSupportedTaskTypes()) {
             removePeerId(capablePeerIdsByTaskType, taskType, peer.getNodeId());
-            removePeerId(availablePeerIdsByTaskType, taskType, peer.getNodeId());
-        }
-    }
-
-    private void refreshAvailableCapacity(PeerInfo peer) {
-        if (capacityIndexLimit <= 0 || peers.get(peer.getNodeId()) != peer) {
-            return;
-        }
-        boolean available = peer.getActiveTasks() < capacityIndexLimit;
-        for (String taskType : peer.getSupportedTaskTypes()) {
-            if (available) {
-                availablePeerIdsByTaskType
-                        .computeIfAbsent(taskType, ignored -> new LinkedHashSet<>())
-                        .add(peer.getNodeId());
-            } else {
-                removePeerId(availablePeerIdsByTaskType, taskType, peer.getNodeId());
-            }
-        }
-    }
-
-    private void rebuildAvailableCapacityIndex(int maxTasksPerPeer) {
-        capacityIndexLimit = maxTasksPerPeer;
-        availablePeerIdsByTaskType.clear();
-        for (Map.Entry<String, LinkedHashSet<String>> entry : capablePeerIdsByTaskType.entrySet()) {
-            for (String peerId : entry.getValue()) {
-                PeerInfo peer = peers.get(peerId);
-                if (peer != null && peer.getActiveTasks() < maxTasksPerPeer) {
-                    availablePeerIdsByTaskType
-                            .computeIfAbsent(entry.getKey(), ignored -> new LinkedHashSet<>())
-                            .add(peerId);
-                }
-            }
         }
     }
 
@@ -253,6 +377,13 @@ public class InMemoryPeerRegistry implements PeerRegistry {
         return taskType.trim().toUpperCase(Locale.ROOT);
     }
 
+    private static String requireReleaseReason(String releaseReason) {
+        if (releaseReason == null || releaseReason.isBlank()) {
+            throw new IllegalArgumentException("releaseReason is required.");
+        }
+        return releaseReason.trim();
+    }
+
     private void persistPeer(PeerInfo peer, PeerStatus status, long lastDisconnectedAtMillis) {
         if (store == null) {
             return;
@@ -266,5 +397,36 @@ public class InMemoryPeerRegistry implements PeerRegistry {
             LOGGER.warn("event=peer_registry_persist_failed peer_id={} status={}",
                     peer.getNodeId(), status);
         }
+    }
+
+    private void invalidateCapacityProjection(
+            String reason,
+            AssignmentCapacityReservation reservation
+    ) {
+        invalidateCapacityProjection(reason, reservation, null);
+    }
+
+    private void invalidateCapacityProjection(
+            String reason,
+            AssignmentCapacityReservation reservation,
+            RuntimeException failure
+    ) {
+        capacityProjectionValid = false;
+        capacityProjectionFailures++;
+        LOGGER.error(
+                "event=coordinator_capacity_projection_invalid reason={} job_id={} "
+                        + "task_id={} attempt_number={} assignment_id={} worker_id={} "
+                        + "task_type={} capacity_unit_cost={} error={}",
+                reason,
+                reservation.jobId(),
+                reservation.taskId(),
+                reservation.attemptNumber(),
+                reservation.assignmentId(),
+                reservation.workerId(),
+                reservation.taskType(),
+                reservation.capacityUnitCost(),
+                failure == null ? "" : failure.getMessage(),
+                failure
+        );
     }
 }

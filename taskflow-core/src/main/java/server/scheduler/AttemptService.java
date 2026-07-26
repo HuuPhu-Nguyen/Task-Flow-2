@@ -3,6 +3,8 @@ package server.scheduler;
 import server.db.JobStateStore;
 import server.job.AssignmentIdentity;
 import server.job.TaskUnit;
+import server.job.EmbarrassinglyParallelJob;
+import server.registry.AssignmentCapacityReservation;
 import server.registry.PeerInfo;
 import server.registry.PeerRegistry;
 import server.scheduler.transition.TaskState;
@@ -46,6 +48,15 @@ final class AttemptService {
                         "Accepted failed-attempt transition is missing assignment identity for "
                                 + task.getTaskId()
                 ));
+        EmbarrassinglyParallelJob<?, ?> job = state.activeJob(task.getJobId());
+        if (job == null) {
+            throw new IllegalStateException(
+                    "Accepted failed-attempt transition is missing active job "
+                            + task.getJobId()
+            );
+        }
+        AssignmentCapacityReservation reservation =
+                CapacityReservations.forAssignment(job, task, assignment);
         JobStateStore.DurableTransitionOutcome durableOutcome = persistTaskFailure(
                 task,
                 assignment,
@@ -70,29 +81,33 @@ final class AttemptService {
         if (outcome == TaskUnit.FailureOutcome.RETRY_SCHEDULED) {
             metrics.recordRetry();
         }
-        onAttemptFailure(workerId, outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE);
+        onAttemptFailure(
+                reservation,
+                outcome == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
+                outcome.name()
+        );
         return new FailureResult(outcome, durableOutcome, decision, true);
     }
 
-    void onAttemptSuccess(String workerId, long durationMs) {
-        PeerInfo peer = registry.get(workerId);
-        if (peer == null) {
-            return;
+    void onAttemptSuccess(AssignmentCapacityReservation reservation, long durationMs) {
+        registry.releaseTaskCapacity(reservation, "SUCCEEDED");
+        PeerInfo peer = registry.get(reservation.workerId());
+        if (peer != null) {
+            peer.recordTaskSuccess(durationMs);
+            registry.updateMetricsSnapshot(reservation.workerId());
         }
-        peer.recordTaskSuccess(durationMs);
-        registry.releaseTaskCapacity(peer);
-        registry.updateMetricsSnapshot(workerId);
     }
 
-    private void onAttemptFailure(String workerId, boolean terminalFailure) {
+    private void onAttemptFailure(AssignmentCapacityReservation reservation,
+                                  boolean terminalFailure,
+                                  String releaseReason) {
         metrics.recordAttemptFailure(terminalFailure);
-        PeerInfo peer = registry.get(workerId);
-        if (peer == null) {
-            return;
+        registry.releaseTaskCapacity(reservation, releaseReason);
+        PeerInfo peer = registry.get(reservation.workerId());
+        if (peer != null) {
+            peer.recordTaskFailure();
+            registry.updateMetricsSnapshot(reservation.workerId());
         }
-        peer.recordTaskFailure();
-        registry.releaseTaskCapacity(peer);
-        registry.updateMetricsSnapshot(workerId);
     }
 
     private JobStateStore.DurableTransitionOutcome persistTaskFailure(

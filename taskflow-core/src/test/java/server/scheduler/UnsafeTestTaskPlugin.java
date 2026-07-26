@@ -1,6 +1,7 @@
 package server.scheduler;
 
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskPlugin;
@@ -19,6 +20,11 @@ public final class UnsafeTestTaskPlugin implements TaskPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.UNSAFE_TO_RETRY;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(1);
     }
 
     @Override

@@ -1,6 +1,8 @@
 package server.scheduler;
 
 import server.model.MessageEnvelope;
+import server.registry.CapacityMetricsSnapshot;
+import server.registry.PeerRegistry;
 import server.runtime.TaskFlowClock;
 
 import java.util.Locale;
@@ -11,6 +13,7 @@ final class SchedulerMetricsService {
     private final BlockingQueue<MessageEnvelope> inboundMailbox;
     private final SchedulerState state;
     private final SchedulerMetrics metrics;
+    private final PeerRegistry registry;
     private final SchedulerConfig config;
     private final TaskFlowClock clock;
     private final SchedulerEventLog events;
@@ -19,12 +22,14 @@ final class SchedulerMetricsService {
     SchedulerMetricsService(BlockingQueue<MessageEnvelope> inboundMailbox,
                             SchedulerState state,
                             SchedulerMetrics metrics,
+                            PeerRegistry registry,
                             SchedulerConfig config,
                             TaskFlowClock clock,
                             SchedulerEventLog events) {
         this.inboundMailbox = inboundMailbox;
         this.state = state;
         this.metrics = metrics;
+        this.registry = registry;
         this.config = config;
         this.clock = clock;
         this.events = events;
@@ -40,6 +45,7 @@ final class SchedulerMetricsService {
         lastMetricsLogAtMillis = now;
         SchedulerMetrics.Snapshot snapshot = metrics.snapshot();
         SchedulerWorkloadIndex.Snapshot workload = state.workloadSnapshot();
+        CapacityMetricsSnapshot capacity = registry.capacityMetricsSnapshot();
         events.info("scheduler_metrics", events.fields(
                 "queue_depth", snapshot.queueDepth(),
                 "active_jobs", snapshot.activeJobs(),
@@ -65,6 +71,22 @@ final class SchedulerMetricsService {
                 snapshot.taskResultsDuplicateTotal(),
                 SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME,
                 snapshot.assignmentGenerationsTotal(),
+                "taskflow_capacity_snapshots_accepted_total",
+                capacity.acceptedSnapshots(),
+                "taskflow_capacity_snapshots_stale_total",
+                capacity.staleSnapshots(),
+                "taskflow_capacity_snapshots_incompatible_total",
+                capacity.incompatibleSnapshots(),
+                "taskflow_capacity_reservations_created_total",
+                capacity.reservationsCreated(),
+                "taskflow_capacity_reservations_released_total",
+                capacity.reservationsReleased(),
+                "taskflow_capacity_projection_failures_total",
+                capacity.projectionFailures(),
+                "taskflow_capacity_active_reservations",
+                capacity.activeReservations(),
+                "taskflow_capacity_reserved_units",
+                capacity.reservedCapacityUnits(),
                 "unknown_result_count", snapshot.unknownResultCount(),
                 "result_storage_failure_count", snapshot.resultStorageFailureCount()
         ));

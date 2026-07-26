@@ -2,6 +2,7 @@ package gui;
 
 import peer.engine.AssignmentCacheSnapshot;
 import peer.engine.AssignmentExecution;
+import protocol.PongMessage;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
 
@@ -20,6 +21,13 @@ interface GuiWorkerRuntime extends AutoCloseable {
 
     default AssignmentCacheSnapshot assignmentCacheSnapshot() {
         return AssignmentCacheSnapshot.empty();
+    }
+
+    default PongMessage capacityHeartbeat(String peerId, String timestamp) {
+        return new PongMessage(peerId, timestamp, supportedTaskTypes());
+    }
+
+    default void onCapacityChanged(Runnable listener) {
     }
 
     void shutdown();

@@ -16,17 +16,38 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class ConversionPeerPluginDiscoveryTest {
     @Test
     void discoversPeerProcessorPlugins() {
-        Map<String, RetrySafety> retrySafetyByTaskType = StreamSupport.stream(
+        Map<String, PeerProcessorPlugin> pluginsByTaskType = StreamSupport.stream(
                         ServiceLoader.load(PeerProcessorPlugin.class).spliterator(),
                         false
                 )
-                .collect(Collectors.toMap(PeerProcessorPlugin::taskType, PeerProcessorPlugin::retrySafety));
+                .collect(Collectors.toMap(
+                        PeerProcessorPlugin::taskType,
+                        plugin -> plugin
+                ));
 
         assertEquals(Set.of(
                 ConversionTaskTypes.IMAGE_CONVERSION,
                 ConversionTaskTypes.VIDEO_TRANSCODING
-        ), retrySafetyByTaskType.keySet());
-        assertEquals(RetrySafety.PURE, retrySafetyByTaskType.get(ConversionTaskTypes.IMAGE_CONVERSION));
-        assertEquals(RetrySafety.PURE, retrySafetyByTaskType.get(ConversionTaskTypes.VIDEO_TRANSCODING));
+        ), pluginsByTaskType.keySet());
+        assertEquals(
+                RetrySafety.PURE,
+                pluginsByTaskType.get(ConversionTaskTypes.IMAGE_CONVERSION).retrySafety()
+        );
+        assertEquals(
+                RetrySafety.PURE,
+                pluginsByTaskType.get(ConversionTaskTypes.VIDEO_TRANSCODING).retrySafety()
+        );
+        assertEquals(
+                2,
+                pluginsByTaskType.get(ConversionTaskTypes.IMAGE_CONVERSION)
+                        .resourceProfile()
+                        .capacityUnitCost()
+        );
+        assertEquals(
+                8,
+                pluginsByTaskType.get(ConversionTaskTypes.VIDEO_TRANSCODING)
+                        .resourceProfile()
+                        .capacityUnitCost()
+        );
     }
 }

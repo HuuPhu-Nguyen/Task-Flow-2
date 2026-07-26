@@ -207,7 +207,6 @@ class SchedulerWorkloadIndexTest {
         return new SchedulerConfig(
                 timeoutMillis,
                 leaseMillis,
-                defaults.maxTasksPerPeer(),
                 defaults.maxTaskRetries(),
                 defaults.inboundQueueCapacity(),
                 defaults.jobResultMaxDeliveryAttempts(),

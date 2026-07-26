@@ -1,8 +1,10 @@
 package peer.engine;
 
 import org.junit.jupiter.api.Test;
+import plugin.TaskResourceProfile;
 import protocol.TaskAssignMessage;
 import protocol.TaskResultMessage;
+import transport.TransientDeliveryException;
 
 import java.util.List;
 import java.util.Map;
@@ -24,7 +26,7 @@ class PeerExecutionEngineTest {
     void failedExecutionEchoesAssignmentIdentity() throws Exception {
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 throw new IllegalStateException("processor failed");
             });
 
@@ -52,10 +54,14 @@ class PeerExecutionEngineTest {
     void duplicateProcessorTaskTypeIsRejected() {
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         try {
-            engine.registerProcessor("test", task -> "first");
+            engine.registerProcessor("test", TaskResourceProfile.ofCapacityUnits(1), task -> "first");
 
             IllegalStateException error = assertThrows(IllegalStateException.class,
-                    () -> engine.registerProcessor(" TEST ", task -> "second"));
+                    () -> engine.registerProcessor(
+                            " TEST ",
+                            TaskResourceProfile.ofCapacityUnits(1),
+                            task -> "second"
+                    ));
 
             assertTrue(error.getMessage().contains("TEST"));
         } finally {
@@ -73,7 +79,7 @@ class PeerExecutionEngineTest {
                 new AssignmentCacheConfig(8, TimeUnit.MINUTES.toMillis(1))
         );
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 invocations.incrementAndGet();
                 processorEntered.countDown();
                 if (!releaseProcessor.await(2, TimeUnit.SECONDS)) {
@@ -108,7 +114,7 @@ class PeerExecutionEngineTest {
         AtomicInteger invocations = new AtomicInteger();
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 invocations.incrementAndGet();
                 return "done";
             });
@@ -136,7 +142,7 @@ class PeerExecutionEngineTest {
         List<TaskAssignMessage> executionContexts = new CopyOnWriteArrayList<>();
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 executionContexts.add(task);
                 return "done-" + task.getAttemptNumber();
             });
@@ -179,7 +185,11 @@ class PeerExecutionEngineTest {
                 new AssignmentCacheConfig(1, TimeUnit.MINUTES.toMillis(1))
         );
         try {
-            engine.registerProcessor("TEST", task -> invocations.incrementAndGet());
+            engine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> invocations.incrementAndGet()
+            );
             TaskAssignMessage firstTask = testTask("task-1", "550e8400-e29b-41d4-a716-446655440001");
             TaskAssignMessage secondTask = testTask("task-2", "550e8400-e29b-41d4-a716-446655440002");
 
@@ -211,7 +221,11 @@ class PeerExecutionEngineTest {
                 clock::get
         );
         try {
-            engine.registerProcessor("TEST", task -> invocations.incrementAndGet());
+            engine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> invocations.incrementAndGet()
+            );
 
             engine.executeAssignment(testTask()).resultFuture().get(2, TimeUnit.SECONDS);
             assertEquals(
@@ -231,7 +245,7 @@ class PeerExecutionEngineTest {
     }
 
     @Test
-    void completionFromEvictedGenerationDoesNotCompleteNewerCacheEntry() throws Exception {
+    void runningAssignmentEvictedFromCacheRetriesUntilCapacityReservationReleases() throws Exception {
         AtomicInteger firstTaskInvocations = new AtomicInteger();
         CountDownLatch firstStarted = new CountDownLatch(1);
         CountDownLatch secondStarted = new CountDownLatch(1);
@@ -242,7 +256,7 @@ class PeerExecutionEngineTest {
                 new AssignmentCacheConfig(1, TimeUnit.MINUTES.toMillis(1))
         );
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 if (!"task-1".equals(task.getTaskId())) {
                     return "other";
                 }
@@ -261,16 +275,21 @@ class PeerExecutionEngineTest {
             AssignmentExecution evictedGeneration = engine.executeAssignment(firstTask);
             assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
             engine.executeAssignment(evictingTask).resultFuture().get(2, TimeUnit.SECONDS);
-            AssignmentExecution currentGeneration = engine.executeAssignment(firstTask);
-            assertTrue(secondStarted.await(2, TimeUnit.SECONDS));
+            TransientDeliveryException stillRunning = assertThrows(
+                    TransientDeliveryException.class,
+                    () -> engine.executeAssignment(firstTask)
+            );
+            assertEquals(
+                    "assignment_execution_already_running",
+                    stillRunning.reasonCode()
+            );
+            assertEquals(1, firstTaskInvocations.get());
 
             releaseFirst.countDown();
             evictedGeneration.resultFuture().get(2, TimeUnit.SECONDS);
 
-            AssignmentCacheSnapshot whileCurrentGenerationRuns = engine.assignmentCacheSnapshot();
-            assertEquals(1, whileCurrentGenerationRuns.runningEntries());
-            assertEquals(0, whileCurrentGenerationRuns.completedEntries());
-            assertFalse(currentGeneration.resultFuture().isDone());
+            AssignmentExecution currentGeneration = engine.executeAssignment(firstTask);
+            assertTrue(secondStarted.await(2, TimeUnit.SECONDS));
 
             releaseSecond.countDown();
             currentGeneration.resultFuture().get(2, TimeUnit.SECONDS);
@@ -287,7 +306,11 @@ class PeerExecutionEngineTest {
         AtomicInteger invocations = new AtomicInteger();
         PeerExecutionEngine firstEngine = new PeerExecutionEngine("peer-1");
         try {
-            firstEngine.registerProcessor("TEST", task -> invocations.incrementAndGet());
+            firstEngine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> invocations.incrementAndGet()
+            );
             firstEngine.executeAssignment(testTask()).resultFuture().get(2, TimeUnit.SECONDS);
         } finally {
             firstEngine.shutdown();
@@ -295,7 +318,11 @@ class PeerExecutionEngineTest {
 
         PeerExecutionEngine restartedEngine = new PeerExecutionEngine("peer-1");
         try {
-            restartedEngine.registerProcessor("TEST", task -> invocations.incrementAndGet());
+            restartedEngine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> invocations.incrementAndGet()
+            );
 
             AssignmentExecution afterRestart = restartedEngine.executeAssignment(testTask());
             afterRestart.resultFuture().get(2, TimeUnit.SECONDS);
@@ -311,7 +338,11 @@ class PeerExecutionEngineTest {
     void assignmentIdReuseForDifferentTaskIdentityIsRejected() throws Exception {
         PeerExecutionEngine engine = new PeerExecutionEngine("peer-1");
         try {
-            engine.registerProcessor("TEST", task -> "done");
+            engine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> "done"
+            );
             engine.executeAssignment(testTask()).resultFuture().get(2, TimeUnit.SECONDS);
 
             AssignmentCacheConflictException error = assertThrows(
@@ -342,6 +373,47 @@ class PeerExecutionEngineTest {
         assertEquals(2_500L, configured.ttlMillis());
         assertThrows(IllegalArgumentException.class, () -> new AssignmentCacheConfig(0, 1L));
         assertThrows(IllegalArgumentException.class, () -> new AssignmentCacheConfig(1, 0L));
+    }
+
+    @Test
+    void capacityChangesNotifyAfterReservationAndExactRelease() throws Exception {
+        CountDownLatch processorEntered = new CountDownLatch(1);
+        CountDownLatch releaseProcessor = new CountDownLatch(1);
+        AtomicInteger notifications = new AtomicInteger();
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-capacity");
+        try {
+            engine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> {
+                        processorEntered.countDown();
+                        if (!releaseProcessor.await(2, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("processor release timed out");
+                        }
+                        return "done";
+                    }
+            );
+            int total = engine.capacitySnapshot().totalCapacityUnits();
+            engine.onCapacityChanged(notifications::incrementAndGet);
+
+            AssignmentExecution execution = engine.executeAssignment(testTask());
+            assertTrue(processorEntered.await(2, TimeUnit.SECONDS));
+
+            assertEquals(1, notifications.get());
+            assertEquals(
+                    Math.max(0, total - 1),
+                    engine.capacitySnapshot().availableCapacityUnits()
+            );
+
+            releaseProcessor.countDown();
+            execution.resultFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(2, notifications.get());
+            assertEquals(total, engine.capacitySnapshot().availableCapacityUnits());
+        } finally {
+            releaseProcessor.countDown();
+            engine.shutdown();
+        }
     }
 
     private static TaskAssignMessage testTask() {

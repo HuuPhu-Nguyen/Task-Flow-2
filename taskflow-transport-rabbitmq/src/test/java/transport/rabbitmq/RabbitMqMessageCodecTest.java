@@ -23,6 +23,7 @@ import transport.TransportRoute;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -154,6 +155,54 @@ class RabbitMqMessageCodecTest {
     }
 
     @Test
+    void roundTripsVersionThreeCapacityPongInsideVersionTwoEnvelope() {
+        PongMessage message = new PongMessage(
+                "peer-1",
+                "2026-07-26T00:00:00Z",
+                List.of("TEXT_ANALYSIS", "IMAGE_CONVERSION"),
+                "550e8400-e29b-41d4-a716-446655440099",
+                7L,
+                8,
+                5,
+                Map.of("TEXT_ANALYSIS", 4, "IMAGE_CONVERSION", 2)
+        );
+
+        byte[] encoded = codec.encode(new OutboundTransportMessage(
+                TransportRoute.HEARTBEAT,
+                "peer-1",
+                message
+        ));
+        JsonObject envelope = JsonParser.parseString(
+                new String(encoded, StandardCharsets.UTF_8)
+        ).getAsJsonObject();
+        InboundTransportMessage decoded = codec.decode(
+                encoded,
+                TransportRoute.HEARTBEAT,
+                new NoopAcknowledgement()
+        );
+        PongMessage decodedPong =
+                assertInstanceOf(PongMessage.class, decoded.message());
+
+        assertEquals(
+                ProtocolVersions.ENVELOPE_CURRENT,
+                envelope.get(ProtocolVersions.FIELD_NAME).getAsInt()
+        );
+        assertEquals(
+                ProtocolVersions.CAPACITY_ADVERTISEMENT,
+                envelope.getAsJsonObject("message")
+                        .get(ProtocolVersions.FIELD_NAME)
+                        .getAsInt()
+        );
+        assertEquals(7L, decodedPong.getCapacitySnapshotSequence());
+        assertEquals(8, decodedPong.getTotalCapacityUnits());
+        assertEquals(5, decodedPong.getAvailableCapacityUnits());
+        assertEquals(
+                Map.of("TEXT_ANALYSIS", 4, "IMAGE_CONVERSION", 2),
+                decodedPong.getMaxConcurrencyByTaskType()
+        );
+    }
+
+    @Test
     void encodesProtocolVersionOnEnvelopeAndMessage() {
         byte[] body = codec.encode(new OutboundTransportMessage(
                 TransportRoute.HEARTBEAT,
@@ -200,13 +249,52 @@ class RabbitMqMessageCodecTest {
     void rejectsUnsupportedFutureMessageProtocolVersionWithClearError() {
         JsonObject envelope = envelope(new PongMessage("peer-1", "2026-06-04T00:00:00Z"));
         envelope.getAsJsonObject("message")
-                .addProperty(ProtocolVersions.FIELD_NAME, ProtocolVersions.CURRENT + 1);
+                .addProperty(
+                        ProtocolVersions.FIELD_NAME,
+                        ProtocolVersions.MAX_MESSAGE_SUPPORTED + 1
+                );
 
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> codec.decode(body(envelope), TransportRoute.HEARTBEAT, new NoopAcknowledgement()));
 
-        assertEquals("RabbitMQ message uses unsupported TaskFlow protocolVersion 3; "
-                + "supported versions are 0 through 2.", error.getMessage());
+        assertEquals("RabbitMQ message uses unsupported TaskFlow protocolVersion 4; "
+                + "supported message versions are 0 through 3.", error.getMessage());
+    }
+
+    @Test
+    void rejectsVersionThreeForNonPongMessages() {
+        JobResultRequestMessage request = new JobResultRequestMessage(
+                "requester-1",
+                "2026-07-26T00:00:00Z",
+                "job-1",
+                "token-1"
+        );
+        JsonObject envelope = JsonParser.parseString(new String(
+                codec.encode(new OutboundTransportMessage(
+                        TransportRoute.JOB_SUBMIT,
+                        "requester-1",
+                        request
+                )),
+                StandardCharsets.UTF_8
+        )).getAsJsonObject();
+        envelope.getAsJsonObject("message").addProperty(
+                ProtocolVersions.FIELD_NAME,
+                ProtocolVersions.CAPACITY_ADVERTISEMENT
+        );
+
+        MessageValidationException error = assertThrows(
+                MessageValidationException.class,
+                () -> codec.decode(
+                        body(envelope),
+                        TransportRoute.JOB_SUBMIT,
+                        new NoopAcknowledgement()
+                )
+        );
+
+        assertEquals(
+                MessageValidator.REASON_UNSUPPORTED_PROTOCOL_VERSION,
+                error.reasonCode()
+        );
     }
 
     @Test

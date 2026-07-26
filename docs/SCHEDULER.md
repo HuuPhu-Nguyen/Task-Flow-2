@@ -28,7 +28,7 @@ and the conditional store transition still decide whether an event may act.
 | Capacity-wait jobs | Separate insertion-ordered job IDs tagged with the capacity-signal generation observed when blocked | At most one entry per active job with pending work and no compatible available capacity |
 | Deadlines | Priority-ordered timeout and lease sets keyed by exact assignment identity | At most two entries per live indexed assignment |
 | Worker assignments | Worker ID to exact assignment keys | At most one entry per live indexed assignment |
-| Worker capacity | Task type to capable and currently available live worker IDs | One capable membership and at most one available membership per advertised worker/task-type pair |
+| Worker capacity | Task type to capable live worker IDs plus an exact assignment-ID reservation ledger with per-worker unit/type counters | One capability membership per advertised worker/task-type pair and one reservation per current durable assignment |
 | Inbound mailbox | Bounded blocking queue | `inboundQueueCapacity`, default `1000` |
 | Terminal retry deadlines | Priority-ordered due times keyed by job ID | At most one entry per pending terminal delivery |
 
@@ -50,8 +50,8 @@ overrides are `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`,
 dispatch additionally uses `schedulerMaxAssignmentsPerJobPerRound`, default
 `1`, with environment override
 `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND`. The quota must not
-exceed `schedulerDispatchBatchSize`. The pre-TF-0402 14-argument and TF-0402
-18-argument `SchedulerConfig` constructors remain compatibility overloads and
+exceed `schedulerDispatchBatchSize`. The pre-TF-0402 13-argument and TF-0402
+17-argument `SchedulerConfig` constructors remain compatibility overloads and
 supply the default quota.
 
 The work units deliberately count unsuccessful discovery:
@@ -149,7 +149,7 @@ recheck; it does not spin on a past-due entry.
 ## Steady-state complexity
 
 Let `J` be runnable jobs, `A` live assignments, `D` deadlines handled in a
-stage, `Wtype` available workers advertising a task type, and `Aw` assignments
+stage, `Wtype` capable workers advertising a task type, and `Aw` assignments
 owned by one unavailable worker.
 
 | Operation | Scheduler discovery work |
@@ -168,8 +168,9 @@ TF-0402 bounds all four cycle stages and prevents one busy stage from
 permanently excluding the next. TF-0403 adds the persistent cross-job round,
 the configurable per-job assignment quota, and generation-gated
 capacity-wait eviction/reactivation. Retry tasks retain priority within a job
-while remaining FIFO relative to other retries. TF-0404 still owns weighted
-capacity units and task-type concurrency.
+while remaining FIFO relative to other retries. TF-0404 adds immutable plugin
+costs, versioned executor snapshots, unit/type hard eligibility, and exact
+assignment-generation reservation/release.
 
 ## Observability and evidence
 
@@ -185,6 +186,14 @@ Periodic `scheduler_metrics` events include:
 - `deadline_entries_validated_total`
 - `deadline_stale_rejected_total`
 - `deadline_reschedules_total`
+- `taskflow_capacity_snapshots_accepted_total`
+- `taskflow_capacity_snapshots_stale_total`
+- `taskflow_capacity_snapshots_incompatible_total`
+- `taskflow_capacity_reservations_created_total`
+- `taskflow_capacity_reservations_released_total`
+- `taskflow_capacity_projection_failures_total`
+- `taskflow_capacity_active_reservations`
+- `taskflow_capacity_reserved_units`
 
 [`SchedulerWorkloadIndexTest#profileOneTickWithOneHundredThousandNonDueAssignmentsUsesOnlyDeadlineHeads`](../taskflow-core/src/test/java/server/scheduler/SchedulerWorkloadIndexTest.java)
 loads 100,000 non-due assigned tasks, which produce 200,000 live deadline
@@ -229,9 +238,16 @@ Additional boundary evidence:
   returned for timeout handling.
 - [`SchedulerWorkloadIndexTest#repeatedDispatchClosureKeepsDeadlineIndexAtTwoEntriesPerLiveAssignment`](../taskflow-core/src/test/java/server/scheduler/SchedulerWorkloadIndexTest.java)
   exercises 10,000 assignment/closure cycles without stale timer growth.
-- [`InMemoryPeerRegistryTest#availableCapacityIndexIsKeyedByTaskTypeAndTracksTheConfiguredBoundary`](../taskflow-core/src/test/java/server/registry/InMemoryPeerRegistryTest.java)
-  proves task-type isolation and exact removal/re-entry at the configured
-  capacity boundary.
+- [`InMemoryPeerRegistryTest#weightedUnitsAndTypeConcurrencyAreBothHardEligibilityFilters`](../taskflow-core/src/test/java/server/registry/InMemoryPeerRegistryTest.java)
+  proves weighted-unit and task-type concurrency hard filtering.
+- [`InMemoryPeerRegistryTest#reservationIdentityMismatchDisablesFurtherDispatch`](../taskflow-core/src/test/java/server/registry/InMemoryPeerRegistryTest.java)
+  proves an unexpected exact-ledger mismatch fails closed.
+- [`TaskSchedulerPersistenceTest#duplicateResultIsAcknowledgedWithoutRequeueOrSecondSuccess`](../taskflow-core/src/test/java/server/scheduler/TaskSchedulerPersistenceTest.java)
+  proves an authoritative result releases one exact reservation and its
+  duplicate releases nothing.
+- [`ExecutorCapacityTrackerTest`](../taskflow-core/src/test/java/peer/engine/ExecutorCapacityTrackerTest.java)
+  proves local weighted reservation, lower-cost packing, overcommit clamping,
+  monotonic snapshots, and idempotent local release.
 - [`SchedulerArchitectureTest#normalSchedulerMaintenanceUsesIndexesInsteadOfFullTaskOrPeerScans`](../taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java)
   prevents the normal timeout, lease, dispatch, and participant-loss paths from
   regressing to active-job/task/peer scans.

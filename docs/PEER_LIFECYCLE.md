@@ -14,8 +14,8 @@ A participant can enable either or both roles:
 
 - **Requester:** build and submit jobs through a `ClientJobPlugin`, receive
   terminal `JOB_RESULT`, and handle successful results through that plugin.
-- **Executor:** advertise capabilities and execute coordinator-assigned work
-  through `PeerProcessorPlugin` implementations.
+- **Executor:** advertise capabilities and capacity, then execute
+  coordinator-assigned work through `PeerProcessorPlugin` implementations.
 
 The JavaFX GUI is the interactive participant runtime. `taskflow-peer` is the
 headless command-line runtime. Both use RabbitMQ and the same plugin ownership
@@ -32,8 +32,9 @@ plugin classpaths.
 4. The broker envelope sender and inner `nodeId` identify the reply route; the
    requester token hash plus optional public key define durable ownership.
 5. An explicit retry must reuse the job ID, token/key, and canonical request.
-6. Executor-enabled participants advertise supported task types in heartbeat
-   metadata and receive participant-specific `TASK_ASSIGN` messages.
+6. Executor-enabled participants advertise supported task types, scalar free
+   capacity, and per-type concurrency limits in v3 heartbeat metadata, then
+   receive participant-specific `TASK_ASSIGN` messages.
 7. The executor processor declares retry safety. `taskId` is stable across
    logical retries; `assignmentId` identifies one redeliverable generation.
 8. The participant publishes `TASK_RESULT` and acknowledges the assignment only
@@ -80,6 +81,13 @@ delivery remain available.
   submitter;
 - executor-only mode advertises its processor capabilities and consumes
   assignments without requester plugins.
+
+Both executor runtimes send an initial v3 capacity snapshot, periodic refreshes,
+and coalesced updates after local queued/running reservations change. Total
+capacity defaults to the available processor count and can be set with
+`TASKFLOW_EXECUTOR_TOTAL_CAPACITY_UNITS`; optional per-type limits use
+`TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS`. Invalid values fail startup.
+Legacy v0-v2 `PONG` messages still refresh liveness but are scheduling-ineligible.
 
 ## Shared-Service Candidates
 

@@ -38,6 +38,7 @@ class ExampleWordCountServerPluginTest {
                 .findFirst()
                 .orElseThrow();
         assertEquals(RetrySafety.PURE, plugin.retrySafety());
+        assertEquals(1, plugin.resourceProfile().capacityUnitCost());
     }
 
     @Test

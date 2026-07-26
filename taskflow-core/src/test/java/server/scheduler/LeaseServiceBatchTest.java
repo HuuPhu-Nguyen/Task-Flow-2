@@ -28,7 +28,6 @@ class LeaseServiceBatchTest {
         SchedulerConfig config = new SchedulerConfig(
                 1L,
                 1_000L,
-                defaults.maxTasksPerPeer(),
                 defaults.maxTaskRetries(),
                 defaults.inboundQueueCapacity(),
                 defaults.jobResultMaxDeliveryAttempts(),
@@ -58,7 +57,9 @@ class LeaseServiceBatchTest {
             );
             task.markAssigned(identity, 1L, "coordinator-1");
             state.addActiveJob(job, "", "");
-            registry.reserveTaskCapacity(peer);
+            registry.reserveTaskCapacity(
+                    CapacityReservations.forAssignment(job, task, identity)
+            );
         }
         SchedulerEventLog events = new SchedulerEventLog();
         SchedulerPersistence persistence = new SchedulerPersistence(null, events);

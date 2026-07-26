@@ -5,14 +5,19 @@ downgrade negotiation today.
 
 ## Version Field
 
-New coordinator and participant messages serialize `protocolVersion: 2`.
+RabbitMQ envelopes and new inner messages other than capacity advertisements
+serialize `protocolVersion: 2`. New `PONG` capacity advertisements serialize
+inner `protocolVersion: 3`.
 
-- Version `2` is the current protocol.
+- Version `2` remains the current general-message and broker-envelope protocol.
+- Version `3` is reserved for the inner `PONG` capacity advertisement.
 - Missing `protocolVersion` is normalized to legacy version `0`.
-- The framework recognizes versions `0` through `2`, but acceptance is decided
-  by message type because task-assignment semantics changed in version `2`.
-- Versions below `0`, above `2`, and non-integer values are rejected before
-  runtime dispatch.
+- The framework recognizes inner-message versions `0` through `3`, but
+  acceptance is decided by message type because task-assignment semantics
+  changed in version `2` and capacity advertisement semantics changed in
+  version `3`.
+- Versions below `0`, above `3`, and non-integer values are rejected before
+  runtime dispatch. Version `3` on any non-`PONG` message is also rejected.
 
 An accepted legacy version is not rewritten semantically. Normalization only
 makes the parsed version explicit so the shared validator can apply the matrix
@@ -20,15 +25,16 @@ below.
 
 ## Message-Type Compatibility Matrix
 
-| Message type | New sender emits | Receiver accepts v2 | Receiver accepts v1 | Receiver accepts missing/v0 | Incompatible disposition |
-|---|---:|---|---|---|---|
-| `PING`, `PONG` | v2 | Yes | Yes | Yes | Reject unsupported future/negative versions. |
-| `JOB_SUBMIT` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before scheduler/plugin dispatch. |
-| `JOB_RESULT_REQUEST` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before authorization. |
-| `JOB_RESULT` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before requester/result-handler dispatch. |
-| `PEER_DISCONNECTED` | v2 | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
-| `TASK_ASSIGN` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it. |
-| `TASK_RESULT` | v2 with assignment identity | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
+| Message type | New sender emits | Receiver accepts v3 | Receiver accepts v2 | Receiver accepts v1 | Receiver accepts missing/v0 | Incompatible disposition |
+|---|---:|---|---|---|---|---|
+| `PING` | v2 | No | Yes | Yes | Yes | Reject unsupported or invalid versions. |
+| `PONG` | v3 | Yes, with all required capacity fields | Yes, liveness only | Yes, liveness only | Yes, liveness only | Legacy heartbeats clear scheduling capacity; reject unsupported or invalid versions. |
+| `JOB_SUBMIT` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before scheduler/plugin dispatch. |
+| `JOB_RESULT_REQUEST` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before authorization. |
+| `JOB_RESULT` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before requester/result-handler dispatch. |
+| `PEER_DISCONNECTED` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
+| `TASK_ASSIGN` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it. |
+| `TASK_RESULT` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
 
 The unchanged message types keep legacy compatibility because their semantics
 did not change. `TASK_ASSIGN` and `TASK_RESULT` require a coordinated version-2
@@ -36,6 +42,28 @@ cutover: drain in-flight version-1 work and pending version-1 assignment outbox
 rows before upgrading. A version-1 coordinator rejects version-2 messages as
 future, while a version-2 coordinator rejects identity-less version-0/1 task
 results.
+
+## Version 3 Capacity Advertisement
+
+A v3 `PONG` includes:
+
+- a canonical UUID `executorInstanceId`;
+- a positive, monotonically increasing `capacitySnapshotSequence`;
+- positive executor `totalCapacityUnits` and non-negative
+  `availableCapacityUnits`, with available not greater than total;
+- `maxConcurrencyByTaskType`, with one positive limit for every advertised
+  task type and no extra task types.
+
+A requester-only participant advertises no task types and uses zero total/free
+units plus an empty concurrency map, while retaining a valid instance UUID and
+positive sequence.
+
+For one live executor instance, only a higher sequence replaces the scheduling
+snapshot. A stale sequence refreshes liveness without changing capacity. A
+snapshot from another executor instance using the same live participant ID is
+acknowledged as an instance conflict and changes neither liveness nor capacity.
+Versions 0 through 2 remain useful for liveness and capability inspection, but
+clear scheduling capacity with reason `CAPACITY_PROTOCOL_UNSUPPORTED`.
 
 ## Job-Submission Idempotency Compatibility
 
@@ -132,9 +160,11 @@ RabbitMQ carries `protocolVersion` in two places:
 - the inner protocol message object.
 
 Envelope versions `0`, `1`, and `2` remain readable because envelope semantics
-did not change. Inner-message compatibility follows the matrix. A legacy
-envelope can therefore contain a valid v2 task result, but a v2 envelope cannot
-make a legacy inner task result commit-eligible.
+did not change; envelope version `3` is invalid. Inner-message compatibility
+follows the matrix. A v2 envelope can therefore contain a valid v3 capacity
+`PONG`, while its inner version remains authoritative. A legacy envelope can
+contain a valid v2 task result, but a v2 envelope cannot make a legacy inner
+task result commit-eligible.
 
 `RabbitMqMessageCodec` checks both numeric ranges and validates the inner
 message before returning an inbound transport message. Invalid deliveries are
@@ -144,7 +174,7 @@ DLQ for inspection, discard, or redrive after compatible code is deployed.
 ## Field and Size Validation
 
 `protocol.MessageValidator` remains the shared framework boundary. In addition
-to version-2 assignment identity, it enforces:
+to version-2 assignment identity and version-3 capacity fields, it enforces:
 
 - known message types;
 - required `nodeId` and `time` fields;
@@ -180,6 +210,9 @@ Plugins should use SPI message classes rather than raw JSON. Server job plugins
 continue to produce task-assignment payload templates; the coordinator adds its
 framework-owned assignment identity before publication. Participant processors
 should return through the shared execution engine so results echo that identity.
+Paired server and executor plugins must also declare the same immutable
+`TaskResourceProfile`; the scalar capacity-unit cost affects placement, while
+the optional memory and temporary-disk estimates are diagnostic only.
 
 Retry safety is an SPI declaration, not a new wire field. The existing version-2
 `TaskAssignMessage` is the processor execution context: `taskId` stays stable

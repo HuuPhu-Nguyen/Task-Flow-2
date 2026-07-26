@@ -4,6 +4,7 @@ import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
 import peer.processors.TextAnalysisProcessor;
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 import text.model.TextAnalysisTaskTypes;
 
 public class TextAnalysisProcessorPlugin implements PeerProcessorPlugin {
@@ -15,6 +16,11 @@ public class TextAnalysisProcessorPlugin implements PeerProcessorPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(1);
     }
 
     @Override

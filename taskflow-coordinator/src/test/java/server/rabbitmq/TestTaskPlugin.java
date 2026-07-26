@@ -1,6 +1,7 @@
 package server.rabbitmq;
 
 import plugin.RetrySafety;
+import plugin.TaskResourceProfile;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
@@ -22,6 +23,11 @@ public class TestTaskPlugin implements TaskPlugin {
     @Override
     public RetrySafety retrySafety() {
         return RetrySafety.PURE;
+    }
+
+    @Override
+    public TaskResourceProfile resourceProfile() {
+        return TaskResourceProfile.ofCapacityUnits(1);
     }
 
     @Override

@@ -5,7 +5,7 @@ Status: Accepted
 Date: 2026-07-22
 
 Scope: Frozen end-state for Phases 0–8; deterministic bounded scheduling work
-is planned in Phase 4.
+is implemented in Phase 4.
 
 ## Context
 
@@ -76,8 +76,10 @@ decision.
 - TF-0401/TF-0402 implement event-driven indexes and fair bounded cycle stages.
 - TF-0403 implements persistent round-robin job passes, the configurable
   per-job assignment quota, and capacity-wait eviction/reactivation.
-- TF-0404 through TF-0406 still own weighted capacity, admission, and
-  persistent-overload behavior.
+- TF-0404 implements immutable plugin costs, versioned executor
+  advertisements, hard unit/type eligibility, and exact assignment-generation
+  reservations.
+- TF-0405 and TF-0406 still own admission and persistent-overload behavior.
 
 ## Related Documents
 

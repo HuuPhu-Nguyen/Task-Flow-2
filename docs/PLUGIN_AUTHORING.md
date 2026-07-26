@@ -106,6 +106,9 @@ Implement `server.job.TaskPlugin`:
 - `taskType()` returns the shared task type constant.
 - `retrySafety()` mirrors the value declared by the paired executor plugin so
   the coordinator can validate retry policy before accepting a job.
+- `resourceProfile()` declares the fixed scalar capacity-unit cost and optional
+  diagnostic memory/disk estimates. It must exactly match the paired executor
+  declaration.
 - `validateSubmission(JobSubmitMessage)` rejects bad parameters, missing
   payloads, malformed payload objects, unsupported file extensions or formats,
   and invalid encoded data before tasks are created.
@@ -206,6 +209,8 @@ Implement `peer.engine.PeerProcessorPlugin`:
 
 - `taskType()` returns the shared task type constant.
 - `retrySafety()` declares the processor's retry behavior.
+- `resourceProfile()` exactly mirrors the paired server plugin's immutable
+  scheduling profile.
 - `createProcessor()` returns a `TaskProcessor<?>` for that type.
 
 Register the provider in:
@@ -285,12 +290,13 @@ packages still omit executor-only dependencies.
 ## Protocol Compatibility
 
 Plugins should use TaskFlow SPI message classes instead of building raw protocol
-JSON. New messages emit `protocolVersion: 2`. The coordinator adds its
-framework-owned assignment attempt, UUID, and lease deadline to server-plugin
-task templates before publication, and the shared participant execution engine
-echoes the attempt and UUID in `TASK_RESULT`. Version 0/1 task assignments and
-results are rejected; semantically unchanged message types retain the legacy
-compatibility documented in `docs/PROTOCOL_COMPATIBILITY.md`.
+JSON. New general messages emit `protocolVersion: 2`; framework-owned capacity
+`PONG` messages emit inner version 3. The coordinator adds its framework-owned
+assignment attempt, UUID, and lease deadline to server-plugin task templates
+before publication, and the shared participant execution engine echoes the
+attempt and UUID in `TASK_RESULT`. Version 0/1 task assignments and results are
+rejected; semantically unchanged message types retain the legacy compatibility
+documented in `docs/PROTOCOL_COMPATIBILITY.md`.
 
 Keep plugin-owned payload and result object changes compatible within the
 plugin contract. If a new task type needs a framework-level message field
@@ -308,6 +314,7 @@ Server module tests should cover:
 - `ServiceLoader.load(TaskPlugin.class)` discovers the expected task type.
 - The discovered server declaration is non-null and has the expected
   `RetrySafety` value.
+- The server resource profile has the intended fixed cost.
 - Valid submissions are accepted.
 - Invalid parameters are rejected.
 - Empty or malformed payload lists are rejected.
@@ -338,6 +345,7 @@ Peer module tests should cover:
   type.
 - The discovered executor declaration is non-null and has the expected
   `RetrySafety` value.
+- The executor resource profile exactly matches the server declaration.
 - The processor returns the expected typed result for a representative
   `TaskAssignMessage`.
 - Processor failure behavior is tested directly when invalid task payloads or
@@ -359,21 +367,22 @@ Use this checklist for each new task type:
 
 1. Add a task type constant and shared payload/result records in
    `plugins/<domain>/model`.
-2. Add a server `TaskPlugin`, retry-safety declaration, job, task unit,
-   validation helper, and
+2. Add a server `TaskPlugin`, retry-safety and resource-profile declarations,
+   job, task unit, validation helper, and
    `META-INF/services/server.job.TaskPlugin` entry.
 3. Add a client `ClientJobPlugin`, payload/final-result handling, payload-limit
    checks, safe output naming, and `META-INF/services/client.ClientJobPlugin`
    entry.
-4. Add a peer `PeerProcessorPlugin`, matching retry-safety declaration,
-   processor implementation, and
+4. Add a peer `PeerProcessorPlugin`, matching retry-safety and resource-profile
+   declarations, processor implementation, and
    `META-INF/services/peer.engine.PeerProcessorPlugin` entry.
 5. Wire the domain modules into Maven reactor and dependency management.
 6. Add server artifacts to `taskflow-coordinator` runtime dependencies.
 7. Add client and peer artifacts to `taskflow-peer` and `taskflow-gui` profiles
    according to `combined-runtime`, `submitter-runtime`, and `executor-runtime`.
 8. Add focused server, client, peer, and harness tests for discovery,
-   matching retry-safety declarations, validation, payload creation,
+   matching retry-safety and resource-profile declarations, validation,
+   payload creation,
    final-result handling, processing, aggregation, and no-core-change wiring.
 9. Run the focused tests for the new plugin modules and harness.
 10. Run `git diff --check`; run broader Maven and dependency-tree gates if the

@@ -10,7 +10,10 @@ public final class ProtocolVersions {
     public static final int LEGACY = 0;
     public static final int VERSION_1 = 1;
     public static final int ASSIGNMENT_IDENTITY = 2;
+    public static final int CAPACITY_ADVERTISEMENT = 3;
+    public static final int ENVELOPE_CURRENT = ASSIGNMENT_IDENTITY;
     public static final int CURRENT = ASSIGNMENT_IDENTITY;
+    public static final int MAX_MESSAGE_SUPPORTED = CAPACITY_ADVERTISEMENT;
     public static final int MIN_SUPPORTED = LEGACY;
 
     private ProtocolVersions() {
@@ -53,11 +56,27 @@ public final class ProtocolVersions {
         return version;
     }
 
+    public static int normalizeSupportedMessageVersion(JsonObject object, String context) {
+        int version = read(object, context);
+        requireMessageSupported(version, context);
+        object.addProperty(FIELD_NAME, version);
+        return version;
+    }
+
     public static void requireSupported(int version, String context) {
         if (version < MIN_SUPPORTED || version > CURRENT) {
             throw new IllegalArgumentException(label(context)
                     + " uses unsupported TaskFlow protocolVersion " + version
                     + "; supported versions are " + supportedRange() + ".");
+        }
+    }
+
+    public static void requireMessageSupported(int version, String context) {
+        if (version < MIN_SUPPORTED || version > MAX_MESSAGE_SUPPORTED) {
+            throw new IllegalArgumentException(label(context)
+                    + " uses unsupported TaskFlow protocolVersion " + version
+                    + "; supported message versions are " + MIN_SUPPORTED
+                    + " through " + MAX_MESSAGE_SUPPORTED + ".");
         }
     }
 

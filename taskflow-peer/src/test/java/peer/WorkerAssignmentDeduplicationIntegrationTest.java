@@ -2,6 +2,7 @@ package peer;
 
 import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
+import plugin.TaskResourceProfile;
 import peer.engine.AssignmentCacheConfig;
 import peer.engine.PeerExecutionEngine;
 import protocol.PongMessage;
@@ -70,7 +71,11 @@ class WorkerAssignmentDeduplicationIntegrationTest {
         );
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         try {
-            engine.registerProcessor("TEST", task -> "done");
+            engine.registerProcessor(
+                    "TEST",
+                    TaskResourceProfile.ofCapacityUnits(1),
+                    task -> "done"
+            );
             TaskAssignMessage original = taskAssignment("task-1");
             RecordingAcknowledgement originalAck = new RecordingAcknowledgement();
             RabbitMqPeerNode.handleTaskAssignment(
@@ -109,7 +114,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
         );
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 invocations.incrementAndGet();
                 processorEntered.countDown();
                 if (!releaseProcessor.await(2, TimeUnit.SECONDS)) {
@@ -168,7 +173,7 @@ class WorkerAssignmentDeduplicationIntegrationTest {
         );
         RecordingBrokerTransport transport = new RecordingBrokerTransport();
         try {
-            engine.registerProcessor("TEST", task -> {
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
                 invocations.incrementAndGet();
                 return "done";
             });

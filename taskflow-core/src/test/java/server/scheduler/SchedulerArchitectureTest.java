@@ -182,7 +182,7 @@ class SchedulerArchitectureTest {
         assertTrue(assignment.contains("pollCapacityWaitingJob("));
         assertTrue(assignment.contains("schedulerMaxAssignmentsPerJobPerRound()"));
         assertTrue(assignment.contains("pollPendingTask("));
-        assertTrue(assignment.contains("getAvailablePeers(taskType"));
+        assertTrue(assignment.contains("getAvailablePeers(job.getTaskType()"));
 
         String leases = read(schedulerRoot, "LeaseService.java");
         String deadlineStage = between(
