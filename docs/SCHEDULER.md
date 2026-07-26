@@ -25,6 +25,7 @@ and the conditional store transition still decide whether an event may act.
 |---|---|---|
 | Pending tasks | Per-job insertion-ordered retry and ordinary FIFO/deque lanes of task IDs | At most one entry per active `PENDING` task |
 | Runnable jobs | One insertion-ordered set used as a round-robin deque of job IDs | At most one entry per active job with indexed pending work |
+| Capacity-wait jobs | Separate insertion-ordered job IDs tagged with the capacity-signal generation observed when blocked | At most one entry per active job with pending work and no compatible available capacity |
 | Deadlines | Priority-ordered timeout and lease sets keyed by exact assignment identity | At most two entries per live indexed assignment |
 | Worker assignments | Worker ID to exact assignment keys | At most one entry per live indexed assignment |
 | Worker capacity | Task type to capable and currently available live worker IDs | One capable membership and at most one available membership per advertised worker/task-type pair |
@@ -45,9 +46,13 @@ All four defaults are `100`. The YAML keys use the names above. Environment
 overrides are `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`,
 `TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE`,
 `TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE`, and
-`TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`. Values must be positive. The legacy
-14-argument `SchedulerConfig` constructor remains a compatibility overload and
-supplies these defaults.
+`TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`. Values must be positive. Cross-job
+dispatch additionally uses `schedulerMaxAssignmentsPerJobPerRound`, default
+`1`, with environment override
+`TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND`. The quota must not
+exceed `schedulerDispatchBatchSize`. The pre-TF-0402 14-argument and TF-0402
+18-argument `SchedulerConfig` constructors remain compatibility overloads and
+supply the default quota.
 
 The work units deliberately count unsuccessful discovery:
 
@@ -71,12 +76,39 @@ stage owns only due in-memory terminal delivery/persistence attempts; RabbitMQ
 terminal intent that has committed to SQLite is replayed by the independent
 replayer.
 
+### Explicit cross-job rounds
+
+A scheduler round is one persistent pass over the runnable jobs present when
+that round begins. The round cursor survives the end of a TF-0402 dispatch
+batch, so a small per-cycle budget cannot restart the pass at the front. Each
+job receives one turn and at most
+`schedulerMaxAssignmentsPerJobPerRound` successful assignments in that turn.
+A failed placement ends the turn. Retry tasks are selected before ordinary
+tasks only inside the selected job; retry status never moves the whole job
+ahead of other jobs. A job that becomes runnable after a round starts joins the
+next round.
+
+At the compatibility default of one assignment, one 10,000-task job followed
+by ten one-task jobs consumes exactly 11 successful dispatch units in the first
+complete round when at least 11 compatible slots are available: one assignment
+for the large job, then one for every small job. Therefore every small job in
+that scenario is assigned by the end of round one.
+[`AssignmentServiceBatchTest#oneLargeJobAndTenSmallJobsAllDispatchInTheirFirstCompleteRound`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
+constructs that workload deterministically.
+
 When any stage reports immediately runnable work after exhausting its budget,
 the next cycle starts without blocking. Otherwise the loop waits on the mailbox
 until the earliest assignment deadline, terminal retry, no-capacity recheck, or
-metrics deadline. A full no-capacity round schedules one 500 ms recheck so
-capacity registered outside the mailbox is eventually observed without a
-zero-delay dispatch loop. Shutdown interrupts this idle wait, then drains only
+metrics deadline. A no-capacity probe moves the job out of the runnable
+rotation and into the capacity-wait set without removing its pending-task
+index. Pending-task reindexing cannot make that job runnable again. A later
+capacity-availability generation or the deterministic 500 ms fallback makes
+only the previously waiting generation eligible for a later round. Jobs that
+block after that signal must await a newer signal or deadline. Executor
+heartbeats that add or change capabilities wake the scheduler even though
+heartbeat registration occurs outside the scheduler mailbox. This avoids both
+continuous incompatible-job polling and delayed observation of newly
+compatible capacity. Shutdown interrupts its own idle wait, then drains only
 envelopes already admitted through the bounded ingress gate.
 
 Insertion-ordered sets provide FIFO/deque ordering plus keyed constant-time removal,
@@ -127,17 +159,17 @@ owned by one unavailable worker.
 | Handle `D` due deadlines | `O(D log A)` plus `D` exact task-map lookups |
 | Find the next runnable job or pending task | `O(1)` |
 | Close/retry one assignment | `O(log A)` deadline removal plus `O(1)` pending insertion |
-| Dispatch with no compatible capacity | No task scan; one task-type capacity lookup |
+| Dispatch with no compatible capacity | One task-type capacity lookup, then `O(1)` removal from runnable rotation and insertion into capacity wait |
 | Choose compatible workers | `O(Wtype log Wtype)` for the score-ordered snapshot; unrelated workers are not visited |
 | Handle one worker loss | `O(Aw log A)`; other jobs and assignments are not visited |
 | Hydrate one job at admission/recovery | `O(Tjob log Tjob)` deterministic pending ordering plus deadline insertion, then indexed steady state |
 
 TF-0402 bounds all four cycle stages and prevents one busy stage from
-permanently excluding the next. TF-0403 still owns the final configurable
-per-job assignment quota and the policy for removing capacity-blocked jobs from
-the runnable rotation; the current persistent sweep plus timed recheck is only
-the non-spinning bounded fallback. Retry tasks retain priority within a job
-while remaining FIFO relative to other retries.
+permanently excluding the next. TF-0403 adds the persistent cross-job round,
+the configurable per-job assignment quota, and generation-gated
+capacity-wait eviction/reactivation. Retry tasks retain priority within a job
+while remaining FIFO relative to other retries. TF-0404 still owns weighted
+capacity units and task-type concurrency.
 
 ## Observability and evidence
 
@@ -145,6 +177,7 @@ Periodic `scheduler_metrics` events include:
 
 - `pending_tasks_indexed`
 - `runnable_jobs_indexed`
+- `capacity_waiting_jobs_indexed`
 - `live_assignments_indexed`
 - `deadline_entries_indexed`
 - `deadline_head_checks_total`
@@ -187,8 +220,7 @@ RAM, 64-bit Windows 11 Pro 10.0.26200, and Oracle HotSpot Java 25.0.2. The
 operation-count assertion is the portable result; absolute time will vary by
 machine and JVM. The changed design moves work into `O(log A)` assignment
 deadline insertion/removal and still sorts the compatible-worker snapshot.
-Absolute active-work bounds and the final per-job dispatch quota remain
-assigned to TF-0405 and TF-0403 respectively.
+Absolute active-work bounds remain assigned to TF-0405.
 
 Additional boundary evidence:
 
@@ -212,9 +244,19 @@ Additional boundary evidence:
   proves stale timer entries consume the shared deadline budget.
 - [`LeaseServiceBatchTest#combinedTimeoutAndLeaseWorkStopsAtDeadlineBudget`](../taskflow-core/src/test/java/server/scheduler/LeaseServiceBatchTest.java)
   proves timeout and lease entries share one enforced service-level budget.
+- [`AssignmentServiceBatchTest#configuredQuotaPersistsOneRoundAcrossDispatchBatchBoundaries`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
+  proves a round cursor survives a dispatch-batch boundary and enforces the
+  configured quota.
+- [`AssignmentServiceBatchTest#retryPriorityRemainsInsideOneJobsQuota`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
+  proves retry priority stays local to the selected job.
 - [`AssignmentServiceBatchTest#noCapacitySweepPersistsAcrossBatchesAndDoesNotSpin`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
-  proves a capacity-blocked rotation completes across batches and then waits
-  for a signal or timed recheck.
+  proves capacity-blocked jobs leave the runnable rotation and re-enter after
+  compatible capacity is registered.
+- [`AssignmentServiceBatchTest#timedRecheckRestoresWaitingJobsWithoutWallClockSleep`](../taskflow-core/src/test/java/server/scheduler/AssignmentServiceBatchTest.java)
+  proves the deterministic recheck fallback without sleeping.
+- [`SchedulerLoopTest#externalSchedulingSignalWakesIdleLoopWithoutStoppingIt`](../taskflow-core/src/test/java/server/scheduler/SchedulerLoopTest.java)
+  proves an external heartbeat/capacity signal can wake the idle loop without
+  being mistaken for shutdown.
 - [`JobCompletionServiceBatchTest#dueTerminalDeliveryRetriesUseBoundedBatchAndExactNextWake`](../taskflow-core/src/test/java/server/scheduler/JobCompletionServiceBatchTest.java)
   proves due terminal retries are batch-bounded and publish an exact next wake
   time.

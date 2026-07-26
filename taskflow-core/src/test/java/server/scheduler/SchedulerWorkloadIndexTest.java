@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,6 +43,24 @@ class SchedulerWorkloadIndexTest {
         index.removePendingTask("job-a", "a-2");
         assertEquals(0, index.pendingTaskCount("job-a"));
         assertEquals(0, index.snapshot().runnableJobs());
+    }
+
+    @Test
+    void capacityWaitingJobStaysOutOfRunnableRotationUntilANewerSignal() {
+        SchedulerWorkloadIndex index = new SchedulerWorkloadIndex();
+        index.addPendingTask("job-a", "a-1", false);
+        index.addPendingTask("job-b", "b-1", false);
+
+        index.waitForCapacity("job-a", 7L);
+        index.addPendingTask("job-a", "a-retry", true);
+
+        assertEquals(1, index.snapshot().runnableJobs());
+        assertEquals(1, index.snapshot().capacityWaitingJobs());
+        assertEquals("job-b", index.pollRunnableJob());
+        assertFalse(index.hasCapacityWaitingJobEligibleBefore(7L));
+        assertTrue(index.hasCapacityWaitingJobEligibleBefore(8L));
+        assertEquals("job-a", index.pollCapacityWaitingJob(8L));
+        assertEquals(0, index.snapshot().capacityWaitingJobs());
     }
 
     @Test

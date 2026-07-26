@@ -122,6 +122,18 @@ class RabbitMqOnlyRuntimeArchitectureTest {
         }
     }
 
+    @Test
+    void heartbeatCapacityChangesWakeSchedulerOwnedDispatch() throws IOException {
+        Path root = repositoryRoot();
+        String coordinator = Files.readString(root.resolve(
+                "taskflow-coordinator/src/main/java/server/RabbitMqTaskCoordinatorServer.java"
+        ));
+
+        assertTrue(coordinator.contains("long capacityVersion = "
+                + "registry.capacityAvailabilityVersion()"));
+        assertTrue(coordinator.contains("scheduler.requestSchedulingRecheck()"));
+    }
+
     private static void assertNoSelector(Path file) throws IOException {
         if (Files.isRegularFile(file)) {
             assertFalse(Files.readString(file).contains("TASKFLOW_TRANSPORT"),

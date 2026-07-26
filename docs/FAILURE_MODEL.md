@@ -290,8 +290,9 @@ can be judged against a stable failure contract. On the current baseline:
 - MinIO/S3 attempt output staging and orphan collection are not implemented;
 - single-broker stop/restart recovery is proved; clustered/zero-downtime
   failover and participant-side durable result replay are not; and
-- event-driven fairness, complete admission control, and persistent-overload
-  recovery remain planned.
+- weighted capacity, complete admission control, and persistent-overload
+  recovery remain planned. Deterministic round-robin fairness and
+  capacity-wait reactivation are implemented.
 
 Accordingly, a linked current unit or live test marked **Partial** must not be
 used to claim the corresponding row is closed. Phase 7 completes the matrix

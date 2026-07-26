@@ -20,6 +20,7 @@ Queue pressure and scheduler health:
 
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`,
   `pending_tasks_indexed`, `runnable_jobs_indexed`,
+  `capacity_waiting_jobs_indexed`,
   `live_assignments_indexed`, `deadline_entries_indexed`,
   `deadline_head_checks_total`, `deadline_entries_popped_total`,
   `deadline_entries_validated_total`, `deadline_stale_rejected_total`,

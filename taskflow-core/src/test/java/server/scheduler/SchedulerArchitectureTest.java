@@ -179,6 +179,8 @@ class SchedulerArchitectureTest {
         assertFalse(assignment.contains("getPendingTasks()"));
         assertFalse(assignment.contains("getAllPeers()"));
         assertTrue(assignment.contains("pollRunnableJob()"));
+        assertTrue(assignment.contains("pollCapacityWaitingJob("));
+        assertTrue(assignment.contains("schedulerMaxAssignmentsPerJobPerRound()"));
         assertTrue(assignment.contains("pollPendingTask("));
         assertTrue(assignment.contains("getAvailablePeers(taskType"));
 

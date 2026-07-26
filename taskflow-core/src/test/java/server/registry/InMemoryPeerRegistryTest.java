@@ -173,6 +173,32 @@ class InMemoryPeerRegistryTest {
         assertEquals(List.of(textPeer), registry.getAvailablePeers("video_transcode", 1));
     }
 
+    @Test
+    void availabilityVersionChangesOnlyWhenCapacityMayIncrease() {
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo peer = new PeerInfo(
+                "peer-1",
+                server.scheduler.SchedulerConfig.defaults(),
+                List.of("text_analysis")
+        );
+
+        assertEquals(0L, registry.capacityAvailabilityVersion());
+        registry.register(peer.getNodeId(), peer);
+        assertEquals(1L, registry.capacityAvailabilityVersion());
+
+        registry.reserveTaskCapacity(peer);
+        assertEquals(1L, registry.capacityAvailabilityVersion());
+
+        registry.releaseTaskCapacity(peer);
+        assertEquals(2L, registry.capacityAvailabilityVersion());
+
+        registry.updateHeartbeat(peer.getNodeId(), List.of("TEXT_ANALYSIS"));
+        assertEquals(2L, registry.capacityAvailabilityVersion());
+
+        registry.updateHeartbeat(peer.getNodeId(), List.of("video_transcode"));
+        assertEquals(3L, registry.capacityAvailabilityVersion());
+    }
+
     private static final class RecordingPeerRegistryStore implements PeerRegistryStore {
         private final List<PeerRegistryRecord> records = new ArrayList<>();
 

@@ -27,6 +27,7 @@ class SchedulerConfigTest {
         assertEquals(100, config.schedulerMessageBatchSize());
         assertEquals(100, config.schedulerDeadlineBatchSize());
         assertEquals(100, config.schedulerDispatchBatchSize());
+        assertEquals(1, config.schedulerMaxAssignmentsPerJobPerRound());
         assertEquals(100, config.schedulerOutboxBatchSize());
         assertEquals(10_000L, config.metricsLogIntervalMillis());
         assertEquals(6.0, config.peerScoreLoadWeight());
@@ -50,6 +51,7 @@ class SchedulerConfigTest {
                 Map.entry("TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE", "13"),
                 Map.entry("TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE", "17"),
                 Map.entry("TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE", "19"),
+                Map.entry("TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND", "7"),
                 Map.entry("TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE", "23"),
                 Map.entry("TASKFLOW_METRICS_LOG_INTERVAL_MS", "3000"),
                 Map.entry("TASKFLOW_SCORE_LOAD_WEIGHT", "4.5"),
@@ -70,6 +72,7 @@ class SchedulerConfigTest {
         assertEquals(13, config.schedulerMessageBatchSize());
         assertEquals(17, config.schedulerDeadlineBatchSize());
         assertEquals(19, config.schedulerDispatchBatchSize());
+        assertEquals(7, config.schedulerMaxAssignmentsPerJobPerRound());
         assertEquals(23, config.schedulerOutboxBatchSize());
         assertEquals(3_000L, config.metricsLogIntervalMillis());
         assertEquals(4.5, config.peerScoreLoadWeight());
@@ -98,6 +101,16 @@ class SchedulerConfigTest {
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE", "0")));
         assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.of(
+                        "TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND",
+                        "0"
+                )));
+        assertThrows(IllegalArgumentException.class,
+                () -> SchedulerConfig.fromEnvironment(Map.ofEntries(
+                        Map.entry("TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE", "3"),
+                        Map.entry("TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND", "4")
+                )));
+        assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE", "0")));
         assertThrows(IllegalArgumentException.class,
                 () -> SchedulerConfig.fromEnvironment(Map.of("TASKFLOW_SCORE_FAILURE_WEIGHT", "-1")));
@@ -119,6 +132,7 @@ class SchedulerConfigTest {
                   schedulerMessageBatchSize: 14
                   schedulerDeadlineBatchSize: 16
                   schedulerDispatchBatchSize: 18
+                  schedulerMaxAssignmentsPerJobPerRound: 6
                   schedulerOutboxBatchSize: 20
                   metricsLogIntervalMs: 2500
                   scoring:
@@ -142,6 +156,7 @@ class SchedulerConfigTest {
         assertEquals(14, config.schedulerMessageBatchSize());
         assertEquals(16, config.schedulerDeadlineBatchSize());
         assertEquals(18, config.schedulerDispatchBatchSize());
+        assertEquals(6, config.schedulerMaxAssignmentsPerJobPerRound());
         assertEquals(20, config.schedulerOutboxBatchSize());
         assertEquals(2_500L, config.metricsLogIntervalMillis());
         assertEquals(3.5, config.peerScoreLoadWeight());
@@ -182,7 +197,37 @@ class SchedulerConfigTest {
     }
 
     @Test
-    void legacyConstructorUsesBatchDefaults() {
+    void tf0402ConstructorUsesRoundQuotaDefault() {
+        SchedulerConfig defaults = SchedulerConfig.defaults();
+
+        SchedulerConfig config = new SchedulerConfig(
+                defaults.taskTimeoutMillis(),
+                defaults.taskLeaseMillis(),
+                defaults.maxTasksPerPeer(),
+                defaults.maxTaskRetries(),
+                defaults.inboundQueueCapacity(),
+                defaults.jobResultMaxDeliveryAttempts(),
+                11,
+                12,
+                13,
+                14,
+                defaults.metricsLogIntervalMillis(),
+                defaults.peerScoreLoadWeight(),
+                defaults.peerScoreLatencyWeight(),
+                defaults.peerScoreDurationWeight(),
+                defaults.peerScoreFailureWeight(),
+                defaults.peerScoreLatencyBaselineMillis(),
+                defaults.peerScoreDurationBaselineMillis(),
+                defaults.peerScoreEwmaAlpha()
+        );
+
+        assertEquals(13, config.schedulerDispatchBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
+                config.schedulerMaxAssignmentsPerJobPerRound());
+    }
+
+    @Test
+    void preTf0402ConstructorUsesBatchAndRoundDefaults() {
         SchedulerConfig defaults = SchedulerConfig.defaults();
 
         SchedulerConfig config = new SchedulerConfig(
@@ -208,6 +253,8 @@ class SchedulerConfigTest {
                 config.schedulerDeadlineBatchSize());
         assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
                 config.schedulerDispatchBatchSize());
+        assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
+                config.schedulerMaxAssignmentsPerJobPerRound());
         assertEquals(SchedulerConfig.DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
                 config.schedulerOutboxBatchSize());
     }

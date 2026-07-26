@@ -12,6 +12,7 @@ scheduler:
   schedulerMessageBatchSize: 100
   schedulerDeadlineBatchSize: 100
   schedulerDispatchBatchSize: 100
+  schedulerMaxAssignmentsPerJobPerRound: 1
   schedulerOutboxBatchSize: 100
   metricsLogIntervalMs: 10000
   scoring:

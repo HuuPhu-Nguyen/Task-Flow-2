@@ -284,9 +284,24 @@ nodes may enable the requester role, executor role, or both.
   `schedulerMessageBatchSize`, `schedulerDeadlineBatchSize`,
   `schedulerDispatchBatchSize`, and `schedulerOutboxBatchSize`; every default
   is `100`.
+- Cross-job dispatch uses a persistent round-robin pass whose cursor survives
+  scheduler-cycle boundaries. `schedulerMaxAssignmentsPerJobPerRound` /
+  `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND` limits successful
+  assignments per job turn, defaults to `1`, and cannot exceed the dispatch
+  batch.
+- Retry tasks lead the pending lanes only inside their own job. With one
+  10,000-task job followed by ten one-task jobs and enough compatible capacity,
+  all ten small jobs receive an assignment by the end of the first complete
+  round, after exactly 11 dispatch units at the default quota.
 - A stale timer pop still consumes one deadline unit. A no-capacity runnable-job
   probe still consumes one dispatch unit. This prevents unsuccessful discovery
   from escaping the cycle bound.
+- A no-capacity probe removes that job from the runnable rotation and records it
+  in a separate capacity-wait set. A later capacity-availability signal or the
+  deterministic 500 ms recheck makes the prior waiting generation eligible;
+  pending-task indexing alone cannot bypass the wait state. Capability-changing
+  heartbeats wake an idle scheduler even though the registry update occurs
+  outside its mailbox.
 - Continuous messages cannot starve deadlines because the message stage ends at
   its limit. Continuous deadlines cannot starve task results because mailbox
   messages are always processed first.

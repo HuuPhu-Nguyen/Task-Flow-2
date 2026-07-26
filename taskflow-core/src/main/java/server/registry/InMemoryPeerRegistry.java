@@ -22,6 +22,7 @@ public class InMemoryPeerRegistry implements PeerRegistry {
     private final Map<String, LinkedHashSet<String>> availablePeerIdsByTaskType = new HashMap<>();
     private final PeerRegistryStore store;
     private int capacityIndexLimit = -1;
+    private long capacityAvailabilityVersion;
 
     public InMemoryPeerRegistry() {
         this(null);
@@ -40,6 +41,7 @@ public class InMemoryPeerRegistry implements PeerRegistry {
             removeFromIndexes(previous);
         }
         addToIndexes(peer);
+        capacityAvailabilityVersion++;
         persistPeer(peer, PeerStatus.CONNECTED, 0L);
         LOGGER.info("event=peer_registered peer_id={}", peerId);
     }
@@ -51,6 +53,7 @@ public class InMemoryPeerRegistry implements PeerRegistry {
         PeerInfo existing = peers.putIfAbsent(peerId, peer);
         if (existing == null) {
             addToIndexes(peer);
+            capacityAvailabilityVersion++;
             persistPeer(peer, PeerStatus.CONNECTED, 0L);
             LOGGER.info("event=peer_registered peer_id={}", peerId);
             return true;
@@ -83,10 +86,15 @@ public class InMemoryPeerRegistry implements PeerRegistry {
     public synchronized void updateHeartbeat(String nodeId, Collection<String> supportedTaskTypes) {
         PeerInfo peer = peers.get(PeerIdentity.require(nodeId));
         if (peer != null) {
+            LinkedHashSet<String> previousTaskTypes =
+                    new LinkedHashSet<>(peer.getSupportedTaskTypes());
             removeFromIndexes(peer);
             peer.updateHeartbeatReceivedNow();
             peer.setSupportedTaskTypes(supportedTaskTypes);
             addToIndexes(peer);
+            if (!previousTaskTypes.equals(new LinkedHashSet<>(peer.getSupportedTaskTypes()))) {
+                capacityAvailabilityVersion++;
+            }
             persistPeer(peer, PeerStatus.CONNECTED, 0L);
         }
     }
@@ -129,6 +137,11 @@ public class InMemoryPeerRegistry implements PeerRegistry {
     }
 
     @Override
+    public synchronized long capacityAvailabilityVersion() {
+        return capacityAvailabilityVersion;
+    }
+
+    @Override
     public synchronized void reserveTaskCapacity(PeerInfo peer) {
         if (peer == null) {
             return;
@@ -142,8 +155,12 @@ public class InMemoryPeerRegistry implements PeerRegistry {
         if (peer == null) {
             return;
         }
+        int activeTasks = peer.getActiveTasks();
         peer.decrementTasks();
         refreshAvailableCapacity(peer);
+        if (peer.getActiveTasks() < activeTasks) {
+            capacityAvailabilityVersion++;
+        }
     }
 
     @Override
@@ -152,8 +169,12 @@ public class InMemoryPeerRegistry implements PeerRegistry {
         if (peer == null) {
             return;
         }
+        int activeTasks = peer.getActiveTasks();
         peer.decrementTasks();
         refreshAvailableCapacity(peer);
+        if (peer.getActiveTasks() < activeTasks) {
+            capacityAvailabilityVersion++;
+        }
     }
 
     private void verifyPeerInfo(String nodeId, PeerInfo peer) {

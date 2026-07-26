@@ -183,16 +183,11 @@ public class TaskScheduler implements Runnable {
             @Override
             public void processEnvelope(MessageEnvelope envelope) {
                 messages.processEnvelope(envelope);
-                assignments.signalSchedulingStateMayHaveChanged();
             }
 
             @Override
             public SchedulerLoop.StageResult processDueDeadlines(int limit) {
-                SchedulerLoop.StageResult result = leases.processDueDeadlines(limit);
-                if (result.processed() > 0) {
-                    assignments.signalSchedulingStateMayHaveChanged();
-                }
-                return result;
+                return leases.processDueDeadlines(limit);
             }
 
             @Override
@@ -237,6 +232,14 @@ public class TaskScheduler implements Runnable {
 
     public void requestShutdownAfterDrain() {
         loop.requestShutdownAfterDrain();
+    }
+
+    /**
+     * Wakes an idle scheduler after executor capability/capacity changed
+     * outside the scheduler mailbox.
+     */
+    public void requestSchedulingRecheck() {
+        loop.requestExternalWakeup();
     }
 
     public SchedulerMetrics.Snapshot getMetricsSnapshot() {

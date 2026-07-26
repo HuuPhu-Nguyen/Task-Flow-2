@@ -6,6 +6,7 @@ import server.job.TaskUnit;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -105,6 +106,7 @@ final class SchedulerWorkloadIndex {
     record Snapshot(
             long pendingTasks,
             int runnableJobs,
+            int capacityWaitingJobs,
             int liveAssignments,
             int deadlineEntries,
             long deadlineHeadChecks,
@@ -126,6 +128,7 @@ final class SchedulerWorkloadIndex {
 
     private final Map<String, PendingTaskIds> pendingTaskIdsByJob = new HashMap<>();
     private final LinkedHashSet<String> runnableJobIds = new LinkedHashSet<>();
+    private final Map<String, Long> capacityWaitingJobSignalGenerations = new LinkedHashMap<>();
     private final TreeSet<ScheduledDeadline> timeoutDeadlines = new TreeSet<>();
     private final TreeSet<ScheduledDeadline> leaseDeadlines = new TreeSet<>();
     private final Map<AssignmentKey, AssignmentDeadlines> deadlinesByAssignment = new HashMap<>();
@@ -179,6 +182,7 @@ final class SchedulerWorkloadIndex {
             pendingTaskCount = Math.max(0L, pendingTaskCount - pending.size());
         }
         runnableJobIds.remove(jobId);
+        capacityWaitingJobSignalGenerations.remove(jobId);
 
         Set<AssignmentKey> assignmentKeys = assignmentKeysByJob.get(jobId);
         if (assignmentKeys == null || assignmentKeys.isEmpty()) {
@@ -198,7 +202,9 @@ final class SchedulerWorkloadIndex {
         if (newlyIndexed) {
             pendingTaskCount++;
         }
-        runnableJobIds.addLast(jobId);
+        if (!capacityWaitingJobSignalGenerations.containsKey(jobId)) {
+            runnableJobIds.addLast(jobId);
+        }
     }
 
     boolean removePendingTask(String jobId, String taskId) {
@@ -210,6 +216,7 @@ final class SchedulerWorkloadIndex {
         if (pending.isEmpty()) {
             pendingTaskIdsByJob.remove(jobId);
             runnableJobIds.remove(jobId);
+            capacityWaitingJobSignalGenerations.remove(jobId);
         }
         return true;
     }
@@ -225,6 +232,7 @@ final class SchedulerWorkloadIndex {
         if (pending.isEmpty()) {
             pendingTaskIdsByJob.remove(jobId);
             runnableJobIds.remove(jobId);
+            capacityWaitingJobSignalGenerations.remove(jobId);
         }
         return taskId;
     }
@@ -239,13 +247,59 @@ final class SchedulerWorkloadIndex {
     }
 
     void requeueRunnableJob(String jobId) {
-        if (pendingTaskCount(jobId) > 0) {
+        if (pendingTaskCount(jobId) > 0
+                && !capacityWaitingJobSignalGenerations.containsKey(jobId)) {
             runnableJobIds.addLast(jobId);
         }
     }
 
     int runnableJobCount() {
         return runnableJobIds.size();
+    }
+
+    void waitForCapacity(String jobId, long signalGeneration) {
+        if (signalGeneration < 0L) {
+            throw new IllegalArgumentException("signalGeneration must not be negative");
+        }
+        runnableJobIds.remove(jobId);
+        if (pendingTaskCount(jobId) > 0) {
+            capacityWaitingJobSignalGenerations.put(jobId, signalGeneration);
+        }
+    }
+
+    String pollCapacityWaitingJob(long eligibleBeforeSignalGeneration) {
+        if (eligibleBeforeSignalGeneration < 0L) {
+            throw new IllegalArgumentException(
+                    "eligibleBeforeSignalGeneration must not be negative"
+            );
+        }
+        if (capacityWaitingJobSignalGenerations.isEmpty()) {
+            return null;
+        }
+        Map.Entry<String, Long> first =
+                capacityWaitingJobSignalGenerations.entrySet().iterator().next();
+        if (first.getValue() >= eligibleBeforeSignalGeneration) {
+            return null;
+        }
+        capacityWaitingJobSignalGenerations.remove(first.getKey());
+        return first.getKey();
+    }
+
+    boolean hasCapacityWaitingJobEligibleBefore(long signalGeneration) {
+        if (signalGeneration < 0L) {
+            throw new IllegalArgumentException("signalGeneration must not be negative");
+        }
+        if (capacityWaitingJobSignalGenerations.isEmpty()) {
+            return false;
+        }
+        return capacityWaitingJobSignalGenerations.entrySet()
+                .iterator()
+                .next()
+                .getValue() < signalGeneration;
+    }
+
+    int capacityWaitingJobCount() {
+        return capacityWaitingJobSignalGenerations.size();
     }
 
     void scheduleAssignment(String jobId,
@@ -437,6 +491,7 @@ final class SchedulerWorkloadIndex {
         return new Snapshot(
                 pendingTaskCount,
                 runnableJobIds.size(),
+                capacityWaitingJobSignalGenerations.size(),
                 deadlinesByAssignment.size(),
                 timeoutDeadlines.size() + leaseDeadlines.size(),
                 deadlineHeadChecks,

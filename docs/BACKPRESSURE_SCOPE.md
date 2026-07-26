@@ -11,9 +11,13 @@ adaptive throttling remains deferred.
   dispatch, and terminal/outbox stages have separate positive limits, all
   defaulting to `100`. The exact order ensures mailbox pressure cannot exclude
   deadlines and deadline pressure cannot exclude already queued results.
-- Capacity-blocked dispatch visits at most one configured batch at a time. A
-  full no-progress rotation waits for a message/state-change signal or a
-  500 ms recheck rather than spinning.
+- Cross-job dispatch uses a persistent round-robin pass and a positive
+  per-job assignment quota, default `1`, no greater than the dispatch batch.
+  Capacity-blocked dispatch visits at most one configured batch at a time.
+- A no-capacity probe removes the job from runnable rotation and adds one
+  capacity-wait entry. A capacity-availability generation or deterministic
+  500 ms recheck makes the prior waiting generation eligible; capability
+  heartbeats wake the scheduler without polling or creating an overflow queue.
 - RabbitMQ coordinator deliveries for `JOB_SUBMIT` and `TASK_RESULT` remain
   unacknowledged through scheduler admission and processing. If the mailbox is
   full, the delivery receives `RETRY_TRANSIENT` and already accepted work is
@@ -54,9 +58,12 @@ ephemeral peer route disappears or adaptive capacity management.
   without replacing already accepted work.
 - `SchedulerLoopTest` covers exact cycle order/budgets and both mailbox/deadline
   starvation boundaries with deterministic queues.
-- `AssignmentServiceBatchTest`, `SchedulerWorkloadIndexTest`, and
-  `JobCompletionServiceBatchTest` prove bounded no-capacity probes, stale
-  deadline accounting, and due terminal retries.
+- `AssignmentServiceBatchTest` proves the 10,000-plus-ten round-one bound,
+  quota persistence across dispatch batches, local retry priority, bounded
+  no-capacity probes, capacity-signal restoration, and fake-clock recheck.
+- `SchedulerWorkloadIndexTest`, `SchedulerLoopTest`, and
+  `JobCompletionServiceBatchTest` prove capacity-wait isolation, external
+  scheduler wake-up, stale deadline accounting, and due terminal retries.
 - `RabbitMqTransportLiveTest` covers prefetch with unacknowledged deliveries,
   elapsed delayed-retry timing, the exact configured attempt bound, and final
   quarantine without immediate-redelivery spin.

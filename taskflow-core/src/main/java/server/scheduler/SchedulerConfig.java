@@ -21,6 +21,7 @@ public record SchedulerConfig(
         int schedulerMessageBatchSize,
         int schedulerDeadlineBatchSize,
         int schedulerDispatchBatchSize,
+        int schedulerMaxAssignmentsPerJobPerRound,
         int schedulerOutboxBatchSize,
         long metricsLogIntervalMillis,
         double peerScoreLoadWeight,
@@ -40,6 +41,7 @@ public record SchedulerConfig(
     public static final int DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE = 100;
     public static final int DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE = 100;
     public static final int DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE = 100;
+    public static final int DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND = 1;
     public static final int DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE = 100;
     public static final long DEFAULT_METRICS_LOG_INTERVAL_MILLIS = 10_000L;
     public static final double DEFAULT_PEER_SCORE_LOAD_WEIGHT = 6.0;
@@ -62,6 +64,16 @@ public record SchedulerConfig(
         requirePositive(schedulerMessageBatchSize, "schedulerMessageBatchSize");
         requirePositive(schedulerDeadlineBatchSize, "schedulerDeadlineBatchSize");
         requirePositive(schedulerDispatchBatchSize, "schedulerDispatchBatchSize");
+        requirePositive(
+                schedulerMaxAssignmentsPerJobPerRound,
+                "schedulerMaxAssignmentsPerJobPerRound"
+        );
+        if (schedulerMaxAssignmentsPerJobPerRound > schedulerDispatchBatchSize) {
+            throw new IllegalArgumentException(
+                    "schedulerMaxAssignmentsPerJobPerRound must not exceed "
+                            + "schedulerDispatchBatchSize."
+            );
+        }
         requirePositive(schedulerOutboxBatchSize, "schedulerOutboxBatchSize");
         requirePositive(metricsLogIntervalMillis, "metricsLogIntervalMillis");
         requireNonNegative(peerScoreLoadWeight, "peerScoreLoadWeight");
@@ -76,8 +88,55 @@ public record SchedulerConfig(
     }
 
     /**
-     * Compatibility constructor retained for callers compiled against the
-     * pre-TF-0402 scheduler configuration surface.
+     * Compatibility constructor retained for callers using the TF-0402
+     * scheduler configuration surface.
+     */
+    public SchedulerConfig(
+            long taskTimeoutMillis,
+            long taskLeaseMillis,
+            int maxTasksPerPeer,
+            int maxTaskRetries,
+            int inboundQueueCapacity,
+            int jobResultMaxDeliveryAttempts,
+            int schedulerMessageBatchSize,
+            int schedulerDeadlineBatchSize,
+            int schedulerDispatchBatchSize,
+            int schedulerOutboxBatchSize,
+            long metricsLogIntervalMillis,
+            double peerScoreLoadWeight,
+            double peerScoreLatencyWeight,
+            double peerScoreDurationWeight,
+            double peerScoreFailureWeight,
+            double peerScoreLatencyBaselineMillis,
+            double peerScoreDurationBaselineMillis,
+            double peerScoreEwmaAlpha
+    ) {
+        this(
+                taskTimeoutMillis,
+                taskLeaseMillis,
+                maxTasksPerPeer,
+                maxTaskRetries,
+                inboundQueueCapacity,
+                jobResultMaxDeliveryAttempts,
+                schedulerMessageBatchSize,
+                schedulerDeadlineBatchSize,
+                schedulerDispatchBatchSize,
+                DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
+                schedulerOutboxBatchSize,
+                metricsLogIntervalMillis,
+                peerScoreLoadWeight,
+                peerScoreLatencyWeight,
+                peerScoreDurationWeight,
+                peerScoreFailureWeight,
+                peerScoreLatencyBaselineMillis,
+                peerScoreDurationBaselineMillis,
+                peerScoreEwmaAlpha
+        );
+    }
+
+    /**
+     * Compatibility constructor retained for callers using the pre-TF-0402
+     * scheduler configuration surface.
      */
     public SchedulerConfig(
             long taskTimeoutMillis,
@@ -105,6 +164,7 @@ public record SchedulerConfig(
                 DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
+                DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
                 DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
                 metricsLogIntervalMillis,
                 peerScoreLoadWeight,
@@ -128,6 +188,7 @@ public record SchedulerConfig(
                 DEFAULT_SCHEDULER_MESSAGE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DEADLINE_BATCH_SIZE,
                 DEFAULT_SCHEDULER_DISPATCH_BATCH_SIZE,
+                DEFAULT_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND,
                 DEFAULT_SCHEDULER_OUTBOX_BATCH_SIZE,
                 DEFAULT_METRICS_LOG_INTERVAL_MILLIS,
                 DEFAULT_PEER_SCORE_LOAD_WEIGHT,
@@ -192,6 +253,9 @@ public record SchedulerConfig(
                 intValue(scheduler, env, "schedulerDispatchBatchSize",
                         "TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE",
                         defaults.schedulerDispatchBatchSize()),
+                intValue(scheduler, env, "schedulerMaxAssignmentsPerJobPerRound",
+                        "TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND",
+                        defaults.schedulerMaxAssignmentsPerJobPerRound()),
                 intValue(scheduler, env, "schedulerOutboxBatchSize",
                         "TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE",
                         defaults.schedulerOutboxBatchSize()),

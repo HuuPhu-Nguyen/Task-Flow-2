@@ -34,7 +34,12 @@ final class AssignmentService {
     private final TaskTransitionDecisions transitions;
     private final JobCompletionService jobCompletions;
     private final SchedulerEventLog events;
-    private int consecutiveNoProgressProbes;
+    private int runnableJobsRemainingInRound;
+    private long roundCapacitySignalGeneration;
+    private long capacitySignalGeneration;
+    private long observedCapacityAvailabilityVersion;
+    private long completedRounds;
+    private boolean roundOpen;
     private long nextCapacityRecheckAtMillis = Long.MAX_VALUE;
 
     AssignmentService(SchedulerState state,
@@ -63,6 +68,7 @@ final class AssignmentService {
         this.transitions = transitions;
         this.jobCompletions = jobCompletions;
         this.events = events;
+        this.observedCapacityAvailabilityVersion = registry.capacityAvailabilityVersion();
     }
 
     SchedulerLoop.StageResult dispatchPendingTasks(int limit) {
@@ -70,86 +76,67 @@ final class AssignmentService {
             throw new IllegalArgumentException("limit must be positive");
         }
 
+        observeCapacityAvailabilityChange();
+        activateTimedCapacityRecheck();
         int attempts = 0;
         while (attempts < limit) {
-            int runnableJobs = state.runnableJobCount();
-            if (runnableJobs == 0) {
-                consecutiveNoProgressProbes = 0;
-                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+            if (!roundOpen && !startRound()) {
                 break;
             }
-            if (consecutiveNoProgressProbes >= runnableJobs) {
-                if (clock.nowEpochMillis() < nextCapacityRecheckAtMillis) {
-                    break;
-                }
-                consecutiveNoProgressProbes = 0;
-                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
-            }
-
-            EmbarrassinglyParallelJob<?, ?> job = state.pollRunnableJob();
+            EmbarrassinglyParallelJob<?, ?> job = pollNextJobInRound();
             if (job == null) {
-                consecutiveNoProgressProbes = 0;
-                break;
+                completeRound();
+                continue;
             }
             if (!state.hasActiveJob(job.getJobId()) || jobCompletions.isPending(job.getJobId())) {
                 attempts++;
+                completeRoundIfExhausted();
                 continue;
             }
-            Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(job.getTaskType()));
-            if (candidates.isEmpty()) {
-                state.requeueRunnableJob(job.getJobId());
+
+            int assignmentsForJob = 0;
+            boolean waitingForCapacity = false;
+            boolean turnComplete = false;
+            while (attempts < limit
+                    && assignmentsForJob < config.schedulerMaxAssignmentsPerJobPerRound()
+                    && !turnComplete) {
+                PeerInfo bestPeer = bestAvailablePeer(job.getTaskType());
                 attempts++;
-                consecutiveNoProgressProbes++;
-                scheduleCapacityRecheckIfSweepComplete();
-                continue;
+                if (bestPeer == null) {
+                    state.waitForCapacity(job.getJobId(), capacitySignalGeneration);
+                    scheduleCapacityRecheck();
+                    waitingForCapacity = true;
+                    break;
+                }
+
+                TaskUnit<?> task = state.pollPendingTask(job.getJobId());
+                if (task == null) {
+                    break;
+                }
+                boolean progress = assign(job, task, bestPeer);
+                if (task.getStatus() == TaskUnit.TaskStatus.PENDING
+                        && state.hasActiveJob(job.getJobId())
+                        && !jobCompletions.isPending(job.getJobId())) {
+                    state.indexPendingTask(task, true);
+                }
+                if (progress) {
+                    assignmentsForJob++;
+                } else {
+                    turnComplete = true;
+                }
             }
 
-            while (!candidates.isEmpty()
-                    && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
-                candidates.removeFirst();
-            }
-            PeerInfo bestPeer = candidates.peekFirst();
-            attempts++;
-            if (bestPeer == null) {
-                state.requeueRunnableJob(job.getJobId());
-                consecutiveNoProgressProbes++;
-                scheduleCapacityRecheckIfSweepComplete();
-                continue;
-            }
-            TaskUnit<?> task = state.pollPendingTask(job.getJobId());
-            if (task == null) {
-                consecutiveNoProgressProbes++;
-                scheduleCapacityRecheckIfSweepComplete();
-                continue;
-            }
-
-            boolean progress = assign(job, task, bestPeer);
-            if (task.getStatus() == TaskUnit.TaskStatus.PENDING
+            if (!waitingForCapacity
                     && state.hasActiveJob(job.getJobId())
                     && !jobCompletions.isPending(job.getJobId())) {
-                state.indexPendingTask(task, true);
-            }
-            if (state.hasActiveJob(job.getJobId()) && !jobCompletions.isPending(job.getJobId())) {
                 state.requeueRunnableJob(job.getJobId());
             }
-            consecutiveNoProgressProbes = progress ? 0 : consecutiveNoProgressProbes + 1;
-            if (progress) {
-                nextCapacityRecheckAtMillis = Long.MAX_VALUE;
-            } else {
-                scheduleCapacityRecheckIfSweepComplete();
-            }
+            completeRoundIfExhausted();
         }
 
-        int runnableJobs = state.runnableJobCount();
-        boolean immediateWorkRemaining = runnableJobs > 0
-                && consecutiveNoProgressProbes < runnableJobs
-                && attempts >= limit;
+        boolean immediateWorkRemaining = attempts >= limit
+                && (currentRoundWorkRemaining() || nextRoundWorkAvailable());
         return new SchedulerLoop.StageResult(attempts, immediateWorkRemaining);
-    }
-
-    void signalSchedulingStateMayHaveChanged() {
-        consecutiveNoProgressProbes = 0;
-        nextCapacityRecheckAtMillis = Long.MAX_VALUE;
     }
 
     long millisUntilNextDispatchRecheck() {
@@ -160,15 +147,102 @@ final class AssignmentService {
         return nextCapacityRecheckAtMillis <= now ? 0L : nextCapacityRecheckAtMillis - now;
     }
 
-    private void scheduleCapacityRecheckIfSweepComplete() {
-        int runnableJobs = state.runnableJobCount();
-        if (runnableJobs == 0 || consecutiveNoProgressProbes < runnableJobs) {
+    long completedRounds() {
+        return completedRounds;
+    }
+
+    private boolean startRound() {
+        runnableJobsRemainingInRound = state.runnableJobCount();
+        roundCapacitySignalGeneration = capacitySignalGeneration;
+        roundOpen = runnableJobsRemainingInRound > 0
+                || state.hasCapacityWaitingJobEligibleBefore(roundCapacitySignalGeneration);
+        return roundOpen;
+    }
+
+    private EmbarrassinglyParallelJob<?, ?> pollNextJobInRound() {
+        if (runnableJobsRemainingInRound > 0) {
+            EmbarrassinglyParallelJob<?, ?> job = state.pollRunnableJob();
+            runnableJobsRemainingInRound--;
+            if (job != null) {
+                return job;
+            }
+            runnableJobsRemainingInRound = 0;
+        }
+        return state.pollCapacityWaitingJob(roundCapacitySignalGeneration);
+    }
+
+    private boolean currentRoundWorkRemaining() {
+        return roundOpen
+                && (runnableJobsRemainingInRound > 0
+                || state.hasCapacityWaitingJobEligibleBefore(roundCapacitySignalGeneration));
+    }
+
+    private boolean nextRoundWorkAvailable() {
+        return state.runnableJobCount() > 0
+                || state.hasCapacityWaitingJobEligibleBefore(capacitySignalGeneration);
+    }
+
+    private void completeRoundIfExhausted() {
+        if (!currentRoundWorkRemaining()) {
+            completeRound();
+        }
+    }
+
+    private void completeRound() {
+        if (!roundOpen) {
+            return;
+        }
+        roundOpen = false;
+        runnableJobsRemainingInRound = 0;
+        if (completedRounds < Long.MAX_VALUE) {
+            completedRounds++;
+        }
+    }
+
+    private void observeCapacityAvailabilityChange() {
+        long currentVersion = registry.capacityAvailabilityVersion();
+        if (currentVersion == observedCapacityAvailabilityVersion) {
+            return;
+        }
+        observedCapacityAvailabilityVersion = currentVersion;
+        advanceCapacitySignalGeneration();
+        nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+    }
+
+    private void activateTimedCapacityRecheck() {
+        if (nextCapacityRecheckAtMillis == Long.MAX_VALUE
+                || clock.nowEpochMillis() < nextCapacityRecheckAtMillis) {
+            return;
+        }
+        advanceCapacitySignalGeneration();
+        nextCapacityRecheckAtMillis = Long.MAX_VALUE;
+    }
+
+    private void advanceCapacitySignalGeneration() {
+        if (capacitySignalGeneration < Long.MAX_VALUE) {
+            capacitySignalGeneration++;
+            return;
+        }
+        throw new IllegalStateException("Capacity signal generation exhausted.");
+    }
+
+    private void scheduleCapacityRecheck() {
+        if (nextCapacityRecheckAtMillis != Long.MAX_VALUE) {
             return;
         }
         long now = clock.nowEpochMillis();
         nextCapacityRecheckAtMillis = now >= Long.MAX_VALUE - NO_CAPACITY_RECHECK_MILLIS
                 ? Long.MAX_VALUE
                 : now + NO_CAPACITY_RECHECK_MILLIS;
+    }
+
+    private PeerInfo bestAvailablePeer(String taskType) {
+        Deque<PeerInfo> candidates = new ArrayDeque<>(getAvailablePeers(taskType));
+        while (!candidates.isEmpty()
+                && candidates.getFirst().getActiveTasks() >= config.maxTasksPerPeer()) {
+            candidates.removeFirst();
+        }
+        return candidates.peekFirst();
     }
 
     private boolean assign(EmbarrassinglyParallelJob<?, ?> job, TaskUnit<?> task, PeerInfo peer) {

@@ -196,7 +196,9 @@ focused services behind an orchestration-only `SchedulerLoop`.
 - `LeaseService` / `AttemptService`: timeout, lease, participant-loss, retry, and terminal-attempt effects
 - `JobCompletionService`: aggregation, terminal state, final-result delivery/outbox intent, and cleanup
 - `RecoveryService`: installation of reconciled persisted projections
-- `SchedulerWorkloadIndex`: per-job pending deques, runnable-job rotation, exact assignment deadlines, and worker-assignment discovery
+- `SchedulerWorkloadIndex`: per-job pending deques, runnable-job rotation,
+  capacity-wait jobs, exact assignment deadlines, and worker-assignment
+  discovery
 - `SchedulerLoop`: bounded message, deadline, dispatch, terminal-retry, and metrics orchestration only
 
 Normal timeout, lease, dispatch, and participant-loss work is index-driven
@@ -206,6 +208,13 @@ profile are documented in [`docs/SCHEDULER.md`](docs/SCHEDULER.md).
 
 **Load Balancing**
 - Default maximum of **3 concurrent tasks per executor participant**, configurable with `TASKFLOW_MAX_TASKS_PER_PEER`
+- Cross-job dispatch is round-robin. Each job receives at most one assignment
+  per persistent scheduler round by default; configure
+  `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND` to raise that quota
+  without exceeding the dispatch-stage batch size.
+- A job with no compatible available capacity leaves the runnable rotation
+  until a capacity signal or deterministic 500 ms recheck makes it eligible
+  for a later round.
 - Executor participants are filtered by advertised task capability before assignment
 - Eligible executor participants are selected by a configurable weighted score using load, latency, average task duration, and failure rate
 
@@ -449,6 +458,7 @@ scheduler:
   schedulerMessageBatchSize: 100
   schedulerDeadlineBatchSize: 100
   schedulerDispatchBatchSize: 100
+  schedulerMaxAssignmentsPerJobPerRound: 1
   schedulerOutboxBatchSize: 100
   metricsLogIntervalMs: 10000
   scoring:
@@ -473,6 +483,7 @@ Environment overrides:
 - `TASKFLOW_SCHEDULER_MESSAGE_BATCH_SIZE`
 - `TASKFLOW_SCHEDULER_DEADLINE_BATCH_SIZE`
 - `TASKFLOW_SCHEDULER_DISPATCH_BATCH_SIZE`
+- `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND`
 - `TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`
 - `TASKFLOW_METRICS_LOG_INTERVAL_MS`
 - `TASKFLOW_SCORE_LOAD_WEIGHT`

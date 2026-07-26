@@ -74,8 +74,10 @@ decision.
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
 - TF-0401/TF-0402 implement event-driven indexes and fair bounded cycle stages.
-  TF-0403 through TF-0406 still own explicit cross-job quota, weighted
-  capacity, admission, and persistent-overload behavior.
+- TF-0403 implements persistent round-robin job passes, the configurable
+  per-job assignment quota, and capacity-wait eviction/reactivation.
+- TF-0404 through TF-0406 still own weighted capacity, admission, and
+  persistent-overload behavior.
 
 ## Related Documents
 

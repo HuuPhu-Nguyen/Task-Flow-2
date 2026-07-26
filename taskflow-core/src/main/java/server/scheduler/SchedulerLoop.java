@@ -5,6 +5,7 @@ import server.model.MessageEnvelope;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Mailbox/deadline/dispatch/outbound orchestration only. All transition and
@@ -18,6 +19,7 @@ public final class SchedulerLoop implements Runnable {
     private final int deadlineBatchSize;
     private final int dispatchBatchSize;
     private final int outboxBatchSize;
+    private final AtomicBoolean externalWakeRequested = new AtomicBoolean();
 
     private volatile boolean shutdownAfterDrain;
     private volatile Thread runner;
@@ -47,6 +49,10 @@ public final class SchedulerLoop implements Runnable {
                 if (shutdownAfterDrain && inboundMailbox.isEmpty()) {
                     return;
                 }
+                if (externalWakeRequested.getAndSet(false)) {
+                    Thread.interrupted();
+                    pollTimeoutMillis = 0L;
+                }
 
                 CycleResult result;
                 try {
@@ -55,12 +61,20 @@ public final class SchedulerLoop implements Runnable {
                     if (shutdownAfterDrain) {
                         continue;
                     }
+                    if (externalWakeRequested.getAndSet(false)) {
+                        pollTimeoutMillis = 0L;
+                        continue;
+                    }
                     Thread.currentThread().interrupt();
                     return;
                 }
 
                 if (Thread.interrupted()) {
                     if (!shutdownAfterDrain) {
+                        if (externalWakeRequested.getAndSet(false)) {
+                            pollTimeoutMillis = 0L;
+                            continue;
+                        }
                         Thread.currentThread().interrupt();
                         return;
                     }
@@ -69,6 +83,14 @@ public final class SchedulerLoop implements Runnable {
             }
         } finally {
             runner = null;
+        }
+    }
+
+    void requestExternalWakeup() {
+        externalWakeRequested.set(true);
+        Thread runningThread = runner;
+        if (runningThread != null) {
+            runningThread.interrupt();
         }
     }
 

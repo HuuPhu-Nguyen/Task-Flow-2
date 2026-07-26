@@ -133,7 +133,12 @@ public class RabbitMqTaskCoordinatorServer {
         String taskResultConsumerTag = transport.subscribe(TransportRoute.TASK_RESULT,
                 delivery -> enqueueForScheduler(brokerIngress, delivery));
         String heartbeatConsumerTag = transport.subscribe(TransportRoute.HEARTBEAT,
-                delivery -> handleHeartbeat(registry, schedulerConfig, delivery));
+                delivery -> handleHeartbeat(
+                        registry,
+                        schedulerConfig,
+                        schedulerLogic,
+                        delivery
+                ));
 
         DatabaseManager finalDb = db;
         RabbitMqOutboxReplayer finalOutboxReplayer = outboxReplayer;
@@ -194,6 +199,7 @@ public class RabbitMqTaskCoordinatorServer {
 
     private static void handleHeartbeat(PeerRegistry registry,
                                         SchedulerConfig schedulerConfig,
+                                        TaskScheduler scheduler,
                                         InboundTransportMessage delivery) throws Exception {
         Message message = delivery.message();
         if (!(message instanceof PongMessage pong)) {
@@ -221,6 +227,7 @@ public class RabbitMqTaskCoordinatorServer {
         }
         peerNodeId = PeerIdentity.require(peerNodeId);
 
+        long capacityVersion = registry.capacityAvailabilityVersion();
         PeerInfo peer = registry.get(peerNodeId);
         if (peer == null) {
             registry.registerIfAbsent(
@@ -228,6 +235,9 @@ public class RabbitMqTaskCoordinatorServer {
                     new PeerInfo(peerNodeId, schedulerConfig, pong.getSupportedTaskTypes(), PeerTransport.RABBITMQ));
         } else {
             registry.updateHeartbeat(peerNodeId, pong.getSupportedTaskTypes());
+        }
+        if (registry.capacityAvailabilityVersion() != capacityVersion) {
+            scheduler.requestSchedulingRecheck();
         }
         settle(delivery, DeliveryDisposition.ACK_SUCCESS, "heartbeat_registered");
     }

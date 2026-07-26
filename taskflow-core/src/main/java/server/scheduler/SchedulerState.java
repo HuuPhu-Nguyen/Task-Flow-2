@@ -84,6 +84,10 @@ final class SchedulerState {
         return workloadIndex.runnableJobCount();
     }
 
+    int capacityWaitingJobCount() {
+        return workloadIndex.capacityWaitingJobCount();
+    }
+
     EmbarrassinglyParallelJob<?, ?> pollRunnableJob() {
         while (true) {
             String jobId = workloadIndex.pollRunnableJob();
@@ -101,6 +105,32 @@ final class SchedulerState {
         if (activeJobs.containsKey(jobId)) {
             workloadIndex.requeueRunnableJob(jobId);
         }
+    }
+
+    void waitForCapacity(String jobId, long signalGeneration) {
+        if (activeJobs.containsKey(jobId)) {
+            workloadIndex.waitForCapacity(jobId, signalGeneration);
+        }
+    }
+
+    EmbarrassinglyParallelJob<?, ?> pollCapacityWaitingJob(
+            long eligibleBeforeSignalGeneration) {
+        while (true) {
+            String jobId = workloadIndex.pollCapacityWaitingJob(
+                    eligibleBeforeSignalGeneration
+            );
+            if (jobId == null) {
+                return null;
+            }
+            EmbarrassinglyParallelJob<?, ?> job = activeJobs.get(jobId);
+            if (job != null && workloadIndex.pendingTaskCount(jobId) > 0) {
+                return job;
+            }
+        }
+    }
+
+    boolean hasCapacityWaitingJobEligibleBefore(long signalGeneration) {
+        return workloadIndex.hasCapacityWaitingJobEligibleBefore(signalGeneration);
     }
 
     int pendingTaskCount(String jobId) {

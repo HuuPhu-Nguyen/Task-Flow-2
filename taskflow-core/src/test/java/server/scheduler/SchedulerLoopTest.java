@@ -148,6 +148,24 @@ class SchedulerLoopTest {
         assertFalse(thread.isAlive());
     }
 
+    @Test
+    void externalSchedulingSignalWakesIdleLoopWithoutStoppingIt() throws Exception {
+        RecordingWork work = new RecordingWork();
+        work.nextScheduledWorkMillis = Long.MAX_VALUE;
+        SchedulerLoop loop = new SchedulerLoop(new LinkedBlockingQueue<>(), work);
+        Thread thread = new Thread(loop, "scheduler-loop-external-capacity-wake-test");
+        thread.start();
+        assertTrue(work.firstMetricsUpdate.await(2, TimeUnit.SECONDS));
+
+        loop.requestExternalWakeup();
+
+        assertTrue(work.secondMetricsUpdate.await(2, TimeUnit.SECONDS));
+        assertTrue(thread.isAlive());
+        loop.requestShutdownAfterDrain();
+        thread.join(2_000L);
+        assertFalse(thread.isAlive());
+    }
+
     private static MessageEnvelope pong(String peerId) {
         return new MessageEnvelope(
                 new PongMessage(peerId, "2026-07-22T00:00:00Z", List.of("TEST_TASK")),
@@ -204,11 +222,13 @@ class SchedulerLoopTest {
         private final List<MessageEnvelope> envelopes = new ArrayList<>();
         private final CountDownLatch processed;
         private final CountDownLatch firstMetricsUpdate = new CountDownLatch(1);
+        private final CountDownLatch secondMetricsUpdate = new CountDownLatch(1);
         private SchedulerLoop.StageResult deadlineResult = SchedulerLoop.StageResult.idle();
         private SchedulerLoop.StageResult dispatchResult = SchedulerLoop.StageResult.idle();
         private SchedulerLoop.StageResult outboundResult = SchedulerLoop.StageResult.idle();
         private long nextScheduledWorkMillis = 10_000L;
         private int deadlineCalls;
+        private int metricsUpdates;
 
         private RecordingWork() {
             this(0);
@@ -247,7 +267,11 @@ class SchedulerLoopTest {
         @Override
         public void updateMetrics() {
             calls.add("metrics");
+            metricsUpdates++;
             firstMetricsUpdate.countDown();
+            if (metricsUpdates >= 2) {
+                secondMetricsUpdate.countDown();
+            }
         }
 
         @Override

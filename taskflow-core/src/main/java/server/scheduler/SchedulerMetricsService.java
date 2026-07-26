@@ -45,6 +45,7 @@ final class SchedulerMetricsService {
                 "active_jobs", snapshot.activeJobs(),
                 "pending_tasks_indexed", workload.pendingTasks(),
                 "runnable_jobs_indexed", workload.runnableJobs(),
+                "capacity_waiting_jobs_indexed", workload.capacityWaitingJobs(),
                 "live_assignments_indexed", workload.liveAssignments(),
                 "deadline_entries_indexed", workload.deadlineEntries(),
                 "deadline_head_checks_total", workload.deadlineHeadChecks(),

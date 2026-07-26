@@ -34,6 +34,14 @@ public interface PeerRegistry {
     List<PeerInfo> getAvailablePeers(String taskType, int maxTasksPerPeer);
 
     /**
+     * Monotonic process-local signal changed whenever compatible scheduling
+     * capacity may have increased.
+     */
+    default long capacityAvailabilityVersion() {
+        return 0L;
+    }
+
+    /**
      * Projects one already-authoritative assignment into worker capacity.
      */
     void reserveTaskCapacity(PeerInfo peer);
