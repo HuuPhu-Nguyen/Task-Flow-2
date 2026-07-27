@@ -44,13 +44,16 @@ final class SchedulerMetricsService {
         metrics.setQueueDepth(inboundMailbox.size());
         metrics.setActiveJobs(state.activeJobCount());
         metrics.setActiveTasks(state.activeTaskCount());
+        SchedulerWorkloadIndex.Snapshot workload = state.workloadSnapshot();
+        CapacityMetricsSnapshot capacity = registry.capacityMetricsSnapshot();
+        metrics.setPendingTasks(workload.pendingTasks());
+        metrics.setDueDeadlines(workload.deadlineEntries());
+        metrics.setWorkerCapacityUsed(capacity.reservedCapacityUnits());
         if (now - lastMetricsLogAtMillis < config.metricsLogIntervalMillis()) {
             return;
         }
         lastMetricsLogAtMillis = now;
         SchedulerMetrics.Snapshot snapshot = metrics.snapshot();
-        SchedulerWorkloadIndex.Snapshot workload = state.workloadSnapshot();
-        CapacityMetricsSnapshot capacity = registry.capacityMetricsSnapshot();
         SchedulerOverloadSnapshot overload = overloadStatus.snapshot();
         SchedulerOverloadSnapshot.Pressure primary = overload.reasons().isEmpty()
                 ? null

@@ -143,6 +143,25 @@ class RabbitMqTransportDeliveryDispositionTest {
     }
 
     @Test
+    void metricsCountRetryHeaderRedeliveryAndSuccessfulAutomaticQuarantine() throws Exception {
+        RecordingChannel channel = new RecordingChannel();
+
+        try (RabbitMqTransport transport = transport(channel)) {
+            transport.subscribe(TransportRoute.HEARTBEAT, delivery -> {
+                throw new IllegalStateException("deterministic handler invariant failed");
+            });
+            channel.deliver(validHeartbeat(), false, 4);
+
+            RabbitMqTransportMetrics.Snapshot metrics = transport.metricsSnapshot();
+            assertEquals(1L, metrics.redeliveriesTotal());
+            assertEquals(1L, metrics.quarantinedTotal());
+        }
+
+        assertSettlement(channel, 1, 0, 0);
+        assertEquals("taskflow.dead-letter.exchange", channel.publishedExchange);
+    }
+
+    @Test
     void malformedDeliveryIsRejectedBeforeHandlerInvocation() throws Exception {
         RecordingChannel channel = new RecordingChannel();
         java.util.concurrent.atomic.AtomicBoolean invoked = new java.util.concurrent.atomic.AtomicBoolean();
@@ -266,9 +285,24 @@ class RabbitMqTransportDeliveryDispositionTest {
         }
 
         private void deliver(byte[] body) throws IOException {
+            deliver(body, false, 1);
+        }
+
+        private void deliver(byte[] body, boolean redelivered, int deliveryAttempt)
+                throws IOException {
             Delivery delivery = new Delivery(
-                    new Envelope(17L, false, "taskflow.exchange", TransportRoute.HEARTBEAT.routingKey()),
-                    new AMQP.BasicProperties.Builder().build(),
+                    new Envelope(
+                            17L,
+                            redelivered,
+                            "taskflow.exchange",
+                            TransportRoute.HEARTBEAT.routingKey()
+                    ),
+                    new AMQP.BasicProperties.Builder()
+                            .headers(java.util.Map.of(
+                                    RabbitMqRetryHeaders.DELIVERY_ATTEMPT,
+                                    deliveryAttempt
+                            ))
+                            .build(),
                     body
             );
             assertNotNull(deliverCallback);

@@ -397,6 +397,7 @@ final class JobCompletionService {
             }
         }
         completion.terminalProjectionApplied = true;
+        metrics.recordJobTerminal(completion.success);
     }
 
     private void removeCompletion(String jobId) {

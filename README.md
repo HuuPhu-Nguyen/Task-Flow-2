@@ -151,8 +151,12 @@ SQLite state store and, when requested, RabbitMQ broker state:
 `status summary`, `status jobs`, `status peers`, `status outbox`,
 `status queues`, and `status dlq`. These commands report persisted jobs,
 task retry/lease counts, last-known participants (reported by the compatibility `peers` view), pending coordinator outbox rows,
-RabbitMQ queue depths, and DLQ summaries without adding a dashboard or metrics
-backend.
+RabbitMQ queue depths, and DLQ summaries without adding a dashboard. The
+coordinator also exports 22 bounded-label Prometheus metric families at
+`GET http://127.0.0.1:9464/metrics` by default. Configure the listener with
+`TASKFLOW_METRICS_ENABLED`, `TASKFLOW_METRICS_HOST`, and
+`TASKFLOW_METRICS_PORT`; see `docs/OBSERVABILITY_SCOPE.md` for the exact names,
+units, lifecycle semantics, and cardinality contract.
 
 The participant registry retains the existing `PeerRegistry` and peer-ID
 compatibility names. RabbitMQ command-line and JavaFX participants use explicit
@@ -938,7 +942,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
   collection, preserves active/authoritative keys through SQLite, and retains
   schema-v13 deletion failures for idempotent retry. Automatic input-object
   retention/deletion remains deliberately out of scope.
-- Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Coordinator scheduler events use a required UTC timestamp, process-lifetime coordinator instance ID, outcome, and stable failure-reason code. Assignment generations and committed, stale, duplicate, retry, timeout, lease-expiry, dispatch-failure, or participant-loss task transitions carry the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY.md` defines the schema; `docs/OBSERVABILITY_SCOPE.md` maps the event inventory, counters, and metrics-export deferral.
+- Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs. The coordinator exports aggregate Prometheus metrics without job/task/assignment/worker labels, but does not ship a dashboard, alert rules, metric retention, authentication, or TLS. Coordinator scheduler events use a required UTC timestamp, process-lifetime coordinator instance ID, outcome, and stable failure-reason code. Assignment generations and committed, stale, duplicate, retry, timeout, lease-expiry, dispatch-failure, or participant-loss task transitions carry the complete job/task/attempt/assignment/executor correlation tuple. `docs/OBSERVABILITY.md` defines the event schema; `docs/OBSERVABILITY_SCOPE.md` defines the event inventory and metrics endpoint contract.
 - SQLite is the current `JobStateStore`, peer registry store, coordinator broker outbox store, and orphan-output retry-state implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, schema-v12 stores the canonical job-submission request hash, and schema-v13 stores bounded orphan-output deletion failure metadata. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows and orphan-delete failures for RabbitMQ coordinator runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
 - Result ownership and submission idempotency use per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX submitter stores raw requester tokens and its local signing key in a user-profile file, returns the same token when the same job ID is submitted again, and retains it after uncertain send/confirm failure. An exact duplicate submission can replay status or a terminal result through normal broker ingress, while a separate JavaFX `JOB_RESULT_REQUEST` route remains unimplemented. POSIX owner-only permission hardening is attempted when supported, but this is not a credential vault or role-based authorization system.
@@ -1042,6 +1046,10 @@ On Windows PowerShell:
 ```powershell
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
+
+The local metrics endpoint is then available at
+`http://127.0.0.1:9464/metrics`. It is a metrics-only listener; health and
+readiness endpoints are not part of this phase.
 
 ---
 

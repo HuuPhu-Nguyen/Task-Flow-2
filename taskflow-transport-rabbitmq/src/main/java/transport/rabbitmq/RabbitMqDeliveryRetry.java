@@ -17,15 +17,25 @@ final class RabbitMqDeliveryRetry {
     private final RabbitMqTopology topology;
     private final Delivery delivery;
     private final RabbitMqSettlementPublisher publisher;
+    private final RabbitMqTransportMetrics metrics;
 
     RabbitMqDeliveryRetry(RabbitMqTransportConfig config,
                           RabbitMqTopology topology,
                           Delivery delivery,
                           RabbitMqSettlementPublisher publisher) {
+        this(config, topology, delivery, publisher, new RabbitMqTransportMetrics());
+    }
+
+    RabbitMqDeliveryRetry(RabbitMqTransportConfig config,
+                          RabbitMqTopology topology,
+                          Delivery delivery,
+                          RabbitMqSettlementPublisher publisher,
+                          RabbitMqTransportMetrics metrics) {
         this.config = config;
         this.topology = topology;
         this.delivery = delivery;
         this.publisher = publisher;
+        this.metrics = metrics;
     }
 
     int deliveryAttempt() {
@@ -98,6 +108,7 @@ final class RabbitMqDeliveryRetry {
                 delivery.getBody()
         );
         if (published) {
+            metrics.recordQuarantined();
             LOGGER.error("event=rabbitmq_delivery_quarantined routing_key={} reason_code={} disposition={} delivery_attempt={} max_delivery_attempts={} quarantine_queue={}",
                     routingKey,
                     reasonCode,

@@ -274,7 +274,10 @@ final class ResultCommitService {
         }
         state.indexClosedAssignment(task, activeAssignment);
 
-        metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.COMMITTED);
+        metrics.recordResultCommitOutcome(
+                JobStateStore.ResultCommitOutcome.COMMITTED,
+                Math.max(0L, durationMs)
+        );
         AssignmentCapacityReservation reservation =
                 CapacityReservations.forAssignment(job, task, activeAssignment);
         attempts.onAttemptSuccess(reservation, completion.durationMs());

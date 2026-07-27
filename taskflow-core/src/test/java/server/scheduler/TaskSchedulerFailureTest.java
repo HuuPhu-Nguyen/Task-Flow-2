@@ -770,6 +770,17 @@ class TaskSchedulerFailureTest {
             assertNotNull(result);
             assertTrue(result.isSuccessful());
             assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
+            SchedulerMetrics.Snapshot metrics = scheduler.getMetricsSnapshot();
+            assertEquals(1L, metrics.jobsAcceptedTotal());
+            assertEquals(1L, metrics.jobsCompletedTotal());
+            assertEquals(0L, metrics.jobsFailedTotal());
+            assertEquals(1L, metrics.tasksAssignedTotal());
+            assertEquals(1L, metrics.assignmentGenerationsTotal());
+            assertEquals(0L, metrics.retryCount());
+            assertEquals(0L, metrics.taskLeaseExpirationsTotal());
+            assertEquals(1L, metrics.taskResultsCommittedTotal());
+            assertEquals(1L, metrics.taskResultsStaleTotal());
+            assertEquals(1L, metrics.resultCommitLatencySeconds().count());
             assertEquals(0, peer.getActiveTasks());
         } finally {
             schedulerThread.interrupt();
@@ -829,6 +840,17 @@ class TaskSchedulerFailureTest {
             assertNotNull(result);
             assertTrue(result.isSuccessful());
             assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
+            SchedulerMetrics.Snapshot metrics = scheduler.getMetricsSnapshot();
+            assertEquals(1L, metrics.jobsAcceptedTotal());
+            assertEquals(1L, metrics.jobsCompletedTotal());
+            assertEquals(0L, metrics.jobsFailedTotal());
+            assertEquals(2L, metrics.tasksAssignedTotal());
+            assertEquals(2L, metrics.assignmentGenerationsTotal());
+            assertEquals(1L, metrics.retryCount());
+            assertEquals(0L, metrics.taskLeaseExpirationsTotal());
+            assertEquals(1L, metrics.taskResultsCommittedTotal());
+            assertEquals(1L, metrics.taskResultsStaleTotal());
+            assertEquals(1L, metrics.resultCommitLatencySeconds().count());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -956,6 +978,17 @@ class TaskSchedulerFailureTest {
             assertNotNull(result);
             assertTrue(result.isSuccessful());
             assertEquals(List.of("accepted-result"), result.getResultsByTaskId());
+            SchedulerMetrics.Snapshot metrics = scheduler.getMetricsSnapshot();
+            assertEquals(1L, metrics.jobsAcceptedTotal());
+            assertEquals(1L, metrics.jobsCompletedTotal());
+            assertEquals(0L, metrics.jobsFailedTotal());
+            assertEquals(2L, metrics.tasksAssignedTotal());
+            assertEquals(2L, metrics.assignmentGenerationsTotal());
+            assertEquals(1L, metrics.retryCount());
+            assertEquals(1L, metrics.taskLeaseExpirationsTotal());
+            assertEquals(1L, metrics.taskResultsCommittedTotal());
+            assertEquals(1L, metrics.taskResultsStaleTotal());
+            assertEquals(1L, metrics.resultCommitLatencySeconds().count());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -1029,6 +1062,9 @@ class TaskSchedulerFailureTest {
             assertFalse(result.isSuccessful());
             assertTrue(result.getErrorMessage().contains("reached max retries"));
             assertEquals(0, peer.getActiveTasks());
+            assertEquals(1L, scheduler.getMetricsSnapshot().jobsAcceptedTotal());
+            assertEquals(0L, scheduler.getMetricsSnapshot().jobsCompletedTotal());
+            assertEquals(1L, scheduler.getMetricsSnapshot().jobsFailedTotal());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);

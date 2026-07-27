@@ -181,6 +181,7 @@ final class LeaseService {
                             : null
             );
         }
+        attempts.recordLeaseExpiration();
         events.error("task_lease_expired", events.assignmentTraceFields(
                 job.getJobId(),
                 task.getTaskId(),

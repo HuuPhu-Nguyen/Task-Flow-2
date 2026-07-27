@@ -242,6 +242,7 @@ final class SchedulerMessageService {
                 throw new IllegalStateException("Job could not be persisted.");
             }
             state.addActiveJob(job, requesterTokenHash, requesterIdentityKey, requestHash);
+            metrics.recordJobAccepted();
             metrics.setActiveJobs(state.activeJobCount());
             metrics.setActiveTasks(state.activeTaskCount());
             overloadStatus.refreshActive(state.activeJobCount(), state.activeTaskCount());

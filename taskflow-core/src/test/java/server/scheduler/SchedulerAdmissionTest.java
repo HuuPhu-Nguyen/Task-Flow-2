@@ -48,6 +48,7 @@ class SchedulerAdmissionTest {
             );
             assertEquals(1L, fixture.scheduler.getMetricsSnapshot().activeJobs());
             assertEquals(1L, fixture.scheduler.getMetricsSnapshot().activeTasks());
+            assertEquals(1L, fixture.scheduler.getMetricsSnapshot().jobsAcceptedTotal());
         }
     }
 
@@ -155,6 +156,7 @@ class SchedulerAdmissionTest {
                 );
                 assertEquals(0L, fixture.scheduler.getMetricsSnapshot().activeJobs());
                 assertEquals(0L, fixture.scheduler.getMetricsSnapshot().activeTasks());
+                assertEquals(0L, fixture.scheduler.getMetricsSnapshot().jobsAcceptedTotal());
             }
         } finally {
             System.clearProperty(PayloadLimits.MAX_TASKS_PER_JOB_PROPERTY);

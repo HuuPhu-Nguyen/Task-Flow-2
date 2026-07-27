@@ -1,21 +1,85 @@
 # Observability Scope
 
-This document records what TaskFlow exposes through logs today and what remains
-deferred before adding a dedicated metrics backend. The normative common
-envelope, outcome/reason vocabulary, correlation rules, and data-protection
-constraints for coordinator scheduler state transitions are defined in
+This document records TaskFlow's structured-log, status-command, and
+Prometheus metrics surfaces. The normative common envelope, outcome/reason
+vocabulary, correlation rules, and data-protection constraints for coordinator
+scheduler state transitions are defined in
 [Coordinator event schema](OBSERVABILITY.md).
 
 ## Current Position
 
-TaskFlow currently relies on structured SLF4J/Logback event logs, scheduler
-metrics snapshots, and coordinator operator status commands. These outputs are
-suitable for local runs, CI output, Docker demo inspection, and focused
-troubleshooting.
+TaskFlow exposes structured SLF4J/Logback event logs, scheduler metrics
+snapshots, coordinator operator status commands, and a coordinator-local
+Prometheus text endpoint. These outputs are suitable for local runs, CI output,
+Docker demo inspection, scraping, and focused troubleshooting.
 
-TaskFlow does not yet provide a metrics exporter, dashboard, alerting rules,
-distributed tracing, log retention policy, DLQ dashboard, or aggregated DLQ
-metrics.
+TaskFlow does not provide built-in dashboards, alerting rules, distributed
+tracing, a log retention policy, or a DLQ dashboard.
+
+## Prometheus Metrics Endpoint
+
+The RabbitMQ coordinator serves Prometheus text format at `GET /metrics`.
+The listener is enabled by default on `127.0.0.1:9464`; loopback is the safe
+default for direct local runs. Configure it with the environment variables
+below or the corresponding Java system properties. A nonblank system property
+takes precedence over its environment variable.
+
+| Setting | System property | Default | Meaning |
+|---|---|---:|---|
+| `TASKFLOW_METRICS_ENABLED` | `taskflow.metricsEnabled` | `true` | Set to `false` to create no metrics listener. |
+| `TASKFLOW_METRICS_HOST` | `taskflow.metricsHost` | `127.0.0.1` | Bind address or host. Use `0.0.0.0` only when the surrounding network boundary is intentional. |
+| `TASKFLOW_METRICS_PORT` | `taskflow.metricsPort` | `9464` | TCP port. Port `0` is supported for test-managed ephemeral binding. |
+
+For a local coordinator, scrape with:
+
+```text
+curl http://127.0.0.1:9464/metrics
+```
+
+The Docker Compose coordinator binds the listener to `0.0.0.0` inside the
+container and publishes host port `9464`, so the same host URL works for the
+demo. The endpoint provides metrics only; health and readiness endpoints are a
+separate scope.
+
+### Exported metric contract
+
+All counters are process-lifetime values and reset on coordinator restart.
+Gauges describe the current in-process or durable state observed at scrape
+time. Histograms use seconds and fixed buckets. The exporter has no
+`job_id`, `task_id`, `assignment_id`, or `worker_id` labels; in fact, its only
+label is Prometheus' fixed `le` label on histogram buckets. Entity correlation
+remains in structured logs.
+
+| Metric | Type | Unit | Meaning |
+|---|---|---|---|
+| `taskflow_jobs_accepted_total` | counter | jobs | New jobs installed after durable acceptance. Authorized submission replay does not increment it. |
+| `taskflow_jobs_completed_total` | counter | jobs | Jobs whose successful terminal projection was applied. |
+| `taskflow_jobs_failed_total` | counter | jobs | Jobs whose unsuccessful terminal projection was applied. |
+| `taskflow_tasks_assigned_total` | counter | assignments | Task assignments installed after the authoritative assignment boundary. |
+| `taskflow_task_assignment_generations_total` | counter | generations | Authoritative task assignment generations created. It advances with `taskflow_tasks_assigned_total`; the separate name makes assignment fencing explicit. |
+| `taskflow_task_results_committed_total` | counter | results | Results accepted by the exact assignment fence and committed. |
+| `taskflow_task_results_stale_total` | counter | results | Results rejected as an obsolete assignment generation. |
+| `taskflow_task_results_duplicate_total` | counter | results | Repeated results classified as already committed. |
+| `taskflow_tasks_retried_total` | counter | retries | Failed attempts durably closed with another logical task retry permitted. |
+| `taskflow_task_lease_expirations_total` | counter | expirations | Current assignments durably closed after their leases expired. |
+| `taskflow_scheduler_mailbox_depth` | gauge | messages | Envelopes currently admitted to the scheduler mailbox. |
+| `taskflow_scheduler_pending_tasks` | gauge | tasks | Pending task entries currently indexed for dispatch. |
+| `taskflow_scheduler_due_deadlines` | gauge | deadline entries | Timeout and lease deadline entries scheduled and pending evaluation. This is index pressure, not only entries whose wall-clock deadline has already passed. |
+| `taskflow_outbox_pending` | gauge | rows | Pending durable coordinator broker-outbox rows. |
+| `taskflow_outbox_oldest_age_seconds` | gauge | seconds | Age of the oldest pending broker-outbox row; zero when no row is pending. |
+| `taskflow_broker_redeliveries_total` | counter | deliveries | Inbound broker deliveries observed with the broker redelivered flag or a delivery-attempt header greater than one. Each observed delivery increments at most once. |
+| `taskflow_broker_quarantined_total` | counter | deliveries | Failed deliveries whose automatic terminal-quarantine publication was broker-confirmed. |
+| `taskflow_worker_capacity_used` | gauge | capacity units | Capacity units reserved by current authoritative assignments, aggregated across workers. |
+| `taskflow_orphan_outputs_total` | counter | deletion operations | Output deletions completed after authoritative orphan classification. |
+| `taskflow_assignment_latency_seconds` | histogram | seconds | Time from the task's current pending eligibility timestamp to authoritative assignment creation. |
+| `taskflow_result_commit_latency_seconds` | histogram | seconds | Time from assignment start to authoritative task-result commit. |
+| `taskflow_recovery_duration_seconds` | histogram | seconds | Successful SQLite startup recovery duration. A run with unavailable or failed recovery contributes no observation. |
+
+If SQLite is disabled, unavailable, or cannot answer the scrape-time outbox
+aggregate, both outbox gauges are emitted as `NaN`, rather than presenting an
+unknown observation as zero. All other metric reads are process-local
+snapshots. Metrics do not alter scheduler decisions, broker settlement, or
+durable state.
 
 ## Current Event Map
 
@@ -38,9 +102,12 @@ Queue pressure and scheduler health:
   `taskflow_assignment_generations_total`,
   `taskflow_payload_integrity_failures_total`, `unknown_result_count`, and
   `result_storage_failure_count`. The five `taskflow_*_total` fields are
-  monotonic process-lifetime counters with stable names; they are log fields,
-  not an exported metrics-backend contract. Workload-index field semantics and
-  complexity are defined in [`SCHEDULER.md`](SCHEDULER.md).
+  monotonic process-lifetime counters with stable names. The three
+  task-result counters map directly to the exporter; the legacy assignment and
+  payload-integrity spellings remain log/snapshot fields. The exporter uses
+  `taskflow_task_assignment_generations_total` for its assignment-generation
+  contract. Workload-index field semantics and complexity are defined in
+  [`SCHEDULER.md`](SCHEDULER.md).
 - Coordinator `status summary`, `status jobs`, `status peers`, `status outbox`,
   `status queues`, and `status dlq` commands report persisted job/task state,
   retry and lease counts, last-known peers, pending coordinator outbox rows,
@@ -152,8 +219,9 @@ Task assignment, retry, and failure:
 - `orphan_output_gc_deferred` records listing, classification-state, retry-state,
   or unexpected failure for a pass. `orphan_output_gc_batch` reports examined,
   deleted, active, authoritative, ignored/preserved, failed, store-unavailable,
-  and configured-limit values. These bounded log fields are current evidence;
-  `taskflow_orphan_outputs_total` remains a Phase 6 exporter item.
+  and configured-limit values. These bounded log fields retain exact per-pass
+  evidence while `taskflow_orphan_outputs_total` exports the process-lifetime
+  completed-deletion count.
 - `task_lease_expired` records the exact assigned generation whose persisted
   lease expired before a result was accepted.
 - `peer_unavailable_tasks_released` records how many tasks were returned for
@@ -311,12 +379,13 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
 
 ## Current Limits
 
-Current observability is log-based plus command-line status inspection.
-Operators can grep logs for structured events or run the coordinator status
-command against SQLite/RabbitMQ state, but TaskFlow does not aggregate those
-events into a metrics backend or provide exporter or dashboard contracts. The
-stable fencing-counter names above do not have high-cardinality labels or
-metric exemplars; assignment correlation remains on structured log events.
+Current observability combines structured logs, command-line status inspection,
+and the bounded-label Prometheus endpoint above. Operators can scrape current
+coordinator metrics, grep logs for exact transition evidence, or run the
+coordinator status command against SQLite/RabbitMQ state. The exporter does not
+provide metric exemplars; assignment correlation remains on structured log
+events.
+
 Coordinator scheduler events always include `timestamp`,
 `coordinator_instance_id`, `outcome`, and `failure_reason_code`; applicable
 job/task/assignment fields follow the normative
@@ -332,34 +401,31 @@ RabbitMQ task assignments and final job results until they are marked sent.
 The status summary reports `FINALIZING` separately from ordinary `RUNNING`
 jobs so an interrupted aggregation boundary is visible to operators.
 TaskFlow DLQ commands emit decision logs and preserve redrive counts in broker
-headers, but TaskFlow still does not provide promoted lease dashboards, outbox
-dashboards, DLQ dashboards, or aggregated DLQ metrics. The status command is a
-terminal inspection surface, not a dashboard contract. Those remaining behaviors
-are deferred in the recovery and RabbitMQ scope documents.
+headers. The exporter aggregates observed broker redeliveries and confirmed
+automatic quarantine handoffs, but TaskFlow still does not provide promoted
+lease dashboards, outbox dashboards, a DLQ dashboard, or a durable per-message
+DLQ analytics store. The status command is a terminal inspection surface, not a
+dashboard contract. Those remaining behaviors are deferred in the recovery and
+RabbitMQ scope documents.
 
-## Metrics Backend Deferral
+## Metrics Backend Limits
 
-A dedicated metrics backend is deferred until at least one of these behavior
-tracks is implemented and needs promoted operational visibility:
+The coordinator endpoint is a scrape surface, not an embedded time-series
+database. It does not persist counter or histogram state across restarts,
+retain samples, evaluate alerts, authenticate clients, terminate TLS, or ship a
+dashboard. Deployments that expose it beyond loopback must supply their own
+network boundary and monitoring backend.
 
-- promoted lease or attempt-history dashboards;
-- promoted RabbitMQ outbox replay dashboards or metrics;
-- promoted DLQ dashboards or metrics beyond the current command output and
-  structured logs.
-
-Before adding a metrics exporter, define:
-
-- exporter mappings, units, and bounded label cardinality for the existing
-  fencing counters, plus names for any newly promoted metrics;
-- which log events remain canonical and which become metrics;
-- promoted lease and attempt-history metric contracts;
-- outbox and DLQ state transitions for RabbitMQ metrics;
-- focused tests that prove emitted metrics match scheduler and broker state.
+The endpoint deliberately exposes aggregates only. Exact job, task,
+assignment, and worker investigations use the structured event schema,
+SQLite attempt history, and status commands. Adding any label requires an
+explicit bounded-cardinality review and a test update; entity identifiers are
+prohibited as labels.
 
 ## Public Claim Rule
 
-Public docs should describe current observability as structured logs,
-log-based scheduler metrics, coordinator status commands, SQLite task-attempt
+Public docs may describe the coordinator's bounded-label Prometheus endpoint,
+structured logs, scheduler snapshots, status commands, SQLite task-attempt
 audit rows, SQLite task lease fields, and SQLite coordinator outbox rows. Avoid
 claiming built-in dashboards, alerting, tracing, promoted lease timelines,
 outbox dashboards, or DLQ dashboards until those systems exist and are tested.

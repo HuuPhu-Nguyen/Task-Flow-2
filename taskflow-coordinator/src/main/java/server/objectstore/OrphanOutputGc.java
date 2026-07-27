@@ -19,6 +19,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Periodically removes old, non-authoritative attempt outputs in bounded
@@ -36,6 +37,7 @@ public final class OrphanOutputGc implements AutoCloseable {
     private final ScheduledExecutorService executor;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private final AtomicLong orphanOutputsTotal = new AtomicLong();
 
     private String scanStartAfter;
 
@@ -204,6 +206,7 @@ public final class OrphanOutputGc implements AutoCloseable {
         try {
             objectStore.delete(objectKey);
             clearFailure(objectKey);
+            orphanOutputsTotal.incrementAndGet();
             result.deleted++;
             LOGGER.info(
                     "event=orphan_output_deleted object_key={} classification=orphan_candidate",
@@ -306,6 +309,20 @@ public final class OrphanOutputGc implements AutoCloseable {
             if (!stopped) {
                 throw new IllegalStateException(
                         "Orphan-output collector did not stop within the shutdown bound."
+                );
+            }
+        }
+    }
+
+    public MetricsSnapshot metricsSnapshot() {
+        return new MetricsSnapshot(orphanOutputsTotal.get());
+    }
+
+    public record MetricsSnapshot(long orphanOutputsTotal) {
+        public MetricsSnapshot {
+            if (orphanOutputsTotal < 0L) {
+                throw new IllegalArgumentException(
+                        "Orphan-output metric counter must not be negative"
                 );
             }
         }

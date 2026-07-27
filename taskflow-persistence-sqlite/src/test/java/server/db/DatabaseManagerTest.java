@@ -1251,6 +1251,10 @@ class DatabaseManagerTest {
                     BrokerOutboxStore.PendingOutboxCount.counted(1L),
                     db.countPendingBrokerOutbox()
             );
+            assertEquals(
+                    BrokerOutboxStore.PendingOutboxMetrics.observed(1L, 123L),
+                    db.observePendingBrokerOutbox()
+            );
             assertEquals(committed.outboxRecord().outboxId(), pending.getFirst().outboxId());
             assertEquals(123L, pending.getFirst().createdAt());
             assertEquals(TransportRoute.TASK_ASSIGN, pending.getFirst().message().route());
@@ -1287,6 +1291,10 @@ class DatabaseManagerTest {
                     BrokerOutboxStore.PendingOutboxCount.counted(0L),
                     reopened.countPendingBrokerOutbox()
             );
+            assertEquals(
+                    BrokerOutboxStore.PendingOutboxMetrics.observed(0L, 0L),
+                    reopened.observePendingBrokerOutbox()
+            );
         }
     }
 
@@ -1304,6 +1312,10 @@ class DatabaseManagerTest {
                 count.outcome()
         );
         assertEquals(0L, count.count());
+        assertEquals(
+                BrokerOutboxStore.PendingOutboxMetrics.storageFailure(),
+                db.observePendingBrokerOutbox()
+        );
     }
 
     @Test

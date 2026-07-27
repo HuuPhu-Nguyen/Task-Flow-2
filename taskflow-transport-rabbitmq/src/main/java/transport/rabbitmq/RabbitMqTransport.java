@@ -43,6 +43,7 @@ public class RabbitMqTransport implements BrokerTransport {
     private final RabbitMqRecoveryPolicy recoveryPolicy;
     private final Connection connection;
     private final Channel channel;
+    private final RabbitMqTransportMetrics metrics = new RabbitMqTransportMetrics();
     private final Map<String, CompletableFuture<Return>> mandatoryReturns = new ConcurrentHashMap<>();
     private final Map<String, Channel> consumerChannels = new ConcurrentHashMap<>();
 
@@ -447,8 +448,12 @@ public class RabbitMqTransport implements BrokerTransport {
                         config,
                         topology,
                         delivery,
-                        this::publishSettlementMessage
+                        this::publishSettlementMessage,
+                        metrics
                 );
+                if (delivery.getEnvelope().isRedeliver() || retry.deliveryAttempt() > 1) {
+                    metrics.recordRedelivery();
+                }
                 RabbitMqAcknowledgement acknowledgement = new RabbitMqAcknowledgement(
                         consumerChannel,
                         delivery.getEnvelope().getDeliveryTag(),
@@ -622,6 +627,10 @@ public class RabbitMqTransport implements BrokerTransport {
             consumerChannels.clear();
             connection.close();
         }
+    }
+
+    public RabbitMqTransportMetrics.Snapshot metricsSnapshot() {
+        return metrics.snapshot();
     }
 
     private static String stableConsumerTag(TransportRoute route) {

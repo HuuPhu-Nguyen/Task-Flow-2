@@ -273,6 +273,10 @@ public class TaskScheduler implements Runnable {
         return metrics.snapshot();
     }
 
+    public void recordRecoveryDuration(long durationMillis) {
+        metrics.recordRecoveryDuration(durationMillis);
+    }
+
     public SchedulerOverloadSnapshot getOverloadSnapshot() {
         return overloadStatus.snapshot();
     }

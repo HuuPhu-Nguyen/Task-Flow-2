@@ -124,6 +124,7 @@ class OrphanOutputGcTest {
             assertEquals(1, result.deleted());
             assertEquals(1, result.active());
             assertEquals(1, result.authoritative());
+            assertEquals(1L, gc.metricsSnapshot().orphanOutputsTotal());
             assertFalse(objects.contains(stale));
             assertTrue(objects.contains(active));
             assertTrue(objects.contains(authoritative));
@@ -165,12 +166,14 @@ class OrphanOutputGcTest {
             OrphanOutputGc.BatchResult unavailable = gc.runBatch();
             assertTrue(unavailable.storeUnavailable());
             assertEquals(1, unavailable.failed());
+            assertEquals(0L, gc.metricsSnapshot().orphanOutputsTotal());
             assertEquals(1, state.failures.get(key).attemptCount());
             assertTrue(objects.contains(key));
 
             objects.deleteAvailable = true;
             OrphanOutputGc.BatchResult recovered = gc.runBatch();
             assertEquals(1, recovered.deleted());
+            assertEquals(1L, gc.metricsSnapshot().orphanOutputsTotal());
             assertTrue(state.failures.isEmpty());
             assertFalse(objects.contains(key));
         }

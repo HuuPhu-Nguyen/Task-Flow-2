@@ -120,6 +120,10 @@ final class AttemptService {
         }
     }
 
+    void recordLeaseExpiration() {
+        metrics.recordLeaseExpiration();
+    }
+
     private void onAttemptFailure(AssignmentCapacityReservation reservation,
                                   boolean terminalFailure,
                                   String releaseReason) {

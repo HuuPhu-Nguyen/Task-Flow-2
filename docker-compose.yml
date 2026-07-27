@@ -67,10 +67,15 @@ services:
     build:
       context: .
     image: taskflow-demo:local
+    ports:
+      - "${TASKFLOW_METRICS_PORT:-9464}:${TASKFLOW_METRICS_PORT:-9464}"
     depends_on:
       rabbitmq:
         condition: service_healthy
     environment:
+      TASKFLOW_METRICS_ENABLED: ${TASKFLOW_METRICS_ENABLED:-true}
+      TASKFLOW_METRICS_HOST: ${TASKFLOW_METRICS_HOST:-0.0.0.0}
+      TASKFLOW_METRICS_PORT: ${TASKFLOW_METRICS_PORT:-9464}
       TASKFLOW_MINIO_ENDPOINT: http://minio:9000
       TASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
       TASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}

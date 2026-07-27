@@ -15,6 +15,9 @@ import server.db.BrokerOutboxStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
+import server.metrics.CoordinatorMetricsCollector;
+import server.metrics.MetricsEndpointConfig;
+import server.metrics.PrometheusMetricsEndpoint;
 import server.objectstore.OrphanOutputGc;
 import server.objectstore.OrphanOutputGcConfig;
 import server.rabbitmq.RabbitMqOutboxReplayer;
@@ -50,6 +53,7 @@ public class RabbitMqTaskCoordinatorServer {
     private static final long HEARTBEAT_TIMEOUT_MILLIS = 90_000;
 
     public static void main(String[] args) throws Exception {
+        MetricsEndpointConfig metricsConfig = MetricsEndpointConfig.fromRuntime();
         RabbitMqTransportConfig transportConfig = RabbitMqTransportConfig.fromEnvironment();
         RabbitMqRecoveryPolicy recoveryPolicy = RabbitMqRecoveryPolicy.fromEnvironment();
         RabbitMqTransportConnector startupConnector =
@@ -82,6 +86,9 @@ public class RabbitMqTaskCoordinatorServer {
         List<EmbarrassinglyParallelJob<?, ?>> resumedJobs = List.of();
         Map<String, String> resumedJobTokenHashes = Map.of();
         Map<String, String> resumedJobIdentityKeys = Map.of();
+        long recoveryStartedAt = clock.nowEpochMillis();
+        long recoveryDurationMillis = 0L;
+        boolean recoveryObserved = false;
         try {
             db = new DatabaseManager();
             LOGGER.info("event=database_initialized path={}", DatabaseManager.DB_PATH);
@@ -99,6 +106,11 @@ public class RabbitMqTaskCoordinatorServer {
                 resumedJobs = recovery.resumedJobs();
                 resumedJobTokenHashes = recovery.requesterTokenHashes();
                 resumedJobIdentityKeys = recovery.requesterIdentityKeys();
+                recoveryDurationMillis = Math.max(
+                        0L,
+                        clock.nowEpochMillis() - recoveryStartedAt
+                );
+                recoveryObserved = true;
             }
         } catch (Exception e) {
             if (db != null) {
@@ -120,6 +132,9 @@ public class RabbitMqTaskCoordinatorServer {
                 clock,
                 assignmentIdGenerator
         );
+        if (recoveryObserved) {
+            schedulerLogic.recordRecoveryDuration(recoveryDurationMillis);
+        }
         schedulerLogic.restoreJobs(resumedJobs, resumedJobTokenHashes, resumedJobIdentityKeys);
         DatabaseManager finalDb = db;
         if (finalDb != null) {
@@ -134,6 +149,16 @@ public class RabbitMqTaskCoordinatorServer {
                         () -> refreshPendingOutboxPressure(schedulerLogic, finalDb)
                 );
         OrphanOutputGc orphanOutputGc = createOrphanOutputGc(finalDb, clock);
+        PrometheusMetricsEndpoint metricsEndpoint = new PrometheusMetricsEndpoint(
+                metricsConfig,
+                new CoordinatorMetricsCollector(
+                        schedulerLogic,
+                        transport,
+                        finalDb,
+                        orphanOutputGc,
+                        clock
+                )
+        );
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,
@@ -167,6 +192,7 @@ public class RabbitMqTaskCoordinatorServer {
                 transport,
                 List.of(jobSubmitConsumerTag, taskResultConsumerTag, heartbeatConsumerTag),
                 monitor::shutdown,
+                metricsEndpoint,
                 orphanOutputGc,
                 finalOutboxReplayer,
                 schedulerLogic::requestShutdownAfterDrain,
@@ -179,6 +205,7 @@ public class RabbitMqTaskCoordinatorServer {
             throw new IllegalStateException("startup connector released an unexpected transport");
         }
 
+        metricsEndpoint.start();
         monitor.start();
         schedulerThread.start();
         if (orphanOutputGc != null) {

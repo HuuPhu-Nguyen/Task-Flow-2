@@ -45,6 +45,49 @@ public interface BrokerOutboxStore {
         }
     }
 
+    record PendingOutboxMetrics(
+            PendingOutboxCountOutcome outcome,
+            long count,
+            long oldestCreatedAt
+    ) {
+        public PendingOutboxMetrics {
+            outcome = outcome == null
+                    ? PendingOutboxCountOutcome.STORAGE_FAILURE
+                    : outcome;
+            if (count < 0L || oldestCreatedAt < 0L) {
+                throw new IllegalArgumentException(
+                        "Pending outbox metrics must not be negative"
+                );
+            }
+            if ((outcome == PendingOutboxCountOutcome.STORAGE_FAILURE || count == 0L)
+                    && oldestCreatedAt != 0L) {
+                throw new IllegalArgumentException(
+                        "Only a non-empty observed outbox may have an oldest creation time"
+                );
+            }
+        }
+
+        public static PendingOutboxMetrics observed(long count, long oldestCreatedAt) {
+            return new PendingOutboxMetrics(
+                    PendingOutboxCountOutcome.COUNTED,
+                    count,
+                    count == 0L ? 0L : oldestCreatedAt
+            );
+        }
+
+        public static PendingOutboxMetrics storageFailure() {
+            return new PendingOutboxMetrics(
+                    PendingOutboxCountOutcome.STORAGE_FAILURE,
+                    0L,
+                    0L
+            );
+        }
+
+        public boolean observed() {
+            return outcome == PendingOutboxCountOutcome.COUNTED;
+        }
+    }
+
     record OutboxMessage(TransportRoute route,
                          String peerNodeId,
                          String fromNodeId,
@@ -260,6 +303,20 @@ public interface BrokerOutboxStore {
     List<OutboxRecord> loadPendingBrokerOutbox(int limit);
 
     PendingOutboxCount countPendingBrokerOutbox();
+
+    default PendingOutboxMetrics observePendingBrokerOutbox() {
+        PendingOutboxCount count = countPendingBrokerOutbox();
+        if (count == null || !count.counted()) {
+            return PendingOutboxMetrics.storageFailure();
+        }
+        if (count.count() == 0L) {
+            return PendingOutboxMetrics.observed(0L, 0L);
+        }
+        List<OutboxRecord> oldest = loadPendingBrokerOutbox(1);
+        return oldest == null || oldest.isEmpty()
+                ? PendingOutboxMetrics.storageFailure()
+                : PendingOutboxMetrics.observed(count.count(), oldest.getFirst().createdAt());
+    }
 
     boolean markBrokerOutboxPublished(long outboxId, long publishedAt);
 

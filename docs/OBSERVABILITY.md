@@ -146,6 +146,9 @@ operational events retain their existing component-specific fields. They must
 still obey the no-secret/no-full-payload rule, but a
 `coordinator_instance_id` would be meaningless for participant-only events.
 
-Metrics export is TF-0602 scope. Health/readiness is TF-0603 scope, and the
-one-command stale-result demonstration is TF-0604 scope. This document does
-not claim those later Phase 6 items.
+The coordinator's aggregate, bounded-label metrics are exported at
+`GET /metrics`; names, units, lifecycle semantics, configuration, and
+cardinality constraints are defined in
+[Observability scope](OBSERVABILITY_SCOPE.md). Health/readiness is TF-0603
+scope, and the one-command stale-result demonstration is TF-0604 scope. This
+document does not claim those later Phase 6 items.
