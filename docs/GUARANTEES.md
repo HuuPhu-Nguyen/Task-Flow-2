@@ -335,6 +335,25 @@ All methods run unchanged in the SQLite binding. Generated event sequences,
 process-kill windows, and end-to-end chaos remain with their later Phase 7
 owners.
 
+The reusable broker suite adds adapter-neutral live evidence for I5 through
+[`BrokerTransportContractTest#publisherConfirmsAcceptedPublication`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+and
+[`#unroutablePeerPublicationIsDetected`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java);
+for I6 through
+[`#consumerDeathRedeliversUnacknowledgedMessage`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+and
+[`#duplicateDeliveriesAcceptDuplicateClassification`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java);
+for I8 through
+[`#delayedRetryUsesBoundedConfiguredStages`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+and
+[`#retryExhaustionQuarantinesExactlyOnce`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java);
+and for I10's restored-broker assumption through
+[`#establishedTransportReconnectsAfterBrokerRestart`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java).
+The ninth method proves the configured durable shared versus ephemeral peer
+topology contract across a second real restart. All methods run unchanged in
+the RabbitMQ binding; broker clustering, offline-peer durability, and
+process-kill coordinator windows remain outside this suite.
+
 Fencing observability evidence is explicit as well:
 [`SchedulerMetricsTest#exposesExactFencingMetricNamesAndTypedCounters`](../taskflow-core/src/test/java/server/scheduler/SchedulerMetricsTest.java)
 fixes the four counter names, while

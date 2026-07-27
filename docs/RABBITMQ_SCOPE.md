@@ -27,6 +27,15 @@ limit. Managed evidence now covers initial broker unavailability and a real
 single-broker stop/restart during active work. TF-0301 removed the legacy
 socket runtime and transport selector from supported builds and releases.
 
+The reusable
+[`BrokerTransportContractTest`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+now fixes the broker boundary in nine inherited black-box methods.
+[`RabbitMqBrokerContractTest`](../taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqBrokerContractTest.java)
+supplies only RabbitMQ adapter construction, Testcontainers/Toxiproxy
+lifecycle, bounded management inspection, and topology names. It overrides no
+behavioral test. This is test reuse around the existing `BrokerTransport`
+boundary, not a second runtime transport or a generic transport framework.
+
 ## Current RabbitMQ Guarantees
 
 The current RabbitMQ path includes:
@@ -178,10 +187,19 @@ The current RabbitMQ path includes:
   not block task-result delivery, a capacity-`1` submission flood cannot
   exclude an accepted fenced result, active-limit overflow returns typed
   rejection, and cleanup permits a fresh job without coordinator restart.
+- The reusable managed contract proves, in one isolated Testcontainers run,
+  confirmed accepted publication; mandatory unroutable detection; explicit
+  manual acknowledgement ownership; redelivery after consumer connection
+  death; configured delayed retry; exactly one quarantine entry after exact
+  exhaustion; harmless duplicate classification; established-client recovery
+  after a broker-process restart; and persistence of durable shared topology
+  plus a queued persistent message across a second restart. It also inspects
+  peer endpoints as exclusive, auto-delete, and non-durable.
 - A dedicated GitHub Actions RabbitMQ integration job starts a
   `rabbitmq:3.13-management` service container and runs the focused live
-  transport/coordinator gates, including the managed stop/restart scenario,
-  plus command-line participant and JavaFX GUI RabbitMQ service-adapter tests.
+  transport/coordinator gates, including the reusable managed contract and
+  the coordinator managed stop/restart scenario, plus command-line participant
+  and JavaFX GUI RabbitMQ service-adapter tests.
 - Focused service-adapter failure-path tests cover command-line requester
   publish exceptions, JavaFX RabbitMQ startup heartbeat publish failure,
   transient task-result publish failure, deterministic task-execution poison
@@ -227,6 +245,21 @@ TaskFlow does not yet provide:
 
 Because these pieces are missing, docs should keep RabbitMQ language scoped to
 the tested behavior above.
+
+## Reusable Contract Command
+
+With Docker available, run the RabbitMQ binding and all nine inherited methods:
+
+```powershell
+.\mvnw.cmd -pl taskflow-transport-rabbitmq -am test "-Dtest=RabbitMqBrokerContractTest" "-Dtaskflow.rabbitmq.live=true" "-Dsurefire.failIfNoSpecifiedTests=false"
+```
+
+The fixture starts and removes one RabbitMQ management container, one
+Toxiproxy container, and their isolated network. Unique topology namespaces
+separate methods. Two methods stop and restart the real broker process while
+the stable proxy remains available. The ordinary fast reactor leaves this
+managed suite disabled unless the existing live-test property or environment
+flag is set.
 
 ## Gates For Supported Runtime Status
 

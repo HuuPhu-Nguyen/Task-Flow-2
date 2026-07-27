@@ -198,6 +198,17 @@ and outbox replay state. A future state-store adapter must supply lifecycle and
 previous-schema/outbox-fault fixture hooks and pass the same behavioral
 methods; the fixture adds no JUnit dependency to runtime classpaths.
 
+Broker behavior has the same reusable proof boundary:
+[`BrokerTransportContractTest`](taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+defines nine black-box methods for confirmed/routable publication, manual
+settlement and consumer-death redelivery, bounded retry/quarantine, duplicate
+tolerance, reconnect, and durable-versus-ephemeral topology. The
+[`RabbitMqBrokerContractTest`](taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqBrokerContractTest.java)
+binding runs those methods unchanged against one managed
+RabbitMQ/Testcontainers broker behind a stable Toxiproxy endpoint. The SPI
+fixture remains test-only; it does not add a second supported transport or a
+runtime abstraction.
+
 New submissions are admitted only while the configured active-job,
 active-task, submitted-task, inline-byte, per-reference byte, and pending
 SQLite-outbox limits allow them. Exact idempotent replay is classified before

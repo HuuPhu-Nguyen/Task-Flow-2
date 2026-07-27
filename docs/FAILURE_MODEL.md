@@ -257,6 +257,43 @@ commit, previous-schema migration, and durable outbox failure/publish/reopen
 state. SQLite-specific trigger-fault and concurrency tests remain linked in
 the matrix above; process-kill seams remain TF-0705.
 
+<a id="tf-0702--add-reusable-broker-contract-tests"></a>
+### TF-0702 — Broker contract proof
+
+The reusable
+[`BrokerTransportContractTest`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+runs all nine behavioral methods unchanged through
+[`RabbitMqBrokerContractTest`](../taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqBrokerContractTest.java)
+under managed RabbitMQ and Toxiproxy:
+
+- [`#publisherConfirmsAcceptedPublication`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  binds successful return to broker-confirmed delivery.
+- [`#unroutablePeerPublicationIsDetected`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  observes failure from a mandatory peer publish without a binding.
+- [`#manualAcknowledgementOwnsDeliverySettlement`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  observes one unacknowledged delivery until the test explicitly settles it.
+- [`#consumerDeathRedeliversUnacknowledgedMessage`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  closes the first consumer connection and requires the replacement consumer
+  to observe RabbitMQ's redelivery classification.
+- [`#delayedRetryUsesBoundedConfiguredStages`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  uses the configured TTL delay and stops after the second handler accepts.
+- [`#retryExhaustionQuarantinesExactlyOnce`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  exhausts the exact configured processing-attempt count and inspects one
+  terminal quarantine entry with route/reason/disposition metadata.
+- [`#duplicateDeliveriesAcceptDuplicateClassification`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  settles two copies of one logical event through the duplicate disposition
+  without quarantine.
+- [`#establishedTransportReconnectsAfterBrokerRestart`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  stops/restarts the broker behind a stable endpoint and requires the original
+  transport and consumer to recover.
+- [`#durableTopologyAndPersistentMessageSurviveBrokerRestart`](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  inspects durable shared resources, ephemeral peer resources, and one queued
+  persistent message after a second real broker restart.
+
+The binding owns infrastructure lifecycle and bounded broker inspection only.
+It does not replace coordinator/SQLite crash-window tests, prove clustered
+failover, or make ephemeral offline-peer routes durable.
+
 <a id="tf-0705--automate-the-crash-window-matrix"></a>
 ### TF-0705 — Process/failpoint crash-window proof
 

@@ -76,7 +76,7 @@ jobs:
           -pl taskflow-transport-rabbitmq,taskflow-coordinator,taskflow-peer,taskflow-gui
           -am
           -Dtaskflow.rabbitmq.live=true
-          -Dtest=RabbitMqTransportLiveTest,RabbitMqCoordinatorLiveIntegrationTest,RabbitMqCoordinatorShutdownLiveIntegrationTest,RabbitMqBrokerRecoveryIntegrationTest,PeerNodeTest,RabbitMqJobSubmissionClientTest,RabbitMqCoordinatorConnectionTest
+          -Dtest=RabbitMqBrokerContractTest,RabbitMqTransportLiveTest,RabbitMqCoordinatorLiveIntegrationTest,RabbitMqCoordinatorShutdownLiveIntegrationTest,RabbitMqBrokerRecoveryIntegrationTest,PeerNodeTest,RabbitMqJobSubmissionClientTest,RabbitMqCoordinatorConnectionTest
           -Dsurefire.failIfNoSpecifiedTests=false
           test
         env:

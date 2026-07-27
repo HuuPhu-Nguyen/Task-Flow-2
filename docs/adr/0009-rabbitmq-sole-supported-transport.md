@@ -90,6 +90,8 @@ not invalidate the decision.
 - [Failure model](../FAILURE_MODEL.md)
 - `RabbitMqOnlyRuntimeArchitectureTest`
 - `TaskCoordinatorServerTest`, `PeerNodeTest`, and `PeerAppLauncherTest`
+- `taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java`
+- `taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqBrokerContractTest.java`
 - `taskflow-transport-rabbitmq`
 
 ## Related Documents

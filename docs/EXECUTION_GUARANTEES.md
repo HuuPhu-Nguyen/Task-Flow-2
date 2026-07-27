@@ -161,7 +161,13 @@ nodes may enable the requester role, executor role, or both.
   identity, and terminal job completion is persisted once.
 - Focused adapter evidence covers
   [persistent delivery mode and durable-versus-ephemeral topology](../taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqTransportPublishConfirmTest.java),
-  while the
+  while the reusable
+  [broker contract](../taskflow-spi/src/test/java/transport/BrokerTransportContractTest.java)
+  runs unchanged through the
+  [RabbitMQ/Testcontainers binding](../taskflow-transport-rabbitmq/src/test/java/transport/rabbitmq/RabbitMqBrokerContractTest.java)
+  for confirms, mandatory returns, manual settlement, redelivery, bounded
+  retry/quarantine, duplicates, reconnect, and durable restart behavior,
+  and the
   [coordinator live suite](../taskflow-coordinator/src/test/java/server/rabbitmq/RabbitMqCoordinatorLiveIntegrationTest.java)
   covers confirmed success, connection loss, mandatory return, failed sent
   marking, and identical duplicate replay against RabbitMQ and SQLite.
