@@ -187,6 +187,17 @@ conditional writes remain the correctness authority.
 
 Scheduler persistence goes through `server.db.JobStateStore`; the current implementation is the SQLite-backed `DatabaseManager` in `taskflow-persistence-sqlite`. Initial job and task persistence is transactional: if a configured state store cannot persist a new job at startup, the scheduler rejects that submission with a failed `JOB_RESULT` instead of dispatching untracked work. A client-supplied `jobId` is an idempotency key scoped to the existing requester-token hash plus optional verified requester public key. Schema-v12 submissions atomically store a versioned canonical request hash with the job and task set. Repeating the same owner, job ID, task type, parameter, and ordered canonical payload list creates no tasks and returns the existing running status or terminal result; a changed request is an idempotency conflict, a changed owner is an ownership conflict, and pre-v12 rows with no trustworthy original request hash are rejected as unverifiable legacy collisions.
 
+The reusable
+[`PersistenceContractTest`](taskflow-core/src/test/java/server/db/PersistenceContractTest.java)
+is published only through the core test fixture. Its 14 inherited tests run
+unchanged against the
+[`SqlitePersistenceContractTest`](taskflow-persistence-sqlite/src/test/java/server/db/SqlitePersistenceContractTest.java)
+binding and fix atomic job/task and outbox transitions, idempotency,
+generation fencing, retry/terminal monotonicity, reopen recovery, migration,
+and outbox replay state. A future state-store adapter must supply lifecycle and
+previous-schema/outbox-fault fixture hooks and pass the same behavioral
+methods; the fixture adds no JUnit dependency to runtime classpaths.
+
 New submissions are admitted only while the configured active-job,
 active-task, submitted-task, inline-byte, per-reference byte, and pending
 SQLite-outbox limits allow them. Exact idempotent replay is classified before

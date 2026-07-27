@@ -75,6 +75,8 @@ invalidate this decision.
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
 - `taskflow-core/src/main/java/server/db/JobStateStore.java`
+- `taskflow-core/src/test/java/server/db/PersistenceContractTest.java`
+- `taskflow-persistence-sqlite/src/test/java/server/db/SqlitePersistenceContractTest.java`
 - `taskflow-persistence-sqlite`
 
 ## Related Documents

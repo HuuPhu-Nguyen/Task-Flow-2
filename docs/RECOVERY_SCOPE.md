@@ -148,6 +148,26 @@ Covered behavior:
   `lease_expired` and schedules retry or terminal failure according to the
   normal retry limit.
 
+## Reusable Persistence Contract
+
+[`PersistenceContractTest`](../taskflow-core/src/test/java/server/db/PersistenceContractTest.java)
+is the adapter-neutral JUnit contract for `JobStateStore` plus its transactional
+`BrokerOutboxStore` companion. The core module publishes it only as a test JAR;
+[`SqlitePersistenceContractTest`](../taskflow-persistence-sqlite/src/test/java/server/db/SqlitePersistenceContractTest.java)
+supplies the SQLite open/reopen, schema-version, previous-schema, and outbox
+fault-fixture hooks without overriding any behavioral test.
+
+The 14 inherited methods prove atomic job/task creation; exact submission
+replay and conflict typing; pending-only assignment; monotonic generation
+after persisted retry; assignment/outbox identity; matching, duplicate, and
+stale result classifications; terminal monotonicity; terminal job/final
+outbox identity; accepted-job restart; unexpired/expired lease restart;
+schema migration with accepted work intact; and durable outbox
+failure/publish/reopen transitions. Existing SQLite fault-injection and
+concurrency tests remain complementary adapter evidence. The reusable suite
+does not claim OS process-kill timing, broker behavior, multi-writer safety, or
+support for a second database.
+
 ## PostgreSQL/Flyway Deferral
 
 PostgreSQL/Flyway is not implemented.
@@ -162,7 +182,8 @@ Reconsider it only when at least one of these requirements exists:
 
 If PostgreSQL/Flyway is accepted later, it should implement the same
 `JobStateStore` recovery contract as SQLite, including attempt history and any
-lease extensions already accepted. It should not change public recovery
+lease extensions already accepted, and run the reusable contract without
+changing its behavioral methods. It should not change public recovery
 guarantees by itself.
 
 ## Public Claim Rule
