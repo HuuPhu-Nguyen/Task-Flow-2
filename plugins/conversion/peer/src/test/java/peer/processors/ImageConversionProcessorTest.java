@@ -6,6 +6,7 @@ import objectstore.ObjectListing;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.PayloadIntegrityException;
 import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 import protocol.PayloadLimits;
@@ -18,11 +19,15 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -34,7 +39,7 @@ class ImageConversionProcessorTest {
     void downloadsReferencedInputByObjectKey() throws Exception {
         byte[] inputBytes = pngBytes();
         MemoryObjectStore store = new MemoryObjectStore();
-        ObjectReference reference = reference(inputBytes.length);
+        ObjectReference reference = reference(inputBytes);
         store.put(reference, new ByteArrayInputStream(inputBytes));
         FilePayload input = new FilePayload("sample.png", null, reference);
 
@@ -52,7 +57,7 @@ class ImageConversionProcessorTest {
     void rejectsOutputAtExclusiveInlineBoundaryUntilObjectResultsExist() throws Exception {
         byte[] inputBytes = pngBytes();
         MemoryObjectStore store = new MemoryObjectStore();
-        ObjectReference reference = reference(inputBytes.length);
+        ObjectReference reference = reference(inputBytes);
         store.put(reference, new ByteArrayInputStream(inputBytes));
         FilePayload input = new FilePayload("sample.png", null, reference);
         System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
@@ -66,6 +71,34 @@ class ImageConversionProcessorTest {
         } finally {
             System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
         }
+    }
+
+    @Test
+    void rejectsCorruptReferencedInputBeforeImageProcessing() throws Exception {
+        byte[] expected = pngBytes();
+        byte[] corrupt = expected.clone();
+        corrupt[corrupt.length - 1] ^= 1;
+        MemoryObjectStore store = new MemoryObjectStore();
+        ObjectReference reference = reference(expected);
+        store.put(reference, new ByteArrayInputStream(corrupt));
+        FilePayload input = new FilePayload("sample.png", null, reference);
+        AtomicInteger decodeInvocations = new AtomicInteger();
+        ImageConversionProcessor processor = new ImageConversionProcessor(() -> store) {
+            @Override
+            BufferedImage decode(byte[] rawBytes, String inputFileName) throws IOException {
+                decodeInvocations.incrementAndGet();
+                return super.decode(rawBytes, inputFileName);
+            }
+        };
+
+        PayloadIntegrityException failure = assertThrows(
+                PayloadIntegrityException.class,
+                () -> processor.process(task(input))
+        );
+
+        assertEquals(PayloadIntegrityException.Mismatch.SHA256, failure.mismatch());
+        assertEquals(reference.key(), store.lastGetKey);
+        assertEquals(0, decodeInvocations.get());
     }
 
     @Test
@@ -124,13 +157,23 @@ class ImageConversionProcessorTest {
         return image;
     }
 
-    private static ObjectReference reference(long contentLength) {
+    private static ObjectReference reference(byte[] content) {
         return new ObjectReference(
                 TaskFlowObjectKeys.objectKey("inputs", "image-test"),
-                contentLength,
-                "0".repeat(64),
+                content.length,
+                sha256(content),
                 "image/png"
         );
+    }
+
+    private static String sha256(byte[] content) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(content)
+            );
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 must be available.", e);
+        }
     }
 
     private static final class MemoryObjectStore implements ObjectStore {

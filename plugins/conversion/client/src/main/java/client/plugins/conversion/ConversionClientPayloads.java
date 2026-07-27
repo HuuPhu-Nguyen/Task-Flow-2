@@ -5,11 +5,11 @@ import conversion.model.FilePayload;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreProvider;
+import objectstore.PayloadIntegrityVerifier;
 import objectstore.TaskFlowObjectKeys;
 import protocol.PayloadLimits;
 import protocol.SafeFileNames;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -152,10 +152,15 @@ final class ConversionClientPayloads {
         if (objectStore == null) {
             throw new IOException("Object storage is required for " + input.fileName() + ".");
         }
+        ContentMetadata metadata = contentMetadata(input.path());
+        if (metadata.contentLength() > PayloadLimits.maxInputBytes()) {
+            throw new IOException("Input file exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
+                    + " (" + PayloadLimits.maxInputBytes() + " bytes): " + input.fileName());
+        }
         ObjectReference expected = new ObjectReference(
                 TaskFlowObjectKeys.objectKey("inputs", UUID.randomUUID().toString()),
-                input.size(),
-                sha256(input.path()),
+                metadata.contentLength(),
+                metadata.sha256(),
                 contentType(input.path())
         );
         try (InputStream content = Files.newInputStream(input.path())) {
@@ -178,7 +183,11 @@ final class ConversionClientPayloads {
             }
             try (ObjectStore objectStore = objectStoreProvider.open();
                  InputStream content = objectStore.get(reference.key())) {
-                return readBounded(content, maxBytes, payload.fileName());
+                return PayloadIntegrityVerifier.readVerified(
+                        content,
+                        reference,
+                        maxBytes
+                );
             }
         }
 
@@ -195,25 +204,7 @@ final class ConversionClientPayloads {
         return data;
     }
 
-    private static byte[] readBounded(InputStream content,
-                                      long maxBytes,
-                                      String fileName) throws IOException {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[COPY_BUFFER_BYTES];
-        long total = 0L;
-        int read;
-        while ((read = content.read(buffer)) != -1) {
-            if (PayloadLimits.wouldExceed(total, read, maxBytes)) {
-                throw new IOException("Result object exceeds " + PayloadLimits.MAX_RESULT_BYTES_ENV
-                        + " (" + maxBytes + " bytes): " + fileName);
-            }
-            output.write(buffer, 0, read);
-            total += read;
-        }
-        return output.toByteArray();
-    }
-
-    private static String sha256(Path path) throws IOException {
+    private static ContentMetadata contentMetadata(Path path) throws IOException {
         MessageDigest digest;
         try {
             digest = MessageDigest.getInstance("SHA-256");
@@ -221,13 +212,22 @@ final class ConversionClientPayloads {
             throw new IllegalStateException("SHA-256 must be available.", e);
         }
         byte[] buffer = new byte[COPY_BUFFER_BYTES];
+        long contentLength = 0L;
         try (InputStream content = Files.newInputStream(path)) {
             int read;
             while ((read = content.read(buffer)) != -1) {
+                if (contentLength > Long.MAX_VALUE - read) {
+                    throw new IOException("Input length exceeds the supported range: "
+                            + path.getFileName());
+                }
                 digest.update(buffer, 0, read);
+                contentLength += read;
             }
         }
-        return HexFormat.of().formatHex(digest.digest());
+        return new ContentMetadata(
+                contentLength,
+                HexFormat.of().formatHex(digest.digest())
+        );
     }
 
     private static String contentType(Path path) throws IOException {
@@ -304,5 +304,8 @@ final class ConversionClientPayloads {
     }
 
     private record InputFile(Path path, String fileName, long size) {
+    }
+
+    private record ContentMetadata(long contentLength, String sha256) {
     }
 }

@@ -8,6 +8,7 @@ import objectstore.ObjectListing;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.PayloadIntegrityException;
 import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,7 +19,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
@@ -215,7 +219,7 @@ class ConversionClientPluginTest {
         MemoryObjectStore store = new MemoryObjectStore();
         ObjectReference reference = reference(
                 TaskFlowObjectKeys.objectKey("results", "test"),
-                outputBytes.length
+                outputBytes
         );
         store.put(reference, new ByteArrayInputStream(outputBytes));
         FilePayload result = new FilePayload("../escape.txt", null, reference);
@@ -224,6 +228,29 @@ class ConversionClientPluginTest {
                 .saveResults(List.<Object>of(result), outputDir);
 
         assertArrayEquals(outputBytes, Files.readAllBytes(outputDir.resolve("escape.txt")));
+    }
+
+    @Test
+    void rejectsCorruptObjectResultBeforeWritingOutput() throws Exception {
+        byte[] expected = new byte[]{9, 8, 7};
+        byte[] corrupt = new byte[]{9, 8, 6};
+        Path outputDir = tempDir.resolve("corrupt-out");
+        MemoryObjectStore store = new MemoryObjectStore();
+        ObjectReference reference = reference(
+                TaskFlowObjectKeys.objectKey("results", "corrupt"),
+                expected
+        );
+        store.put(reference, new ByteArrayInputStream(corrupt));
+        FilePayload result = new FilePayload("corrupt.png", null, reference);
+
+        PayloadIntegrityException failure = assertThrows(
+                PayloadIntegrityException.class,
+                () -> new ImageConversionClientPlugin(() -> store)
+                        .saveResults(List.<Object>of(result), outputDir)
+        );
+
+        assertEquals(PayloadIntegrityException.Mismatch.SHA256, failure.mismatch());
+        assertFalse(Files.exists(outputDir.resolve("corrupt.png")));
     }
 
     @Test
@@ -268,13 +295,23 @@ class ConversionClientPluginTest {
         }
     }
 
-    private static ObjectReference reference(String key, long size) {
+    private static ObjectReference reference(String key, byte[] content) {
         return new ObjectReference(
                 key,
-                size,
-                "0".repeat(64),
+                content.length,
+                sha256(content),
                 "application/octet-stream"
         );
+    }
+
+    private static String sha256(byte[] content) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(content)
+            );
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 must be available.", e);
+        }
     }
 
     private static final class MemoryObjectStore implements ObjectStore {

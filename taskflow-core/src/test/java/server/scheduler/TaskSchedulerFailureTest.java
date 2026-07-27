@@ -7,6 +7,7 @@ import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.PeerDisconnectedMessage;
 import protocol.TaskAssignMessage;
+import protocol.TaskFailureClassification;
 import protocol.TaskResultMessage;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
@@ -1035,6 +1036,59 @@ class TaskSchedulerFailureTest {
     }
 
     @Test
+    void permanentPayloadIntegrityFailureTerminatesWithoutReplacementAssignment() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_TASK_RETRIES", "5"
+        ));
+        InMemoryPeerRegistry registry = new InMemoryPeerRegistry();
+        PeerInfo peer = new PeerInfo("peer-1", config, List.of("TEST_TASK"));
+        registry.register(peer.getNodeId(), peer);
+        MultiAssignmentOutput output = new MultiAssignmentOutput();
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, null, output, config);
+        Thread schedulerThread = new Thread(scheduler, "scheduler-integrity-failure-test");
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-integrity-failure", List.of("payload")),
+                    "requester-1"
+            ));
+            MultiAssignmentOutput.Assignment assignment = output.awaitAssignment();
+            assertNotNull(assignment);
+            TaskResultMessage corrupt = new TaskResultMessage(
+                    "peer-1",
+                    "2026-07-27T00:00:00Z",
+                    assignment.task().getTaskId(),
+                    assignment.task().getJobId(),
+                    assignment.task().getAttemptNumber(),
+                    assignment.task().getAssignmentId(),
+                    null,
+                    false,
+                    "Object payload SHA-256 mismatch.",
+                    TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY
+            );
+
+            mailbox.put(new MessageEnvelope(corrupt, "peer-1"));
+
+            assertTrue(output.awaitResult());
+            assertFalse(output.result().isSuccessful());
+            assertTrue(output.result().getErrorMessage().contains(
+                    "permanent payload-integrity"
+            ));
+            assertEquals(null, output.awaitAssignment(200));
+            assertEquals(0L, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(1L, scheduler.getMetricsSnapshot().failureCount());
+            assertEquals(1L, scheduler.getMetricsSnapshot().terminalFailureCount());
+            assertEquals(1L,
+                    scheduler.getMetricsSnapshot().payloadIntegrityFailuresTotal());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
     void taskTimeoutAtRetryLimitReturnsFailedJobResult() throws Exception {
         BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
         MutableClock clock = new MutableClock(2_000_000L);
@@ -1270,6 +1324,10 @@ class TaskSchedulerFailureTest {
 
         Assignment awaitAssignment() throws InterruptedException {
             return assignments.poll(2, TimeUnit.SECONDS);
+        }
+
+        Assignment awaitAssignment(long timeoutMillis) throws InterruptedException {
+            return assignments.poll(timeoutMillis, TimeUnit.MILLISECONDS);
         }
 
         boolean awaitResult() throws InterruptedException {

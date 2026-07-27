@@ -95,6 +95,8 @@ final class SchedulerMetricsService {
                 snapshot.taskResultsDuplicateTotal(),
                 SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME,
                 snapshot.assignmentGenerationsTotal(),
+                SchedulerMetrics.PAYLOAD_INTEGRITY_FAILURES_TOTAL_NAME,
+                snapshot.payloadIntegrityFailuresTotal(),
                 "taskflow_capacity_snapshots_accepted_total",
                 capacity.acceptedSnapshots(),
                 "taskflow_capacity_snapshots_stale_total",

@@ -52,12 +52,14 @@ final class TaskTransitionDecisions {
                                        int attemptNumber,
                                        String assignmentId,
                                        int maxRetries,
+                                       boolean retryable,
                                        long occurredAtMillis) {
         return stateMachine.decide(
                 snapshot(task),
                 new SchedulerEvent.TaskExecutionFailed(
                         identity(attemptNumber, assignmentId, workerId),
                         maxRetries,
+                        retryable,
                         occurredAtMillis
                 )
         );

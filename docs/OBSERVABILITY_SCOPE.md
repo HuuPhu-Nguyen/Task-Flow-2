@@ -32,8 +32,9 @@ Queue pressure and scheduler health:
   `taskflow_task_results_committed_total`,
   `taskflow_task_results_stale_total`,
   `taskflow_task_results_duplicate_total`,
-  `taskflow_assignment_generations_total`, `unknown_result_count`, and
-  `result_storage_failure_count`. The four `taskflow_*_total` fields are
+  `taskflow_assignment_generations_total`,
+  `taskflow_payload_integrity_failures_total`, `unknown_result_count`, and
+  `result_storage_failure_count`. The five `taskflow_*_total` fields are
   monotonic process-lifetime counters with stable names; they are log fields,
   not an exported metrics-backend contract. Workload-index field semantics and
   complexity are defined in [`SCHEDULER.md`](SCHEDULER.md).
@@ -112,7 +113,16 @@ Task assignment, retry, and failure:
   failure receives bounded delayed retry through the scheduler's
   processing-failure path.
 - `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
-  attempts with `retry_count` and `terminal_failure`.
+  attempts with `retry_count` and `terminal_failure`. `task_failed` also
+  includes the bounded `failure_classification`.
+- `payload_integrity_failure_detected` is emitted by the executor before it
+  returns the permanent failure result. It includes the assignment correlation
+  tuple, object key, mismatch type, expected/actual length, and
+  expected/actual SHA-256.
+- `payload_integrity_failure_committed` is emitted only after the coordinator
+  durably closes the exact current attempt as terminal. It carries the complete
+  assignment correlation tuple, `PERMANENT_PAYLOAD_INTEGRITY`, the error, and
+  the current `taskflow_payload_integrity_failures_total` value.
 - `task_lease_expired` records assigned work whose persisted lease expired
   before a result was accepted.
 - `peer_unavailable_tasks_released` records how many tasks were returned for

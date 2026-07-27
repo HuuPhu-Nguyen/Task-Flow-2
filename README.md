@@ -123,9 +123,10 @@ health check, and idempotent bucket bootstrap using environment-supplied
 credentials. Participant runtimes discover the MinIO provider without adding
 the SDK to coordinator/core/persistence code. Conversion submitters upload
 large inputs under immutable `taskflow/inputs/<uuid>` keys, and executors
-download by key without a shared filesystem. End-to-end downloaded-byte
-verification, attempt-specific output commitment, and orphan cleanup remain
-TF-0504 through TF-0506 work.
+download by key without a shared filesystem. Upload and download streams are
+checked against their exact declared length and SHA-256 before processor or
+requester output acceptance. Attempt-specific output commitment and orphan
+cleanup remain TF-0505 and TF-0506 work.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, requester-role job submission and result routing, executor-role task execution, and history reads. It is a participant UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for broker delivery, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -373,7 +374,9 @@ runtime dispatch. See `docs/PROTOCOL_COMPATIBILITY.md`.
 
 - `JOB_SUBMIT` - submit a new job
 - `TASK_ASSIGN` - assign a task to an executor-role participant with attempt number, assignment UUID, and lease deadline
-- `TASK_RESULT` - return a result from that executor role while echoing the assignment attempt and UUID
+- `TASK_RESULT` - return a result from that executor role while echoing the
+  assignment attempt and UUID; unsuccessful results may classify immutable
+  payload-integrity corruption as permanent
 - `JOB_RESULT` - plugin-defined final `resultPayload` plus a compatibility ordered result list
 - `JOB_RESULT_REQUEST` - request resend or persisted reconstruction of an owned job result using the requester token, plus a requester identity signature for identity-bound jobs
 - `PING` - retained protocol heartbeat-request type
@@ -559,8 +562,8 @@ Environment overrides:
 - `TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS` - optional comma-separated
   `TASK_TYPE:LIMIT` overrides; each limit defaults to the executor pool size
 - `TASKFLOW_MAX_INPUT_BYTES` - maximum declared byte size of each recursively
-  discovered submitted object reference, default `33554432` bytes; TF-0504
-  still owns exact downloaded length/digest verification
+  discovered submitted object reference, default `33554432` bytes; downloaded
+  object bytes must also match that exact declaration and SHA-256 digest
 - `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
 - `TASKFLOW_MAX_RESULT_BYTES` - maximum single conversion result payload size before saving/sending, default `67108864` bytes
@@ -915,10 +918,12 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
   environment-only credentials, health checking, idempotent bucket bootstrap,
   and restart evidence. Conversion inputs at or above the inline threshold now
   use portable TaskFlow-owned object keys across separately configured
-  participants, and legacy local/shared-file metadata is rejected. TF-0504
-  through TF-0506 own end-to-end digest/length verification, fenced attempt
-  output ownership, and orphan cleanup. Until TF-0505, large conversion outputs
-  fail instead of being placed inline on RabbitMQ.
+  participants, and legacy local/shared-file metadata is rejected. Exact
+  streamed length/SHA-256 verification now gates processing and requester
+  output writes; immutable corruption is a terminal classified task failure.
+  TF-0505 and TF-0506 still own fenced attempt output ownership and orphan
+  cleanup. Until TF-0505, large conversion outputs fail instead of being placed
+  inline on RabbitMQ.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.
 - SQLite is the current `JobStateStore`, peer registry store, and coordinator broker outbox store implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, and schema-v12 stores the canonical job-submission request hash. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows for RabbitMQ runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.

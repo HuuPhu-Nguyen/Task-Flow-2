@@ -5,9 +5,9 @@ import java.io.InputStream;
 /**
  * Streaming data-plane boundary for TaskFlow-owned objects.
  *
- * <p>Implementations must preserve the supplied metadata. End-to-end digest
- * calculation and content verification are separate consumers of this port
- * and are introduced by TF-0504.</p>
+ * <p>Implementations must preserve the supplied metadata. Upload adapters must
+ * reject bytes that do not match it, and consumers must use
+ * {@link PayloadIntegrityVerifier} before accepting downloaded content.</p>
  */
 public interface ObjectStore extends AutoCloseable {
     int MAX_LIST_PAGE_SIZE = 1_000;

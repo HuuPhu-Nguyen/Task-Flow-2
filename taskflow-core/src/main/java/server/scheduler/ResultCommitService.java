@@ -1,5 +1,6 @@
 package server.scheduler;
 
+import protocol.TaskFailureClassification;
 import protocol.TaskResultMessage;
 import server.db.JobStateStore;
 import server.job.AssignmentIdentity;
@@ -82,12 +83,15 @@ final class ResultCommitService {
                                                    EmbarrassinglyParallelJob<?, ?> job,
                                                    TaskUnit<?> task) {
         long failedAt = clock.nowEpochMillis();
+        TaskFailureClassification classification = result.getFailureClassification();
+        boolean retryable = classification.retryable();
         TransitionDecision decision = transitions.executionFailed(
                 task,
                 envelope.fromNodeId(),
                 result.getAttemptNumber(),
                 result.getAssignmentId(),
                 config.maxTaskRetries(),
+                retryable,
                 failedAt
         );
         if (!decision.accepted()) {
@@ -121,6 +125,7 @@ final class ResultCommitService {
                 envelope.fromNodeId(),
                 decision,
                 config.maxTaskRetries(),
+                retryable,
                 result.getErrorMessage(),
                 failedAt
         );
@@ -157,11 +162,35 @@ final class ResultCommitService {
                 "peer_id", envelope.fromNodeId(),
                 "retry_count", task.getRetryCount(),
                 "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
+                "failure_classification", classification,
                 "error", result.getErrorMessage()
         ));
 
         if (failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE) {
-            jobCompletions.failJob(job, "Task " + task.getTaskId() + " reached max retries.");
+            if (classification == TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY) {
+                long integrityFailures = metrics.recordPayloadIntegrityFailure();
+                events.error("payload_integrity_failure_committed", events.assignmentTraceFields(
+                        job.getJobId(),
+                        task.getTaskId(),
+                        result.getAttemptNumber(),
+                        result.getAssignmentId(),
+                        envelope.fromNodeId(),
+                        "failure_classification", classification,
+                        SchedulerMetrics.PAYLOAD_INTEGRITY_FAILURES_TOTAL_NAME,
+                        integrityFailures,
+                        "error", result.getErrorMessage()
+                ));
+                jobCompletions.failJob(
+                        job,
+                        "Task " + task.getTaskId()
+                                + " failed permanent payload-integrity verification."
+                );
+            } else {
+                jobCompletions.failJob(
+                        job,
+                        "Task " + task.getTaskId() + " reached max retries."
+                );
+            }
         }
         return DeliveryDisposition.ACK_SUCCESS;
     }

@@ -42,11 +42,18 @@ public sealed interface SchedulerEvent permits SchedulerEvent.JobSubmitted,
 
     record TaskExecutionFailed(TaskState.AssignmentIdentity assignment,
                                int maxRetries,
+                               boolean retryable,
                                long occurredAtMillis) implements SchedulerEvent {
         public TaskExecutionFailed {
             Objects.requireNonNull(assignment, "assignment");
             requirePositive(maxRetries, "maxRetries");
             requireNonNegative(occurredAtMillis, "occurredAtMillis");
+        }
+
+        public TaskExecutionFailed(TaskState.AssignmentIdentity assignment,
+                                   int maxRetries,
+                                   long occurredAtMillis) {
+            this(assignment, maxRetries, true, occurredAtMillis);
         }
     }
 

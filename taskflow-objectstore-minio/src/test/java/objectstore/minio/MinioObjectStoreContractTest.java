@@ -12,6 +12,7 @@ import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
 import objectstore.ObjectStoreProvider;
+import objectstore.PayloadIntegrityException;
 import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -37,6 +38,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -195,6 +197,71 @@ class MinioObjectStoreContractTest extends ObjectStoreContractTest {
         } finally {
             try (ObjectStore store = provider().open()) {
                 store.delete(wirePayload.objectReference().key());
+            }
+        }
+    }
+
+    @Test
+    void corruptObjectBytesAreRejectedBeforeImageProcessing() throws Exception {
+        byte[] expectedBytes = pngBytes();
+        byte[] corruptBytes = expectedBytes.clone();
+        corruptBytes[corruptBytes.length - 1] ^= 1;
+        String key = TaskFlowObjectKeys.objectKey(
+                "inputs",
+                UUID.randomUUID().toString(),
+                "corrupt-image"
+        );
+        ObjectReference reference = new ObjectReference(
+                key,
+                expectedBytes.length,
+                HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(expectedBytes)
+                ),
+                "image/png"
+        );
+        try {
+            try (MinioClient client = minioClient()) {
+                client.putObject(
+                        PutObjectArgs.builder()
+                                .bucket(BUCKET)
+                                .object(key)
+                                .stream(
+                                        new ByteArrayInputStream(corruptBytes),
+                                        (long) corruptBytes.length,
+                                        -1L
+                                )
+                                .contentType(reference.contentType())
+                                .userMetadata(Map.of(
+                                        "taskflow-sha256",
+                                        reference.sha256()
+                                ))
+                                .build()
+                );
+            }
+            FilePayload input = new FilePayload("corrupt.png", null, reference);
+            TaskAssignMessage assignment = new TaskAssignMessage(
+                    "coordinator-1",
+                    Instant.now().toString(),
+                    "task-corrupt",
+                    "job-corrupt",
+                    ConversionTaskTypes.IMAGE_CONVERSION,
+                    1,
+                    "550e8400-e29b-41d4-a716-446655440001",
+                    1_780_000_000_000L,
+                    input,
+                    "png"
+            );
+
+            PayloadIntegrityException failure = assertThrows(
+                    PayloadIntegrityException.class,
+                    () -> new ImageConversionProcessor(provider()).process(assignment)
+            );
+
+            assertEquals(PayloadIntegrityException.Mismatch.SHA256, failure.mismatch());
+            assertEquals(reference.sha256(), failure.expectedSha256());
+        } finally {
+            try (ObjectStore store = provider().open()) {
+                store.delete(key);
             }
         }
     }

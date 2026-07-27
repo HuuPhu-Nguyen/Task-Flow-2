@@ -6,10 +6,11 @@ import java.util.Objects;
 /**
  * Infrastructure-independent failure classification for object-store calls.
  */
-public final class ObjectStoreException extends IOException {
+public class ObjectStoreException extends IOException {
     public enum Reason {
         NOT_FOUND,
         INVALID_METADATA,
+        PAYLOAD_INTEGRITY,
         STORAGE_FAILURE
     }
 

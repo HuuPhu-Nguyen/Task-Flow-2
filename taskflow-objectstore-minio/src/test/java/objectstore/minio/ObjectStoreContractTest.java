@@ -4,6 +4,7 @@ import objectstore.ObjectListing;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.PayloadIntegrityException;
 import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,6 +60,77 @@ abstract class ObjectStoreContractTest {
             assertArrayEquals(content, download.readAllBytes());
         }
         upload.close();
+    }
+
+    @Test
+    void putRejectsBytesThatDoNotMatchTheReference() throws Exception {
+        byte[] expectedContent = "expected".getBytes(StandardCharsets.UTF_8);
+        byte[] corruptContent = "corrupt!".getBytes(StandardCharsets.UTF_8);
+        ObjectReference reference = referenceForKey(
+                key("corrupt-upload"),
+                expectedContent,
+                "application/octet-stream"
+        );
+
+        PayloadIntegrityException failure = assertThrows(
+                PayloadIntegrityException.class,
+                () -> store.put(reference, new ByteArrayInputStream(corruptContent))
+        );
+
+        assertEquals(PayloadIntegrityException.Mismatch.SHA256, failure.mismatch());
+        ObjectStoreException missing = assertThrows(
+                ObjectStoreException.class,
+                () -> store.stat(reference.key())
+        );
+        assertEquals(ObjectStoreException.Reason.NOT_FOUND, missing.reason());
+    }
+
+    @Test
+    void putRejectsContentExtendedBeyondTheReferenceLength() throws Exception {
+        byte[] expectedContent = "expected".getBytes(StandardCharsets.UTF_8);
+        byte[] extendedContent = "expected!".getBytes(StandardCharsets.UTF_8);
+        ObjectReference reference = referenceForKey(
+                key("extended-upload"),
+                expectedContent,
+                "application/octet-stream"
+        );
+
+        PayloadIntegrityException failure = assertThrows(
+                PayloadIntegrityException.class,
+                () -> store.put(reference, new ByteArrayInputStream(extendedContent))
+        );
+
+        assertEquals(PayloadIntegrityException.Mismatch.LENGTH, failure.mismatch());
+        assertEquals(expectedContent.length + 1L, failure.actualLength());
+        ObjectStoreException missing = assertThrows(
+                ObjectStoreException.class,
+                () -> store.stat(reference.key())
+        );
+        assertEquals(ObjectStoreException.Reason.NOT_FOUND, missing.reason());
+    }
+
+    @Test
+    void putRejectsContentTruncatedBeforeTheReferenceLength() throws Exception {
+        byte[] expectedContent = "expected".getBytes(StandardCharsets.UTF_8);
+        byte[] truncatedContent = "expecte".getBytes(StandardCharsets.UTF_8);
+        ObjectReference reference = referenceForKey(
+                key("truncated-upload"),
+                expectedContent,
+                "application/octet-stream"
+        );
+
+        PayloadIntegrityException failure = assertThrows(
+                PayloadIntegrityException.class,
+                () -> store.put(reference, new ByteArrayInputStream(truncatedContent))
+        );
+
+        assertEquals(PayloadIntegrityException.Mismatch.LENGTH, failure.mismatch());
+        assertEquals(truncatedContent.length, failure.actualLength());
+        ObjectStoreException missing = assertThrows(
+                ObjectStoreException.class,
+                () -> store.stat(reference.key())
+        );
+        assertEquals(ObjectStoreException.Reason.NOT_FOUND, missing.reason());
     }
 
     @Test

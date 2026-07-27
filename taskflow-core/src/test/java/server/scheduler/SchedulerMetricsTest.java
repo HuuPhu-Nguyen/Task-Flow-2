@@ -25,6 +25,10 @@ class SchedulerMetricsTest {
                 "taskflow_assignment_generations_total",
                 SchedulerMetrics.ASSIGNMENT_GENERATIONS_TOTAL_NAME
         );
+        assertEquals(
+                "taskflow_payload_integrity_failures_total",
+                SchedulerMetrics.PAYLOAD_INTEGRITY_FAILURES_TOTAL_NAME
+        );
 
         SchedulerMetrics metrics = new SchedulerMetrics();
         metrics.recordAssignmentGeneration(12L);
@@ -32,12 +36,14 @@ class SchedulerMetricsTest {
         metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.COMMITTED);
         metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT);
         metrics.recordResultCommitOutcome(JobStateStore.ResultCommitOutcome.DUPLICATE_ALREADY_COMPLETED);
+        metrics.recordPayloadIntegrityFailure();
 
         SchedulerMetrics.Snapshot snapshot = metrics.snapshot();
         assertEquals(2L, snapshot.assignmentGenerationsTotal());
         assertEquals(1L, snapshot.taskResultsCommittedTotal());
         assertEquals(1L, snapshot.taskResultsStaleTotal());
         assertEquals(1L, snapshot.taskResultsDuplicateTotal());
+        assertEquals(1L, snapshot.payloadIntegrityFailuresTotal());
         assertEquals(15.0, snapshot.avgDispatchLatencyMs());
 
         assertEquals(snapshot.assignmentGenerationsTotal(), snapshot.assignedCount());

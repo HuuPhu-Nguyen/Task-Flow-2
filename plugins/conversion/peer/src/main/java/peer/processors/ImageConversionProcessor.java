@@ -44,16 +44,8 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
                 "Image",
                 objectStoreProvider
         );
-        BufferedImage img;
         String inputFileName = SafeFileNames.sanitize(input.fileName());
-        if (inputFileName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
-            try (PDDocument document = Loader.loadPDF(rawBytes)) {
-                PDFRenderer renderer = new PDFRenderer(document);
-                img = renderer.renderImageWithDPI(0, 300);
-            }
-        } else {
-            img = ImageIO.read(new ByteArrayInputStream(rawBytes));
-        }
+        BufferedImage img = decode(rawBytes, inputFileName);
 
         if (img == null) {
             throw new IOException("Could not decode data for " + input.fileName());
@@ -94,6 +86,16 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
                     + input.fileName());
         }
         return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
+    }
+
+    BufferedImage decode(byte[] rawBytes, String inputFileName) throws IOException {
+        if (inputFileName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
+            try (PDDocument document = Loader.loadPDF(rawBytes)) {
+                PDFRenderer renderer = new PDFRenderer(document);
+                return renderer.renderImageWithDPI(0, 300);
+            }
+        }
+        return ImageIO.read(new ByteArrayInputStream(rawBytes));
     }
 
     private String normalizeFormat(String format) throws IOException {

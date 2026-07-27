@@ -1,8 +1,17 @@
 package peer.engine;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.AppenderBase;
+import objectstore.ObjectReference;
+import objectstore.PayloadIntegrityException;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import plugin.TaskResourceProfile;
 import protocol.TaskAssignMessage;
+import protocol.TaskFailureClassification;
 import protocol.TaskResultMessage;
 import transport.TransientDeliveryException;
 
@@ -37,6 +46,50 @@ class PeerExecutionEngineTest {
             assertEquals("550e8400-e29b-41d4-a716-446655440000", result.getAssignmentId());
         } finally {
             engine.shutdown();
+        }
+    }
+
+    @Test
+    void payloadIntegrityFailureIsPermanentAndEmitsStructuredEvent() throws Exception {
+        Logger logger = (Logger) LoggerFactory.getLogger(PeerExecutionEngine.class);
+        Level previousLevel = logger.getLevel();
+        RecordingAppender appender = new RecordingAppender();
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(Level.ERROR);
+        PeerExecutionEngine engine = new PeerExecutionEngine("peer-integrity");
+        try {
+            ObjectReference reference = new ObjectReference(
+                    TaskFlowObjectKeys.objectKey("inputs", "corrupt"),
+                    1,
+                    "0".repeat(64),
+                    "application/octet-stream"
+            );
+            engine.registerProcessor("TEST", TaskResourceProfile.ofCapacityUnits(1), task -> {
+                throw PayloadIntegrityException.sha256Mismatch(
+                        reference,
+                        1,
+                        "1".repeat(64)
+                );
+            });
+
+            TaskResultMessage result = engine.executeTask(testTask()).get(2, TimeUnit.SECONDS);
+
+            assertFalse(result.isSuccessful());
+            assertEquals(
+                    TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY,
+                    result.getFailureClassification()
+            );
+            assertTrue(appender.messages().stream().anyMatch(message ->
+                    message.contains("event=payload_integrity_failure_detected")
+                            && message.contains("task_id=task-1")
+                            && message.contains("mismatch=SHA256")),
+                    () -> "captured messages: " + appender.messages());
+        } finally {
+            engine.shutdown();
+            logger.detachAppender(appender);
+            logger.setLevel(previousLevel);
+            appender.stop();
         }
     }
 
@@ -437,6 +490,19 @@ class PeerExecutionEngineTest {
                 "payload",
                 "param"
         );
+    }
+
+    private static final class RecordingAppender extends AppenderBase<ILoggingEvent> {
+        private final CopyOnWriteArrayList<String> messages = new CopyOnWriteArrayList<>();
+
+        @Override
+        protected void append(ILoggingEvent event) {
+            messages.add(event.getFormattedMessage());
+        }
+
+        List<String> messages() {
+            return List.copyOf(messages);
+        }
     }
 
 }

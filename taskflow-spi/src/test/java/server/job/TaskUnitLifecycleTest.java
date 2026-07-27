@@ -79,6 +79,18 @@ class TaskUnitLifecycleTest {
     }
 
     @Test
+    void permanentFailureTerminalizesTheFirstAttemptWithoutRetry() {
+        DummyTask task = new DummyTask("t-permanent", "job-1", "payload");
+        assertTrue(task.markAssigned("peer-a", System.currentTimeMillis() - 5));
+
+        TaskUnit.FailureOutcome outcome = task.failAttemptBy("peer-a", 20, false);
+
+        assertEquals(TaskUnit.FailureOutcome.TERMINAL_FAILURE, outcome);
+        assertEquals(1, task.getRetryCount());
+        assertEquals(TaskUnit.TaskStatus.FAILED, task.getStatus());
+    }
+
+    @Test
     void failureCreatesNextAssignmentGenerationIndependentlyFromRetryCount() {
         DummyTask task = new DummyTask("t-generation", "job-1", "payload");
 

@@ -64,6 +64,71 @@ class TaskProtocolV2Test {
     }
 
     @Test
+    void permanentIntegrityFailureRoundTripsAsAdditiveVersionTwoField() {
+        TaskResultMessage message = new TaskResultMessage(
+                "worker-1",
+                "2026-07-22T06:00:00Z",
+                "task-1",
+                "job-1",
+                4,
+                ASSIGNMENT_ID,
+                null,
+                false,
+                "digest mismatch",
+                TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY
+        );
+
+        JsonObject json = JsonParser.parseString(gson.toJson(message)).getAsJsonObject();
+        TaskResultMessage decoded = gson.fromJson(json, TaskResultMessage.class);
+
+        assertEquals(ProtocolVersions.ASSIGNMENT_IDENTITY,
+                json.get("protocolVersion").getAsInt());
+        assertEquals(
+                "PERMANENT_PAYLOAD_INTEGRITY",
+                json.get("failureClassification").getAsString()
+        );
+        assertDoesNotThrow(() -> MessageValidator.validate(decoded));
+        assertEquals(
+                TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY,
+                decoded.getFailureClassification()
+        );
+    }
+
+    @Test
+    void missingFailureClassificationDefaultsToRetryableAndSuccessCannotCarryOne() {
+        JsonObject legacyFailure = validResultJson();
+        legacyFailure.addProperty("successful", false);
+        legacyFailure.add("resultPayload", null);
+        legacyFailure.addProperty("errorMessage", "processor failed");
+        legacyFailure.remove("failureClassification");
+        TaskResultMessage decoded = gson.fromJson(legacyFailure, TaskResultMessage.class);
+        TaskResultMessage invalidSuccess = new TaskResultMessage(
+                "worker-1",
+                "2026-07-22T06:00:00Z",
+                "task-1",
+                "job-1",
+                4,
+                ASSIGNMENT_ID,
+                "result",
+                true,
+                null,
+                TaskFailureClassification.RETRYABLE
+        );
+
+        assertDoesNotThrow(() -> MessageValidator.validate(decoded));
+        assertEquals(TaskFailureClassification.RETRYABLE,
+                decoded.getFailureClassification());
+        MessageValidationException invalid = assertThrows(
+                MessageValidationException.class,
+                () -> MessageValidator.validate(invalidSuccess)
+        );
+        assertEquals(
+                MessageValidator.REASON_INVALID_TASK_FAILURE_CLASSIFICATION,
+                invalid.reasonCode()
+        );
+    }
+
+    @Test
     void coordinatorEnrichmentTurnsPluginTemplateIntoVersionTwoAssignment() {
         TaskAssignMessage template = new TaskAssignMessage(
                 "COORDINATOR",

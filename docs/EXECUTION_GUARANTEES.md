@@ -107,6 +107,11 @@ nodes may enable the requester role, executor role, or both.
   submit `ObjectReference` metadata. Executors download by key through their
   own configured provider. No distributed payload contains a local filesystem
   location.
+- Upload adapters verify the streamed bytes against the reference before
+  returning success. Executor input readers and requester result readers verify
+  exact length and SHA-256 before processing or file output. A mismatch becomes
+  `PERMANENT_PAYLOAD_INTEGRITY`; after the exact assigned-attempt failure
+  transaction commits, no logical task retry is created.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
 - The JavaFX GUI is the supported participant UI and has RabbitMQ service-level support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
@@ -506,7 +511,9 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
   retry-capable admission; see **Plugin Retry Safety** above.
 - During active scheduler operation, on timeout, lease expiry, or explicit executor failure:
   - the attempt is counted as failed,
-  - the task is retried if attempts remain,
+  - an ordinary retryable failure is retried if attempts remain,
+  - `PERMANENT_PAYLOAD_INTEGRITY` closes the first accepted exact assignment
+    as terminal regardless of the remaining retry budget,
   - otherwise the task moves to terminal `FAILED`.
 - When a retry is scheduled, the persisted task row is returned to `PENDING`, its previous assignment ID/timing/lease fields are cleared, its monotonic `attempt_number` is retained, and `retry_count` is incremented.
 - During startup recovery, an expired lease or incomplete legacy assignment identity is released to `PENDING` without incrementing `retry_count`; the last known generation is retained from task state or the legacy attempt audit, and the next runtime assignment advances it.
@@ -649,12 +656,15 @@ Scheduler emits structured event logs and periodic metrics snapshots including:
 - `taskflow_task_results_stale_total`
 - `taskflow_task_results_duplicate_total`
 - `taskflow_assignment_generations_total`
+- `taskflow_payload_integrity_failures_total`
 
-The four `taskflow_*_total` counters distinguish authoritative result commits,
+The five `taskflow_*_total` counters distinguish authoritative result commits,
 obsolete-generation rejection, duplicate-completion suppression, and assignment
-generation creation. The matching structured events are
+generation creation, plus durably committed immutable-payload corruption. The
+matching structured events are
 `task_result_committed`, `task_result_stale_rejected`,
-`task_result_duplicate_ignored`, and `task_assignment_created`. Each event
+`task_result_duplicate_ignored`, `task_assignment_created`, and
+`payload_integrity_failure_committed`. Each assignment-scoped event
 carries `job_id`, `task_id`, `attempt_number`, `assignment_id`, and `worker_id`,
 the log-field spellings of the protocol correlation tuple. These metrics are
 intended for immediate log-based operational visibility in Phase 1 and as

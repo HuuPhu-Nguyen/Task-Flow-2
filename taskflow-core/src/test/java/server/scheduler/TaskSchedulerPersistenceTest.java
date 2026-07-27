@@ -14,6 +14,7 @@ import protocol.RequesterIdentity;
 import protocol.RequesterTokens;
 import protocol.ProtocolVersions;
 import protocol.TaskAssignMessage;
+import protocol.TaskFailureClassification;
 import protocol.TaskResultMessage;
 import server.db.BrokerOutboxStore;
 import server.db.JobStateStore;
@@ -490,6 +491,66 @@ class TaskSchedulerPersistenceTest {
             assertEquals(JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED, failed.outcome());
             assertEquals("processor failed", failed.failureReason());
             assertEquals(JobStateStore.TaskAttemptOutcome.RUNNING, attempts.get(1).outcome());
+        } finally {
+            schedulerThread.interrupt();
+            schedulerThread.join(2_000);
+        }
+    }
+
+    @Test
+    void payloadIntegrityFailurePersistsTerminalAttemptWithoutRetry() throws Exception {
+        BlockingQueue<MessageEnvelope> mailbox = new LinkedBlockingQueue<>();
+        InMemoryPeerRegistry registry = registryWithPeer("peer-1");
+        RecordingJobStateStore store = new RecordingJobStateStore();
+        TaskCapturingOutput output = new TaskCapturingOutput();
+        SchedulerConfig config = SchedulerConfig.fromEnvironment(Map.of(
+                "TASKFLOW_MAX_TASK_RETRIES",
+                "5"
+        ));
+        TaskScheduler scheduler = new TaskScheduler(mailbox, registry, store, output, config);
+        Thread schedulerThread = new Thread(
+                scheduler,
+                "scheduler-payload-integrity-persistence-test"
+        );
+        schedulerThread.start();
+
+        try {
+            mailbox.put(new MessageEnvelope(
+                    testJob("job-payload-integrity", List.of("payload")),
+                    "requester-1"
+            ));
+
+            assertTrue(output.awaitTask());
+            TaskAssignMessage assignment = output.task();
+            assertTrue(store.awaitTaskAssigned());
+            mailbox.put(new MessageEnvelope(
+                    failedResult(
+                            assignment,
+                            "payload digest mismatch",
+                            TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY
+                    ),
+                    "peer-1"
+            ));
+
+            assertTrue(output.awaitResult());
+            assertTrue(store.awaitJobFailed());
+            assertEquals(List.of(
+                    "insertJobWithTasks:job-payload-integrity:TEST_TASK:requester-1:1:"
+                            + "task-job-payload-integrity-0",
+                    "markTaskAssigned:task-job-payload-integrity-0:peer-1",
+                    "markTaskFailed:task-job-payload-integrity-0",
+                    "markJobFailed:job-payload-integrity"
+            ), store.events());
+            List<JobStateStore.TaskAttemptRecord> attempts =
+                    store.loadTaskAttempts("job-payload-integrity");
+            assertEquals(1, attempts.size());
+            assertEquals(
+                    JobStateStore.TaskAttemptOutcome.TERMINAL_FAILURE,
+                    attempts.getFirst().outcome()
+            );
+            assertEquals("payload digest mismatch", attempts.getFirst().failureReason());
+            assertEquals(0, scheduler.getMetricsSnapshot().retryCount());
+            assertEquals(1, scheduler.getMetricsSnapshot().payloadIntegrityFailuresTotal());
         } finally {
             schedulerThread.interrupt();
             schedulerThread.join(2_000);
@@ -2021,6 +2082,23 @@ class TaskSchedulerPersistenceTest {
                 null,
                 false,
                 error
+        );
+    }
+
+    private static TaskResultMessage failedResult(TaskAssignMessage assignment,
+                                                  String error,
+                                                  TaskFailureClassification classification) {
+        return new TaskResultMessage(
+                "peer-1",
+                "2026-06-12T00:00:00Z",
+                assignment.getTaskId(),
+                assignment.getJobId(),
+                assignment.getAttemptNumber(),
+                assignment.getAssignmentId(),
+                null,
+                false,
+                error,
+                classification
         );
     }
 

@@ -150,6 +150,26 @@ class TaskStateMachineTest {
                         List.of(EventIntent.TASK_FAILED)
                 ),
                 transition(
+                        "T4 terminalizes a permanent execution failure before retry exhaustion",
+                        assigned(0),
+                        new SchedulerEvent.TaskExecutionFailed(
+                                IDENTITY_1,
+                                3,
+                                false,
+                                2_000L
+                        ),
+                        Disposition.ACCEPTED,
+                        DurableTransition.T4_TERMINALIZE_ASSIGNED_TASK,
+                        OutboxIntent.NONE,
+                        TaskStatus.FAILED,
+                        1,
+                        List.of(
+                                MetricIntent.ATTEMPT_FAILURE_INCREMENT,
+                                MetricIntent.TERMINAL_FAILURE_INCREMENT
+                        ),
+                        List.of(EventIntent.TASK_FAILED)
+                ),
+                transition(
                         "lease checks before the deadline are ignored",
                         assigned(0),
                         new SchedulerEvent.LeaseExpired(IDENTITY_1, 3, 4_999L),

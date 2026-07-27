@@ -224,7 +224,8 @@ public final class TaskStateMachine {
                 state,
                 event,
                 event.maxRetries(),
-                EventIntent.TASK_FAILED
+                EventIntent.TASK_FAILED,
+                event.retryable()
         );
     }
 
@@ -431,6 +432,14 @@ public final class TaskStateMachine {
                                                   SchedulerEvent event,
                                                   int maxRetries,
                                                   EventIntent eventIntent) {
+        return closeFailedAttempt(state, event, maxRetries, eventIntent, true);
+    }
+
+    private TransitionDecision closeFailedAttempt(TaskState state,
+                                                  SchedulerEvent event,
+                                                  int maxRetries,
+                                                  EventIntent eventIntent,
+                                                  boolean retryable) {
         if (state.retryCount() == Integer.MAX_VALUE) {
             return unchanged(
                     Disposition.INVALID,
@@ -440,7 +449,7 @@ public final class TaskStateMachine {
         }
 
         int nextRetryCount = state.retryCount() + 1;
-        boolean terminal = nextRetryCount >= maxRetries;
+        boolean terminal = !retryable || nextRetryCount >= maxRetries;
         TaskStatus resultingStatus = terminal ? TaskStatus.FAILED : TaskStatus.PENDING;
         long pendingSince = terminal ? -1L : event.occurredAtMillis();
         TaskState result = copy(
@@ -471,7 +480,9 @@ public final class TaskStateMachine {
                 metrics,
                 List.of(eventIntent),
                 terminal
-                        ? "Close the current attempt and terminalize the task at retry exhaustion."
+                        ? retryable
+                                ? "Close the current attempt and terminalize the task at retry exhaustion."
+                                : "Close the current attempt as a permanent failure without retry."
                         : "Close the current attempt and release the task for the next generation."
         );
     }

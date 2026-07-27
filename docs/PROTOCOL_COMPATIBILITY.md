@@ -34,7 +34,7 @@ below.
 | `JOB_RESULT` | v2 | No | Yes | Yes | Yes | Additive optional `admissionRejection` is ignored by older readers; reject invalid versions or fields before requester/result-handler dispatch. |
 | `PEER_DISCONNECTED` | v2 | No | Yes | Yes | Yes | Reject invalid versions or fields before scheduler dispatch. |
 | `TASK_ASSIGN` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; RabbitMQ may dead-letter it. |
-| `TASK_RESULT` | v2 with assignment identity | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
+| `TASK_RESULT` | v2 with assignment identity and optional failure classification | No | Yes, with all required v2 fields | No | No | Reject with reason code `assignment_protocol_v2_required`; it cannot reach task commitment and is never broker-requeued for this permanent incompatibility. |
 
 The unchanged message types keep legacy compatibility because their semantics
 did not change. `TASK_ASSIGN` and `TASK_RESULT` require a coordinated version-2
@@ -107,6 +107,21 @@ upgraded without changing plugin payload semantics.
 execution engine copies both values from the received assignment for success
 and failure results.
 
+An unsuccessful result may add `failureClassification`. Current senders use
+`RETRYABLE` for ordinary processor failures and
+`PERMANENT_PAYLOAD_INTEGRITY` for exact object length/SHA-256 mismatch. Missing
+classification defaults to `RETRYABLE`, preserving earlier protocol-v2
+behavior. A successful result carrying an explicit classification is rejected
+with `invalid_task_failure_classification`.
+
+This additive field does not require protocol v3: an older v2 coordinator may
+ignore it and apply its former retry policy, while a current coordinator makes
+the first accepted permanent-integrity failure terminal. Executor and
+coordinator artifacts must therefore be upgraded together before relying on
+the no-logical-retry corruption guarantee. An older executor remains compatible
+and sends an unclassified failure, which a current coordinator treats as
+retryable.
+
 Missing fields deserialize to invalid zero/null values and are rejected.
 Blank, zero, negative, shortened, or malformed assignment identity values are
 rejected with reason code `invalid_assignment_identity`.
@@ -118,6 +133,8 @@ scheduler logs. The task-protocol codes introduced with version `2` are:
 
 - `assignment_protocol_v2_required` for version-0/1 task assignments/results;
 - `invalid_assignment_identity` for missing or malformed v2 identity fields;
+- `invalid_task_failure_classification` when a successful task result carries
+  failure-only classification metadata;
 - `unsupported_protocol_version` when a message object bypasses parser-level
   version checks.
 
@@ -198,8 +215,11 @@ the configured inline limit.
 
 No protocol-version bump is used because `JOB_SUBMIT` and `TASK_ASSIGN` already
 treat task payload JSON as plugin-owned semantic data and no framework envelope
-field or assignment/result identity changed. This does not claim mixed-version
-compatibility for the changed plugin payload shape.
+field or assignment/result identity changed. TF-0504 separately adds the
+optional framework-owned `TASK_RESULT.failureClassification` described above;
+that additive field preserves wire parsing but requires a coordinated upgrade
+for its no-retry semantics. This does not claim mixed-version compatibility for
+the changed plugin payload shape.
 
 ## Field and Size Validation
 

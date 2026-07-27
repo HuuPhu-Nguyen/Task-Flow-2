@@ -229,6 +229,12 @@ public abstract class TaskUnit<T> {
     }
 
     public synchronized FailureOutcome failAttemptBy(String peerId, int maxRetries) {
+        return failAttemptBy(peerId, maxRetries, true);
+    }
+
+    public synchronized FailureOutcome failAttemptBy(String peerId,
+                                                     int maxRetries,
+                                                     boolean retryable) {
         if (this.status != TaskStatus.ASSIGNED) {
             return FailureOutcome.IGNORED;
         }
@@ -242,7 +248,7 @@ public abstract class TaskUnit<T> {
         this.leaseExpiresAtMillis = 0L;
         this.assignmentIdentity = null;
 
-        if (this.retryCount >= maxRetries) {
+        if (!retryable || this.retryCount >= maxRetries) {
             this.status = TaskStatus.FAILED;
             this.pendingSinceMillis = -1L;
             return FailureOutcome.TERMINAL_FAILURE;

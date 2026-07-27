@@ -37,6 +37,8 @@ public final class MessageValidator {
     public static final String REASON_INVALID_INLINE_PAYLOAD = "invalid_inline_payload";
     public static final String REASON_MAX_REFERENCED_PAYLOAD_BYTES = "max_referenced_payload_bytes";
     public static final String REASON_INVALID_PAYLOAD_REFERENCE = "invalid_payload_reference";
+    public static final String REASON_INVALID_TASK_FAILURE_CLASSIFICATION =
+            "invalid_task_failure_classification";
 
     private MessageValidator() {
     }
@@ -220,6 +222,12 @@ public final class MessageValidator {
         validateTaskId(result.getTaskId(), "Task id");
         validateJobId(result.getJobId(), "Job id");
         validateAssignmentIdentity(result.getAttemptNumber(), result.getAssignmentId());
+        if (result.isSuccessful() && result.hasExplicitFailureClassification()) {
+            throw new MessageValidationException(
+                    REASON_INVALID_TASK_FAILURE_CLASSIFICATION,
+                    "Successful task result cannot carry a failure classification."
+            );
+        }
         Map<String, Object> payloadEnvelope = new LinkedHashMap<>();
         payloadEnvelope.put("resultPayload", result.getResultPayload());
         payloadEnvelope.put("errorMessage", result.getErrorMessage() == null ? "" : result.getErrorMessage());

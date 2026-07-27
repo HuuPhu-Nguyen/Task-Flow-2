@@ -146,7 +146,7 @@ The removed form used `payloadReference` with `storageType`, `location`,
 participants using the old and new referenced-media shapes are not compatible
 and must be upgraded together.
 
-## Ownership, Failure, and Remaining Integrity Work
+## Ownership, Failure, and Integrity
 
 Input objects are immutable staging data, not authoritative coordinator state.
 If payload building fails after uploads, the submitter deletes objects from
@@ -157,14 +157,27 @@ An unavailable store or missing object fails payload building, execution, or
 result saving through the existing failure path. No SQLite job/task state is
 created when submission payload construction fails before publication.
 
-Submitters currently calculate and carry SHA-256 metadata, and readers enforce
-configured upper bounds while downloading. They do not yet prove that the
-downloaded stream has the exact declared length and digest before processor
-invocation. TF-0504 owns that end-to-end streaming verification and explicit
-corrupt-byte rejection; metadata presence and a successful MinIO round trip do
-not close invariant I9.
+Submitters stream each object-backed input once to calculate its exact length
+and SHA-256 metadata. The object-store upload streams it again through a
+verifier and deletes the object best-effort if those uploaded bytes no longer
+match the reference. Executor input readers and requester result handlers read
+through the same bounded verifier and accept bytes only after exact length and
+SHA-256 checks. Truncated, extended, and same-length corrupt content therefore
+fails before media decoding or final output-file creation.
+
+`PayloadIntegrityException` is a permanent immutable-object failure. The
+executor emits a protocol-v2 `TASK_RESULT` with
+`failureClassification: "PERMANENT_PAYLOAD_INTEGRITY"`. A current coordinator
+atomically closes that exact assignment as terminal on its first accepted
+failure, emits the integrity events/counter, and creates no replacement
+assignment. Missing classification retains the earlier retryable v2 behavior,
+so executor and coordinator participants must be upgraded together to obtain
+the no-retry guarantee.
 
 `MinioObjectStoreContractTest#separateConversionParticipantsExchangeInputOnlyByPortableObjectKey`
 uploads with one provider/client, serializes the payload, and processes it with
 a separately constructed provider/client against real Testcontainers MinIO.
 The test asserts that no local path fields or submitter path cross the wire.
+`MinioObjectStoreContractTest#corruptObjectBytesAreRejectedBeforeImageProcessing`
+overwrites that portable object with same-length corrupt bytes and proves that
+the real MinIO download is rejected before image processing.

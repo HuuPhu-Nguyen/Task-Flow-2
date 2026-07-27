@@ -4,10 +4,10 @@ import objectstore.ObjectListing;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.PayloadIntegrityVerifier;
 import objectstore.TaskFlowObjectKeys;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
@@ -32,11 +32,17 @@ final class InMemoryObjectStore implements ObjectStore {
     public ObjectReference put(ObjectReference reference, InputStream content) throws ObjectStoreException {
         requireAvailable("put", reference.key());
         try {
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            content.transferTo(bytes);
-            objects.put(reference.key(), new StoredObject(reference, bytes.toByteArray()));
+            byte[] bytes = PayloadIntegrityVerifier.readVerified(
+                    content,
+                    reference,
+                    reference.contentLength()
+            );
+            objects.put(reference.key(), new StoredObject(reference, bytes));
             return reference;
         } catch (IOException e) {
+            if (e instanceof ObjectStoreException objectStoreException) {
+                throw objectStoreException;
+            }
             throw storageFailure("put", reference.key(), e);
         }
     }
@@ -113,6 +119,15 @@ final class InMemoryObjectStore implements ObjectStore {
     @Override
     public void close() {
         closed = true;
+    }
+
+    void corrupt(String key, byte[] content) {
+        String validatedKey = TaskFlowObjectKeys.requireObjectKey(key);
+        StoredObject stored = objects.get(validatedKey);
+        if (stored == null) {
+            throw new IllegalArgumentException("Missing test object: " + key);
+        }
+        objects.put(validatedKey, new StoredObject(stored.reference(), content.clone()));
     }
 
     private void requireAvailable(String operation, String key) throws ObjectStoreException {

@@ -17,8 +17,11 @@ import objectstore.ObjectListing;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.PayloadIntegrityException;
+import objectstore.PayloadIntegrityVerifier;
 import objectstore.TaskFlowObjectKeys;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
@@ -51,18 +54,40 @@ public final class MinioObjectStore implements ObjectStore {
     public ObjectReference put(ObjectReference reference, InputStream content) throws ObjectStoreException {
         Objects.requireNonNull(reference, "reference");
         Objects.requireNonNull(content, "content");
+        PayloadIntegrityVerifier.VerifyingInputStream verified =
+                PayloadIntegrityVerifier.verifyingStream(
+                        content,
+                        reference,
+                        reference.contentLength()
+                );
         try {
             client.putObject(
                     PutObjectArgs.builder()
                             .bucket(bucket)
                             .object(reference.key())
-                            .stream(content, reference.contentLength(), -1L)
+                            .stream(verified, reference.contentLength(), -1L)
                             .contentType(reference.contentType())
                             .userMetadata(java.util.Map.of(SHA256_METADATA_KEY, reference.sha256()))
                             .build()
             );
+            verified.verifyEndOfStream();
             return stat(reference.key());
+        } catch (PayloadIntegrityException e) {
+            deleteAfterIntegrityFailure(reference.key(), e);
+            throw e;
+        } catch (IOException e) {
+            PayloadIntegrityException integrityFailure = findIntegrityFailure(e);
+            if (integrityFailure != null) {
+                deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                throw integrityFailure;
+            }
+            throw translate("put", reference.key(), e);
         } catch (MinioException | IllegalStateException e) {
+            PayloadIntegrityException integrityFailure = findIntegrityFailure(e);
+            if (integrityFailure != null) {
+                deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                throw integrityFailure;
+            }
             throw translate("put", reference.key(), e);
         }
     }
@@ -213,5 +238,25 @@ public final class MinioObjectStore implements ObjectStore {
                 "Object-store " + operation + " failed for '" + key + "'.",
                 failure
         );
+    }
+
+    private void deleteAfterIntegrityFailure(String key,
+                                             PayloadIntegrityException integrityFailure) {
+        try {
+            delete(key);
+        } catch (ObjectStoreException cleanupFailure) {
+            integrityFailure.addSuppressed(cleanupFailure);
+        }
+    }
+
+    private static PayloadIntegrityException findIntegrityFailure(Throwable failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof PayloadIntegrityException integrityFailure) {
+                return integrityFailure;
+            }
+            current = current.getCause();
+        }
+        return null;
     }
 }

@@ -95,9 +95,14 @@ does not waive those requirements.
   them through a separately configured executor client, and rejects oversized
   inline media and legacy filesystem references. A real MinIO test proves that
   no submitter path crosses the serialized payload.
-- TF-0504 through TF-0506 still own exact streamed length/SHA-256 verification,
-  attempt-specific authoritative output pointers, and garbage collection.
-  Portable references and metadata survival alone do not close I9.
+- TF-0504 adds shared streaming length/SHA-256 verification to uploads,
+  executor input downloads, and requester result downloads. Same-length and
+  size corruption are rejected before processing/output acceptance. The
+  executor classifies immutable corruption as permanent, and the coordinator
+  durably terminalizes the first accepted exact attempt without replacement,
+  with a structured event and monotonic counter.
+- TF-0505 and TF-0506 still own attempt-specific authoritative output pointers
+  and garbage collection.
 
 ## Related Documents
 

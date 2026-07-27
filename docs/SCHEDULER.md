@@ -190,6 +190,17 @@ value and marks health false rather than clearing pressure. Startup recovery,
 lane ownership boundaries, active-state changes, outbox commits, and outbox
 sent replay refresh the projection.
 
+## Task-failure classification
+
+An unsuccessful protocol-v2 `TASK_RESULT` without an explicit classification
+retains the existing retryable behavior. `PERMANENT_PAYLOAD_INTEGRITY` instead
+selects terminal failure even when retry budget remains. The same fenced
+failure transaction still matches task ID, `ASSIGNED` state, attempt number,
+assignment ID, and participant, and closes the exact running attempt before
+the scheduler changes capacity, failure metrics, or job projection. A storage
+failure retains the assigned projection for redelivery; a committed permanent
+failure creates no pending retry entry or replacement assignment.
+
 ## Deadline fencing
 
 Each scheduled deadline carries:

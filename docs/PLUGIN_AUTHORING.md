@@ -341,8 +341,9 @@ Client module tests should cover:
   provider instance, and best-effort cleanup after a failed payload build.
 - Legacy local-file references must be rejected. Missing provider/configuration
   must fail object-backed work without falling back to a filesystem path.
-- Exact downloaded length/checksum mismatch rejection is required once the
-  TF-0504 integrity reader is available.
+- Read object-backed input and result content through
+  `PayloadIntegrityVerifier`; exact length or SHA-256 mismatch must fail before
+  processor work or requester output acceptance.
 - Result handling writes or presents the expected final payload, stays inside
   the selected output directory when writing files, handles duplicate names
   safely, and enforces result-size limits when the result contains file data.

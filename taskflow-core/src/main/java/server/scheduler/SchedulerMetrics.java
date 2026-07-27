@@ -13,6 +13,8 @@ public class SchedulerMetrics {
             "taskflow_task_results_duplicate_total";
     public static final String ASSIGNMENT_GENERATIONS_TOTAL_NAME =
             "taskflow_assignment_generations_total";
+    public static final String PAYLOAD_INTEGRITY_FAILURES_TOTAL_NAME =
+            "taskflow_payload_integrity_failures_total";
 
     private final AtomicLong queueDepth = new AtomicLong(0);
     private final AtomicLong activeJobs = new AtomicLong(0);
@@ -26,6 +28,7 @@ public class SchedulerMetrics {
     private final AtomicLong taskResultsStaleTotal = new AtomicLong(0);
     private final AtomicLong unknownResultCount = new AtomicLong(0);
     private final AtomicLong resultStorageFailureCount = new AtomicLong(0);
+    private final AtomicLong payloadIntegrityFailuresTotal = new AtomicLong(0);
     private final AtomicLong dispatchLatencyTotalMs = new AtomicLong(0);
     private final AtomicLong dispatchLatencySamples = new AtomicLong(0);
 
@@ -89,6 +92,10 @@ public class SchedulerMetrics {
         }
     }
 
+    public long recordPayloadIntegrityFailure() {
+        return payloadIntegrityFailuresTotal.incrementAndGet();
+    }
+
     public Snapshot snapshot() {
         long successes = taskResultsCommittedTotal.get();
         long failures = failureCount.get();
@@ -113,6 +120,7 @@ public class SchedulerMetrics {
                 taskResultsStaleTotal.get(),
                 unknownResultCount.get(),
                 resultStorageFailureCount.get(),
+                payloadIntegrityFailuresTotal.get(),
                 avgDispatchLatencyMs,
                 successRate
         );
@@ -131,6 +139,7 @@ public class SchedulerMetrics {
             long taskResultsStaleTotal,
             long unknownResultCount,
             long resultStorageFailureCount,
+            long payloadIntegrityFailuresTotal,
             double avgDispatchLatencyMs,
             double taskSuccessRate
     ) {

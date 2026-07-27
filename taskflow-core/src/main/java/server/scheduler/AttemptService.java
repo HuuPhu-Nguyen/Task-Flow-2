@@ -33,6 +33,24 @@ final class AttemptService {
                                      int maxRetries,
                                      String failureReason,
                                      long finishedAt) {
+        return closeFailedAttempt(
+                task,
+                workerId,
+                decision,
+                maxRetries,
+                true,
+                failureReason,
+                finishedAt
+        );
+    }
+
+    FailureResult closeFailedAttempt(TaskUnit<?> task,
+                                     String workerId,
+                                     TransitionDecision decision,
+                                     int maxRetries,
+                                     boolean retryable,
+                                     String failureReason,
+                                     long finishedAt) {
         if (!decision.accepted()) {
             return new FailureResult(
                     TaskUnit.FailureOutcome.IGNORED,
@@ -69,7 +87,11 @@ final class AttemptService {
             return new FailureResult(expected, durableOutcome, decision, false);
         }
 
-        TaskUnit.FailureOutcome outcome = task.failAttemptBy(workerId, maxRetries);
+        TaskUnit.FailureOutcome outcome = task.failAttemptBy(
+                workerId,
+                maxRetries,
+                retryable
+        );
         if (outcome == TaskUnit.FailureOutcome.IGNORED || outcome != expected) {
             throw new IllegalStateException(
                     "Mutable task projection disagreed with accepted transition decision for "

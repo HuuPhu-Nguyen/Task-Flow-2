@@ -1,5 +1,6 @@
 package peer.engine;
 
+import objectstore.PayloadIntegrityException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import plugin.RetrySafety;
@@ -9,6 +10,7 @@ import protocol.MessageValidator;
 import protocol.PeerIdentity;
 import protocol.PongMessage;
 import protocol.TaskAssignMessage;
+import protocol.TaskFailureClassification;
 import protocol.TaskResultMessage;
 import transport.TransientDeliveryException;
 
@@ -350,19 +352,49 @@ public class PeerExecutionEngine implements AutoCloseable {
                     true,
                     null
             );
-        } catch (Exception e) {
-            return new TaskResultMessage(
+        } catch (PayloadIntegrityException e) {
+            LOGGER.error(
+                    "event=payload_integrity_failure_detected peer_id={} job_id={} task_id={} "
+                            + "attempt_number={} assignment_id={} object_key={} mismatch={} "
+                            + "expected_length={} actual_length={} expected_sha256={} "
+                            + "actual_sha256={}",
                     nodeId,
-                    java.time.Instant.now().toString(),
-                    task.getTaskId(),
                     task.getJobId(),
+                    task.getTaskId(),
                     task.getAttemptNumber(),
                     task.getAssignmentId(),
-                    null,
-                    false,
-                    e.getMessage()
+                    e.objectKey(),
+                    e.mismatch(),
+                    e.expectedLength(),
+                    e.actualLength(),
+                    e.expectedSha256(),
+                    e.actualSha256()
             );
+            return failedResult(
+                    task,
+                    e.getMessage(),
+                    TaskFailureClassification.PERMANENT_PAYLOAD_INTEGRITY
+            );
+        } catch (Exception e) {
+            return failedResult(task, e.getMessage(), TaskFailureClassification.RETRYABLE);
         }
+    }
+
+    private TaskResultMessage failedResult(TaskAssignMessage task,
+                                           String errorMessage,
+                                           TaskFailureClassification classification) {
+        return new TaskResultMessage(
+                nodeId,
+                java.time.Instant.now().toString(),
+                task.getTaskId(),
+                task.getJobId(),
+                task.getAttemptNumber(),
+                task.getAssignmentId(),
+                null,
+                false,
+                errorMessage,
+                classification
+        );
     }
 
     private void logCacheDecision(TaskAssignMessage task, AssignmentExecution.Disposition disposition) {
