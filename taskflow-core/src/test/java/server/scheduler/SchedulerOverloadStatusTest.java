@@ -123,12 +123,21 @@ class SchedulerOverloadStatusTest {
             assertTrue(events.get(0).contains("configured_maximum=2"));
             assertTrue(events.get(0).contains("observed_value=2"));
             assertTrue(events.get(0).contains("job_submit_prefetch=1"));
+            assertTrue(events.get(0).contains("timestamp=1970-01-01T00:00:00.100Z"));
+            assertTrue(events.get(0).contains("coordinator_instance_id=COORDINATOR_TEST"));
+            assertTrue(events.get(0).contains("outcome=OVERLOADED"));
+            assertTrue(events.get(0).contains("failure_reason_code=MAX_ACTIVE_JOBS"));
             assertTrue(events.get(1).contains("event=scheduler_overload_changed"));
             assertTrue(events.get(1).contains("primary_reason=SUBMISSION_MAILBOX_CAPACITY"));
+            assertTrue(events.get(1).contains("outcome=OVERLOADED"));
+            assertTrue(events.get(1)
+                    .contains("failure_reason_code=SUBMISSION_MAILBOX_CAPACITY"));
             assertTrue(events.get(2).contains("event=scheduler_overload_changed"));
             assertTrue(events.get(3).contains("event=scheduler_overload_recovered"));
             assertTrue(events.get(3).contains("primary_reason=NONE"));
             assertTrue(events.get(3).contains("pending_outbox_observation_healthy=true"));
+            assertTrue(events.get(3).contains("outcome=RECOVERED"));
+            assertTrue(events.get(3).contains("failure_reason_code=NONE"));
         } finally {
             schedulerLogger.detachAppender(appender);
             appender.stop();
@@ -144,7 +153,11 @@ class SchedulerOverloadStatusTest {
                 "TASKFLOW_MAX_ACTIVE_TASKS", "3",
                 "TASKFLOW_MAX_PENDING_OUTBOX_ROWS", "4"
         ));
-        return new SchedulerOverloadStatus(config, clock, new SchedulerEventLog());
+        return new SchedulerOverloadStatus(
+                config,
+                clock,
+                new SchedulerEventLog(clock, "COORDINATOR_TEST")
+        );
     }
 
     private static final class MutableClock implements TaskFlowClock {

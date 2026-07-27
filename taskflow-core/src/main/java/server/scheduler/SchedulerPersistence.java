@@ -48,7 +48,7 @@ final class SchedulerPersistence {
                     "operation", operation,
                     "job_id", jobId,
                     "task_id", taskId,
-                    "outcome", normalized
+                    "durable_transition_outcome", normalized
             ));
             return normalized;
         }
@@ -57,7 +57,7 @@ final class SchedulerPersistence {
                     "operation", operation,
                     "job_id", jobId,
                     "task_id", taskId,
-                    "outcome", normalized
+                    "durable_transition_outcome", normalized
             ));
             return normalized;
         }
@@ -65,7 +65,7 @@ final class SchedulerPersistence {
                 "operation", operation,
                 "job_id", jobId,
                 "task_id", taskId,
-                "outcome", normalized
+                "durable_transition_outcome", normalized
         ));
         return normalized;
     }

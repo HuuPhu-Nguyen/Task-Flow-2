@@ -1,7 +1,10 @@
 # Observability Scope
 
 This document records what TaskFlow exposes through logs today and what remains
-deferred before adding a dedicated metrics backend.
+deferred before adding a dedicated metrics backend. The normative common
+envelope, outcome/reason vocabulary, correlation rules, and data-protection
+constraints for coordinator scheduler state transitions are defined in
+[Coordinator event schema](OBSERVABILITY.md).
 
 ## Current Position
 
@@ -64,8 +67,9 @@ Queue pressure and scheduler health:
 
 Job lifecycle:
 
-- `job_started` records accepted scheduler jobs with `job_id`, `task_type`,
-  requester, task count, and the plugin's `retry_safety` declaration.
+- `job_started` records accepted scheduler jobs with the common event envelope,
+  `job_id`, `task_type`, requester, task count, and the plugin's `retry_safety`
+  declaration.
 - `job_submission_replayed` records an exact owner/request-hash replay with job
   ID, type, requester route, and durable job status. It does not imply another
   job/task creation transition.
@@ -107,7 +111,9 @@ Task assignment, retry, and failure:
 - `task_result_duplicate_ignored` records a repeated result for an assignment
   whose authoritative result was already committed. It is intentionally
   distinct from stale-assignment rejection.
-- Each of those four events carries the complete correlation tuple as
+- Each of those four events, plus dispatch, executor-failure, timeout,
+  lease-expiry, and per-task participant-unavailability transitions, carries
+  the complete correlation tuple as
   `job_id`, `task_id`, `attempt_number`, `assignment_id`, and `worker_id`.
   These are the structured-log spellings of the protocol/domain fields
   `jobId`, `taskId`, `attemptNumber`, `assignmentId`, and `workerId`; `workerId`
@@ -117,9 +123,11 @@ Task assignment, retry, and failure:
   Duplicate, stale, and unknown broker results are acknowledged; storage
   failure receives bounded delayed retry through the scheduler's
   processing-failure path.
-- `task_failed`, `task_timeout`, and `task_peer_unavailable` record failed
-  attempts with `retry_count` and `terminal_failure`. `task_failed` also
-  includes the bounded `failure_classification`.
+- `task_failed`, `task_timeout`, `task_lease_expired`, and
+  `task_peer_unavailable` record failed attempts with the exact assignment
+  tuple, `retry_count`, and `terminal_failure`. `task_failed` also includes the
+  bounded `failure_classification`; participant-unavailability events use a
+  stable `reason_code`.
 - `payload_integrity_failure_detected` is emitted by the executor before it
   returns the permanent failure result. It includes the assignment correlation
   tuple, object key, mismatch type, expected/actual length, and
@@ -146,8 +154,8 @@ Task assignment, retry, and failure:
   deleted, active, authoritative, ignored/preserved, failed, store-unavailable,
   and configured-limit values. These bounded log fields are current evidence;
   `taskflow_orphan_outputs_total` remains a Phase 6 exporter item.
-- `task_lease_expired` records assigned work whose persisted lease expired
-  before a result was accepted.
+- `task_lease_expired` records the exact assigned generation whose persisted
+  lease expired before a result was accepted.
 - `peer_unavailable_tasks_released` records how many tasks were returned for
   retry or made terminal after peer disconnect or heartbeat timeout.
 - `task_dispatch_failed` records failed assignment sends before work reaches a
@@ -309,6 +317,10 @@ command against SQLite/RabbitMQ state, but TaskFlow does not aggregate those
 events into a metrics backend or provide exporter or dashboard contracts. The
 stable fencing-counter names above do not have high-cardinality labels or
 metric exemplars; assignment correlation remains on structured log events.
+Coordinator scheduler events always include `timestamp`,
+`coordinator_instance_id`, `outcome`, and `failure_reason_code`; applicable
+job/task/assignment fields follow the normative
+[event schema](OBSERVABILITY.md).
 
 SQLite persistence now records durable task-attempt history rows for assignment,
 success, retry, terminal failure, dispatch failure, startup reconciliation, and

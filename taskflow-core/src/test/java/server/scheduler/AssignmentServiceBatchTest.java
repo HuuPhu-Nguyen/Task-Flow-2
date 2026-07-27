@@ -224,7 +224,7 @@ class AssignmentServiceBatchTest {
 
         private Fixture(SchedulerConfig config, InMemoryPeerRegistry registry) {
             clock = new MutableClock(1_000L);
-            SchedulerEventLog events = new SchedulerEventLog();
+            SchedulerEventLog events = new SchedulerEventLog(clock, "COORDINATOR_TEST");
             SchedulerPersistence persistence = new SchedulerPersistence(null, events);
             SchedulerMetrics metrics = new SchedulerMetrics();
             SchedulerOutboxService outbox = new SchedulerOutboxService(

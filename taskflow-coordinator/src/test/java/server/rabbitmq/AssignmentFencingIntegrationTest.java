@@ -207,6 +207,10 @@ class AssignmentFencingIntegrationTest {
         assertTrue(event.contains("attempt_number=" + assignment.getAttemptNumber()));
         assertTrue(event.contains("assignment_id=" + assignment.getAssignmentId()));
         assertTrue(event.contains("worker_id=" + PEER_ID));
+        assertTrue(event.contains(" timestamp="));
+        assertTrue(event.contains(" coordinator_instance_id=COORDINATOR_"));
+        assertTrue(event.contains(" outcome="));
+        assertTrue(event.contains(" failure_reason_code="));
     }
 
     private static void assertNoTraceEvent(ThreadSafeListAppender appender,

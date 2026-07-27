@@ -373,10 +373,12 @@ final class AssignmentService {
             task.resetToPending();
             state.indexClosedAssignment(task, assignmentIdentity);
             registry.releaseTaskCapacity(reservation, "DISPATCH_FAILED");
-            events.error("task_dispatch_failed", events.fields(
-                    "job_id", job.getJobId(),
-                    "task_id", task.getTaskId(),
-                    "peer_id", peer.getNodeId(),
+            events.error("task_dispatch_failed", events.assignmentTraceFields(
+                    job.getJobId(),
+                    task.getTaskId(),
+                    assignmentIdentity.attemptNumber(),
+                    assignmentIdentity.assignmentId(),
+                    peer.getNodeId(),
                     "error", e.getMessage()
             ));
             return false;

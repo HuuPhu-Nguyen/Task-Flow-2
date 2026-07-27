@@ -24,7 +24,7 @@ class JobCompletionServiceBatchTest {
         MutableClock clock = new MutableClock(1_000L);
         RejectingOutput output = new RejectingOutput();
         SchedulerState state = new SchedulerState(config);
-        SchedulerEventLog events = new SchedulerEventLog();
+        SchedulerEventLog events = new SchedulerEventLog(clock, "COORDINATOR_TEST");
         SchedulerPersistence persistence = new SchedulerPersistence(null, events);
         JobCompletionService completions = new JobCompletionService(
                 state,

@@ -156,10 +156,12 @@ final class ResultCommitService {
             }
             return DeliveryDisposition.ACK_DUPLICATE_OR_STALE;
         }
-        events.error("task_failed", events.fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "peer_id", envelope.fromNodeId(),
+        events.error("task_failed", events.assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                result.getAttemptNumber(),
+                result.getAssignmentId(),
+                envelope.fromNodeId(),
                 "retry_count", task.getRetryCount(),
                 "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
                 "failure_classification", classification,

@@ -95,7 +95,7 @@ public class TaskScheduler implements Runnable {
         this.state = state;
         this.mailbox = checkedMailbox;
         this.metrics = new SchedulerMetrics();
-        SchedulerEventLog events = new SchedulerEventLog();
+        SchedulerEventLog events = new SchedulerEventLog(checkedClock, leaseOwnerId.trim());
         this.overloadStatus = new SchedulerOverloadStatus(
                 effectiveConfig,
                 checkedClock,

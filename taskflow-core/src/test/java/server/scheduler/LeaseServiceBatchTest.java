@@ -61,7 +61,7 @@ class LeaseServiceBatchTest {
                     CapacityReservations.forAssignment(job, task, identity)
             );
         }
-        SchedulerEventLog events = new SchedulerEventLog();
+        SchedulerEventLog events = new SchedulerEventLog(clock, "COORDINATOR_TEST");
         SchedulerPersistence persistence = new SchedulerPersistence(null, events);
         SchedulerMetrics metrics = new SchedulerMetrics();
         RejectingOutput output = new RejectingOutput();

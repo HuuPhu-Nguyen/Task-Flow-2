@@ -1,6 +1,7 @@
 package server.scheduler;
 
 import server.job.EmbarrassinglyParallelJob;
+import server.job.AssignmentIdentity;
 import server.job.TaskUnit;
 import server.runtime.TaskFlowClock;
 import server.scheduler.transition.TransitionDecision;
@@ -98,6 +99,10 @@ final class LeaseService {
             return;
         }
 
+        AssignmentIdentity assignment = task.getAssignmentIdentity()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Accepted timeout is missing assignment identity for " + task.getTaskId()
+                ));
         String assignedPeerId = task.getAssignedPeerId();
         AttemptService.FailureResult failure = attempts.closeFailedAttempt(
                 task,
@@ -112,10 +117,12 @@ final class LeaseService {
             rescheduleForLaterCycle(target, now);
             return;
         }
-        events.error("task_timeout", events.fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "assigned_peer_id", assignedPeerId,
+        events.error("task_timeout", events.assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                assignment.attemptNumber(),
+                assignment.assignmentId(),
+                assignedPeerId,
                 "retry_count", task.getRetryCount(),
                 "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
         ));
@@ -152,6 +159,11 @@ final class LeaseService {
             return LeaseExpiryResult.notHandled();
         }
 
+        AssignmentIdentity assignment = task.getAssignmentIdentity()
+                .orElseThrow(() -> new IllegalStateException(
+                        "Accepted lease expiry is missing assignment identity for "
+                                + task.getTaskId()
+                ));
         String assignedPeerId = task.getAssignedPeerId();
         long leaseExpiresAt = task.getLeaseExpiresAtMillis();
         AttemptService.FailureResult failure = attempts.closeFailedAttempt(
@@ -169,10 +181,12 @@ final class LeaseService {
                             : null
             );
         }
-        events.error("task_lease_expired", events.fields(
-                "job_id", job.getJobId(),
-                "task_id", task.getTaskId(),
-                "assigned_peer_id", assignedPeerId,
+        events.error("task_lease_expired", events.assignmentTraceFields(
+                job.getJobId(),
+                task.getTaskId(),
+                assignment.attemptNumber(),
+                assignment.assignmentId(),
+                assignedPeerId,
                 "lease_expires_at", leaseExpiresAt,
                 "retry_count", task.getRetryCount(),
                 "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE
@@ -199,6 +213,11 @@ final class LeaseService {
         for (SchedulerState.AssignmentTarget target : state.currentAssignmentsForWorker(peerId)) {
             EmbarrassinglyParallelJob<?, ?> job = target.job();
             TaskUnit<?> task = target.task();
+            AssignmentIdentity assignment = task.getAssignmentIdentity()
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Unavailable worker target is missing assignment identity for "
+                                    + task.getTaskId()
+                    ));
             long occurredAt = clock.nowEpochMillis();
             TransitionDecision decision = transitions.workerUnavailable(
                     task,
@@ -223,13 +242,15 @@ final class LeaseService {
                 terminalFailures++;
             }
 
-            events.error("task_peer_unavailable", events.fields(
-                    "job_id", job.getJobId(),
-                    "task_id", task.getTaskId(),
-                    "peer_id", peerId,
+            events.error("task_peer_unavailable", events.assignmentTraceFields(
+                    job.getJobId(),
+                    task.getTaskId(),
+                    assignment.attemptNumber(),
+                    assignment.assignmentId(),
+                    peerId,
                     "retry_count", task.getRetryCount(),
                     "terminal_failure", failure.outcome() == TaskUnit.FailureOutcome.TERMINAL_FAILURE,
-                    "reason", normalizedReason
+                    "reason_code", normalizedReason
             ));
             recordTerminalOrPersistenceFailure(job, task, failure, jobsToFail,
                     " exceeded max retries after peer became unavailable.");
@@ -240,7 +261,7 @@ final class LeaseService {
                     "peer_id", peerId,
                     "retry_scheduled", retryScheduled,
                     "terminal_failures", terminalFailures,
-                    "reason", normalizedReason
+                    "reason_code", normalizedReason
             ));
         }
         failJobs(jobsToFail);

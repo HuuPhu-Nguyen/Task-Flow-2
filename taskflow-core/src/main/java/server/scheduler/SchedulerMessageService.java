@@ -530,7 +530,7 @@ final class SchedulerMessageService {
                 "job_id", submit.getJobId(),
                 "task_type", decision.taskType(),
                 "requester_id", requesterNodeId,
-                "outcome", outcome
+                "submission_outcome", outcome
         ));
         sendJobStartFailure(requesterNodeId, submit, reason);
         return true;

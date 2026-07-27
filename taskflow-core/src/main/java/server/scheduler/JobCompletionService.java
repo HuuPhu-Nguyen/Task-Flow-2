@@ -147,7 +147,7 @@ final class JobCompletionService {
                 events.error("job_terminal_persistence_deferred", events.fields(
                         "job_id", completion.job.getJobId(),
                         "success", completion.success,
-                        "outcome", outcome
+                        "durable_transition_outcome", outcome
                 ));
                 scheduleRetryIfPending(completion, now);
                 return;
@@ -202,7 +202,7 @@ final class JobCompletionService {
                     "requester_id", completion.job.getRequesterNodeId(),
                     "attempt", completion.attempts,
                     "reason", "broker_outbox_persistence_failed",
-                    "outcome", durableOutcome
+                    "durable_transition_outcome", durableOutcome
             ));
             return;
         }
