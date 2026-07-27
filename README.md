@@ -777,6 +777,21 @@ The connection-recovery live test uses the RabbitMQ management API to close the 
 
 The coordinator live suites cover broker-backed job completion; a confirmed, routed assignment with persistent delivery metadata; seeded assignment/final-result outbox replay; pending-row recovery after a closed publish connection and after an unroutable worker assignment; exact duplicate assignment replay after an injected SQLite sent-mark failure; connection-close redelivery both before acknowledgement and after durable result commit; ordered shutdown ownership; and the complete same-participant ABA sequence. The managed Testcontainers/Toxiproxy suite additionally starts with RabbitMQ unavailable, proves timeout-bounded startup attempts with capped backoff, stops the real broker during an active assignment, commits a replacement assignment and pending outbox row while offline, restarts the same broker, waits for shared and peer topology/consumer recovery, replays the exact outbox identity, rejects the stale pre-outage result, and completes once the recovered participant returns a current result. The post-commit acknowledgement-loss case proves SQLite commits once and the redelivery is acknowledged as `DUPLICATE_ALREADY_COMPLETED`. The shutdown case drains a delivery admitted before intake stops and proves a later deferred delivery is marked redelivered after channel close. In the ABA scenario, attempt 1 / assignment X is failed, the same participant receives attempt 2 / assignment Y, a late successful X result is acknowledged as stale without changing Y, and only Y produces the authoritative result.
 
+### One-command stale-result proof
+
+Run the deterministic lease-expiry and same-executor ABA trace without Docker
+or RabbitMQ:
+
+```powershell
+.\scripts\demo-stale-result-fencing.ps1
+```
+
+The command asserts and prints submission, assignment X, exact lease expiry,
+assignment Y, stale X rejection, current Y commitment, and the single terminal
+result. See
+[`docs/STALE_RESULT_DEMO.md`](docs/STALE_RESULT_DEMO.md) for the exact output,
+durable assertions, and scope.
+
 ### Object-store Contract Tests
 
 The object-store contract is part of the normal Maven reactor. It runs once

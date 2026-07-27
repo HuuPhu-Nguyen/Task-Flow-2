@@ -187,6 +187,9 @@ Task assignment, retry, and failure:
   SQLite committed the pointer.
 - `task_result_stale_rejected` records an obsolete assignment generation that
   the authoritative store rejected, including the same-participant ABA case.
+  The [deterministic stale-result demo](STALE_RESULT_DEMO.md) renders this
+  event between assignment Y and Y's authoritative commit in one asserted
+  command.
 - `task_result_duplicate_ignored` records a repeated result for an assignment
   whose authoritative result was already committed. It is intentionally
   distinct from stale-assignment rejection.
