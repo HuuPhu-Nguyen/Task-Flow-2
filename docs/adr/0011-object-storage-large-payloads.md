@@ -84,10 +84,15 @@ does not waive those requirements.
 - One inherited
   [`ObjectStoreContractTest`](../../taskflow-objectstore-minio/src/test/java/objectstore/minio/ObjectStoreContractTest.java)
   runs against both the in-memory fake and a real Testcontainers MinIO service.
-- TF-0502 through TF-0506 still own runtime environment wiring, protocol
-  references, end-to-end integrity verification, attempt-specific authoritative
-  output pointers, and garbage collection. The TF-0501 metadata contract alone
-  does not close I9.
+- TF-0502 adds the opt-in Compose MinIO service, external credential inputs,
+  persistent named volume, native health check, idempotent private-bucket
+  initializer, and a real stop/start test that re-reads object bytes and
+  metadata before deletion. Coordinator/core/persistence source remains
+  independent from the MinIO SDK.
+- TF-0503 through TF-0506 still own runtime protocol references, end-to-end
+  integrity verification, attempt-specific authoritative output pointers, and
+  garbage collection. Environment readiness and metadata survival do not close
+  I9.
 
 ## Related Documents
 

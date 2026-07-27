@@ -18,6 +18,51 @@ services:
       timeout: 5s
       retries: 12
 
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: ["object-store"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}"
+        : "$${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}"
+        exec minio server /data --console-address ":9001"
+    volumes:
+      - taskflow-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-05-21T01-59-54Z
+    profiles: ["object-store"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ROOT_USER
+      - MINIO_ROOT_PASSWORD
+      - TASKFLOW_MINIO_BUCKET=${TASKFLOW_MINIO_BUCKET:-taskflow}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}"
+        : "$${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}"
+        mc alias set taskflow http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}"
+        mc mb --ignore-existing "taskflow/$${TASKFLOW_MINIO_BUCKET}"
+        mc stat "taskflow/$${TASKFLOW_MINIO_BUCKET}"
+
   coordinator:
     build:
       context: .
@@ -126,3 +171,6 @@ services:
         cp -R "$$latest"/. target/demo-results/
         echo "Demo results:"
         ls -la target/demo-results
+
+volumes:
+  taskflow-minio-data:

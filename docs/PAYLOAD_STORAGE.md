@@ -43,9 +43,59 @@ classifications. The MinIO SDK is confined to
 The same contract tests run against an in-memory fake and a real MinIO
 Testcontainers service. Those tests prove operation/metadata parity, streaming
 ownership, bounded prefix pagination, independent attempt-shaped keys,
-idempotent deletion, and outage classification. They do not prove I9
-end-to-end content integrity: TF-0504 still owns digest calculation during
-upload and exact length/SHA-256 verification before processing.
+idempotent deletion, outage classification, and object/metadata survival across
+a real MinIO container restart. They do not prove I9 end-to-end content
+integrity: TF-0504 still owns digest calculation during upload and exact
+length/SHA-256 verification before processing.
+
+## Local MinIO environment
+
+`docker-compose.yml` contains an opt-in `object-store` profile with:
+
+- the pinned MinIO release used by the adapter integration tests;
+- S3 on port `9000` and the console on port `9001`;
+- a named `taskflow-minio-data` volume;
+- the MinIO-native `mc ready local` health check;
+- a pinned, one-shot `mc` initializer that creates the configured bucket
+  idempotently and verifies it exists.
+
+The profile has no committed credential values or credential fallbacks. Export
+`MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in the shell that runs Compose.
+`TASKFLOW_MINIO_BUCKET` is non-secret and defaults to `taskflow`.
+
+```powershell
+$env:MINIO_ROOT_USER = "<local-access-key>"
+$env:MINIO_ROOT_PASSWORD = "<local-secret-key>"
+$env:TASKFLOW_MINIO_BUCKET = "taskflow"
+docker compose --profile object-store up --detach minio minio-init
+docker compose --profile object-store ps --all minio minio-init
+```
+
+The expected state is a healthy `minio` service and an exited-zero
+`minio-init`. Bucket initialization and the restart check are repeatable:
+
+```powershell
+docker compose --profile object-store run --rm --no-deps minio-init
+docker compose --profile object-store restart minio
+docker compose --profile object-store ps minio
+docker compose --profile object-store run --rm --no-deps minio-init
+```
+
+Removing the two containers does not remove the named volume:
+
+```powershell
+docker compose --profile object-store rm --stop --force minio minio-init
+```
+
+Do not add `--volumes` unless deleting all local object data is intentional.
+The default Git ignore rules exclude `.env` and local `.env.*` files if a
+developer elects to keep the variables there. `.env.example` remains
+intentionally trackable for placeholders only and must not contain real
+credentials.
+
+The MinIO service and adapter have no coordinator-state dependency. SQLite
+remains the sole coordinator authority, and current runtime payload flows do
+not call the object store. TF-0503 owns that runtime wiring.
 
 ## Configuration
 
@@ -113,6 +163,7 @@ result handling operation. They do not grant access outside the configured
 payload storage directory.
 
 The active conversion protocol remains intentionally local/shared-filesystem
-based. Runtime object-store credentials and bucket bootstrap, distributed
-object references, attempt-specific authoritative output pointers, distributed
-cleanup, and signed expiring URLs are not implemented.
+based. A local MinIO environment, external credentials, health check, bucket
+bootstrap, and restart evidence now exist, but distributed object references,
+attempt-specific authoritative output pointers, distributed cleanup, and
+signed expiring URLs are not implemented.

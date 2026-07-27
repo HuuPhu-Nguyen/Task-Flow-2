@@ -117,10 +117,12 @@ Framework core no longer imports concrete image, video, text, or example job cla
 `taskflow-spi` now owns a streaming `ObjectStore` port and validated
 `ObjectReference(key, contentLength, sha256, contentType)` metadata. Its
 put/get/stat/delete/copy/bounded-prefix-list contract runs unchanged against an
-in-memory fake and a real Testcontainers MinIO service. Runtime conversion
-payloads are not wired to that port yet: Docker Compose configuration, bucket
-bootstrap, credentials, protocol references, end-to-end byte verification,
-attempt-specific output commitment, and orphan cleanup remain Phase 5 work.
+in-memory fake and a real Testcontainers MinIO service. The opt-in
+`object-store` Docker Compose profile provides a persistent local MinIO service,
+health check, and idempotent bucket bootstrap using environment-supplied
+credentials. Runtime conversion payloads are not wired to that port yet:
+protocol references, end-to-end byte verification, attempt-specific output
+commitment, and orphan cleanup remain Phase 5 work.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, requester-role job submission and result routing, executor-role task execution, and history reads. It is a participant UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for broker delivery, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -746,6 +748,72 @@ This command and the full `.\mvnw.cmd test` gate require a working Docker
 engine. Testcontainers starts and removes the pinned MinIO test service; no
 runtime TaskFlow credentials or bucket configuration are used.
 
+### Local MinIO Environment
+
+The opt-in `object-store` Compose profile starts the same pinned MinIO release
+used by the integration tests, persists data in the
+`taskflow-minio-data` named volume, checks service readiness, and initializes a
+private bucket with a pinned `mc` container. Credentials deliberately have no
+checked-in values or defaults.
+
+Set local credentials in the current shell. MinIO requires a root user of at
+least three characters and a root password of at least eight characters:
+
+```powershell
+$env:MINIO_ROOT_USER = "<local-access-key>"
+$env:MINIO_ROOT_PASSWORD = "<local-secret-key>"
+$env:TASKFLOW_MINIO_BUCKET = "taskflow" # optional; this is the default
+```
+
+The Bash equivalents are:
+
+```bash
+export MINIO_ROOT_USER='<local-access-key>'
+export MINIO_ROOT_PASSWORD='<local-secret-key>'
+export TASKFLOW_MINIO_BUCKET='taskflow' # optional; this is the default
+```
+
+Start MinIO and the idempotent bucket initializer:
+
+```bash
+docker compose --profile object-store up --detach minio minio-init
+docker compose --profile object-store ps --all minio minio-init
+```
+
+The server must report `healthy`, and `minio-init` must exit with code `0`.
+The S3 endpoint is `http://localhost:9000`; the console is
+`http://localhost:9001`. Re-run the initializer at any time to verify or create
+the configured bucket without replacing an existing bucket:
+
+```bash
+docker compose --profile object-store run --rm --no-deps minio-init
+```
+
+Verify the restart path while keeping the same credential variables in the
+shell:
+
+```bash
+docker compose --profile object-store restart minio
+docker compose --profile object-store ps minio
+docker compose --profile object-store run --rm --no-deps minio-init
+```
+
+Ordinary container removal retains the named data volume:
+
+```bash
+docker compose --profile object-store rm --stop --force minio minio-init
+```
+
+Do not add `--volumes` unless deleting all local MinIO data is intentional.
+An untracked `.env` file may supply the variables for local development;
+TaskFlow's `.gitignore` excludes `.env` and local `.env.*` files.
+`.env.example` is the explicit placeholder-only exception and must never
+contain real credentials.
+
+This profile provides and verifies the local object-store environment only.
+TF-0503 still owns coordinator/requester/executor payload wiring, so stopping
+or restarting MinIO cannot mutate the current SQLite coordinator state.
+
 ---
 
 ## Quick RabbitMQ Demo
@@ -820,10 +888,12 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 - The object-store port and MinIO adapter contract are implemented, including
   controlled `taskflow/` keys, required metadata, streaming operations, bounded
   prefix pages, idempotent deletion, and typed missing/invalid-metadata/storage
-  failures. Production runtime paths still use inline Base64 or the
-  transitional local/shared-file reference. TF-0502 through TF-0506 own MinIO
-  environment wiring, distributed object references, end-to-end digest/length
-  verification, fenced attempt output ownership, and orphan cleanup.
+  failures. The opt-in Compose environment adds persistent local MinIO,
+  environment-only credentials, health checking, idempotent bucket bootstrap,
+  and restart evidence. Production runtime paths still use inline Base64 or the
+  transitional local/shared-file reference. TF-0503 through TF-0506 own
+  distributed object references, end-to-end digest/length verification, fenced
+  attempt output ownership, and orphan cleanup.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.
 - SQLite is the current `JobStateStore`, peer registry store, and coordinator broker outbox store implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, and schema-v12 stores the canonical job-submission request hash. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows for RabbitMQ runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
