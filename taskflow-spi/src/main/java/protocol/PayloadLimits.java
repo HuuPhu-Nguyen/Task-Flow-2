@@ -7,6 +7,7 @@ import com.google.gson.JsonPrimitive;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -20,6 +21,7 @@ public final class PayloadLimits {
     public static final int DEFAULT_MAX_TASKS_PER_JOB = 256;
     public static final long DEFAULT_MAX_JOB_PAYLOAD_BYTES = 64L * 1024L * 1024L;
     public static final long DEFAULT_MAX_RESULT_BYTES = 64L * 1024L * 1024L;
+    public static final long DEFAULT_MAX_INLINE_PAYLOAD_BYTES = 8L * 1024L * 1024L;
 
     public static final String MAX_INPUT_BYTES_PROPERTY = "taskflow.maxInputBytes";
     public static final String MAX_INPUT_BYTES_ENV = "TASKFLOW_MAX_INPUT_BYTES";
@@ -29,6 +31,8 @@ public final class PayloadLimits {
     public static final String MAX_JOB_PAYLOAD_BYTES_ENV = "TASKFLOW_MAX_JOB_PAYLOAD_BYTES";
     public static final String MAX_RESULT_BYTES_PROPERTY = "taskflow.maxResultBytes";
     public static final String MAX_RESULT_BYTES_ENV = "TASKFLOW_MAX_RESULT_BYTES";
+    public static final String MAX_INLINE_PAYLOAD_BYTES_PROPERTY = "taskflow.maxInlinePayloadBytes";
+    public static final String MAX_INLINE_PAYLOAD_BYTES_ENV = "TASKFLOW_MAX_INLINE_PAYLOAD_BYTES";
 
     private PayloadLimits() {
     }
@@ -48,6 +52,18 @@ public final class PayloadLimits {
 
     public static long maxResultBytes() {
         return positiveLong(MAX_RESULT_BYTES_PROPERTY, MAX_RESULT_BYTES_ENV, DEFAULT_MAX_RESULT_BYTES);
+    }
+
+    /**
+     * Returns the exclusive raw-byte ceiling for plugin file payloads carried
+     * as Base64. Zero disables file-payload inlining.
+     */
+    public static long maxInlinePayloadBytes() {
+        return nonNegativeLong(
+                MAX_INLINE_PAYLOAD_BYTES_PROPERTY,
+                MAX_INLINE_PAYLOAD_BYTES_ENV,
+                DEFAULT_MAX_INLINE_PAYLOAD_BYTES
+        );
     }
 
     public static long base64EncodedLength(long rawBytes) {
@@ -76,7 +92,7 @@ public final class PayloadLimits {
     }
 
     /**
-     * Finds the largest protocol payload reference recursively without
+     * Finds the largest portable object reference recursively without
      * depending on any plugin payload type.
      */
     public static long maximumReferencedPayloadBytes(Object value) {
@@ -96,8 +112,13 @@ public final class PayloadLimits {
         }
 
         JsonObject object = value.getAsJsonObject();
-        if (looksLikePayloadReference(object)) {
-            return payloadReferenceSize(object);
+        if (looksLikeLegacyPayloadReference(object)) {
+            throw new IllegalArgumentException(
+                    "Local filesystem payload references are not supported."
+            );
+        }
+        if (looksLikeObjectReference(object)) {
+            return objectReferenceSize(object);
         }
         long maximum = 0L;
         for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
@@ -106,38 +127,88 @@ public final class PayloadLimits {
         return maximum;
     }
 
-    private static boolean looksLikePayloadReference(JsonObject object) {
+    /**
+     * Returns the largest decoded {@code base64Data} field recursively, or
+     * {@code -1} when no inline file payload is present.
+     */
+    public static long maximumInlinePayloadBytes(Object value) {
+        return maximumInlinePayloadBytes(GSON.toJsonTree(value));
+    }
+
+    private static long maximumInlinePayloadBytes(JsonElement value) {
+        if (value == null || value.isJsonNull() || value.isJsonPrimitive()) {
+            return -1L;
+        }
+        if (value.isJsonArray()) {
+            long maximum = -1L;
+            for (JsonElement element : value.getAsJsonArray()) {
+                maximum = Math.max(maximum, maximumInlinePayloadBytes(element));
+            }
+            return maximum;
+        }
+
+        JsonObject object = value.getAsJsonObject();
+        long maximum = inlinePayloadSize(object);
+        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
+            maximum = Math.max(maximum, maximumInlinePayloadBytes(entry.getValue()));
+        }
+        return maximum;
+    }
+
+    private static long inlinePayloadSize(JsonObject object) {
+        if (!object.has("base64Data") || object.get("base64Data").isJsonNull()) {
+            return -1L;
+        }
+        JsonElement data = object.get("base64Data");
+        if (!isString(data)) {
+            throw new IllegalArgumentException("Inline payload Base64 data is malformed.");
+        }
+        try {
+            return Base64.getDecoder().decode(data.getAsString()).length;
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Inline payload Base64 data is malformed.", e);
+        }
+    }
+
+    private static boolean looksLikeLegacyPayloadReference(JsonObject object) {
         return object.has("storageType")
                 && object.has("location")
                 && object.has("sizeBytes")
                 && object.has("sha256");
     }
 
-    private static long payloadReferenceSize(JsonObject object) {
-        JsonElement storageType = object.get("storageType");
-        JsonElement location = object.get("location");
-        JsonElement sizeBytes = object.get("sizeBytes");
+    private static boolean looksLikeObjectReference(JsonObject object) {
+        return object.has("key")
+                && object.has("contentLength")
+                && object.has("sha256")
+                && object.has("contentType");
+    }
+
+    private static long objectReferenceSize(JsonObject object) {
+        JsonElement key = object.get("key");
+        JsonElement contentLength = object.get("contentLength");
         JsonElement sha256 = object.get("sha256");
-        if (!isString(storageType) || !isString(location) || !isString(sha256)
-                || sizeBytes == null || !sizeBytes.isJsonPrimitive()
-                || !sizeBytes.getAsJsonPrimitive().isNumber()) {
-            throw new IllegalArgumentException("Payload reference metadata is malformed.");
+        JsonElement contentType = object.get("contentType");
+        if (!isString(key) || !isString(sha256) || !isString(contentType)
+                || contentLength == null || !contentLength.isJsonPrimitive()
+                || !contentLength.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("Object reference metadata is malformed.");
         }
 
         long size;
         try {
-            size = new BigDecimal(sizeBytes.getAsString()).longValueExact();
+            size = new BigDecimal(contentLength.getAsString()).longValueExact();
         } catch (ArithmeticException | NumberFormatException e) {
             throw new IllegalArgumentException(
-                    "Payload reference sizeBytes must be an integer.",
+                    "Object reference contentLength must be an integer.",
                     e
             );
         }
-        new PayloadReference(
-                storageType.getAsString(),
-                location.getAsString(),
+        new objectstore.ObjectReference(
+                key.getAsString(),
                 size,
-                sha256.getAsString()
+                sha256.getAsString(),
+                contentType.getAsString()
         );
         return size;
     }
@@ -170,6 +241,18 @@ public final class PayloadLimits {
         int parsed = Integer.parseInt(configured);
         if (parsed <= 0) {
             throw new IllegalArgumentException(envName + " must be positive.");
+        }
+        return parsed;
+    }
+
+    private static long nonNegativeLong(String propertyName, String envName, long defaultValue) {
+        String configured = configuredValue(propertyName, envName);
+        if (configured == null) {
+            return defaultValue;
+        }
+        long parsed = Long.parseLong(configured);
+        if (parsed < 0) {
+            throw new IllegalArgumentException(envName + " must not be negative.");
         }
         return parsed;
     }

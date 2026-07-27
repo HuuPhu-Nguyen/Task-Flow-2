@@ -1,7 +1,10 @@
 package protocol;
 
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -17,6 +20,7 @@ class PayloadLimitsTest {
         assertEquals(256, PayloadLimits.DEFAULT_MAX_TASKS_PER_JOB);
         assertEquals(64L * 1024L * 1024L, PayloadLimits.DEFAULT_MAX_JOB_PAYLOAD_BYTES);
         assertEquals(64L * 1024L * 1024L, PayloadLimits.DEFAULT_MAX_RESULT_BYTES);
+        assertEquals(8L * 1024L * 1024L, PayloadLimits.DEFAULT_MAX_INLINE_PAYLOAD_BYTES);
     }
 
     @Test
@@ -25,16 +29,19 @@ class PayloadLimitsTest {
         System.setProperty(PayloadLimits.MAX_TASKS_PER_JOB_PROPERTY, "7");
         System.setProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY, "456");
         System.setProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY, "789");
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "12");
         try {
             assertEquals(123, PayloadLimits.maxInputBytes());
             assertEquals(7, PayloadLimits.maxTasksPerJob());
             assertEquals(456, PayloadLimits.maxJobPayloadBytes());
             assertEquals(789, PayloadLimits.maxResultBytes());
+            assertEquals(12, PayloadLimits.maxInlinePayloadBytes());
         } finally {
             System.clearProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY);
             System.clearProperty(PayloadLimits.MAX_TASKS_PER_JOB_PROPERTY);
             System.clearProperty(PayloadLimits.MAX_JOB_PAYLOAD_BYTES_PROPERTY);
             System.clearProperty(PayloadLimits.MAX_RESULT_BYTES_PROPERTY);
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
         }
     }
 
@@ -67,13 +74,13 @@ class PayloadLimitsTest {
     }
 
     @Test
-    void measuresNestedPayloadReferencesWithoutPluginTypes() {
-        PayloadReference small = reference(10L, "a");
+    void measuresNestedObjectReferencesWithoutPluginTypes() {
+        ObjectReference small = reference(10L, "a");
         Map<String, Object> serializedLarge = Map.of(
-                "storageType", "local-file",
-                "location", "payloads/b.bin",
-                "sizeBytes", 25L,
-                "sha256", "b".repeat(64)
+                "key", TaskFlowObjectKeys.objectKey("inputs", "b"),
+                "contentLength", 25L,
+                "sha256", "b".repeat(64),
+                "contentType", "application/octet-stream"
         );
 
         long maximum = PayloadLimits.maximumReferencedPayloadBytes(Map.of(
@@ -87,10 +94,10 @@ class PayloadLimitsTest {
     @Test
     void rejectsMalformedReferenceSizeMetadata() {
         Map<String, Object> malformed = Map.of(
-                "storageType", "local-file",
-                "location", "payloads/b.bin",
-                "sizeBytes", 1.5,
-                "sha256", "b".repeat(64)
+                "key", TaskFlowObjectKeys.objectKey("inputs", "b"),
+                "contentLength", 1.5,
+                "sha256", "b".repeat(64),
+                "contentType", "application/octet-stream"
         );
 
         assertThrows(
@@ -99,12 +106,42 @@ class PayloadLimitsTest {
         );
     }
 
-    private static PayloadReference reference(long sizeBytes, String digestCharacter) {
-        return new PayloadReference(
-                PayloadReference.LOCAL_FILE,
-                "payloads/input.bin",
+    @Test
+    void rejectsLegacyFilesystemReferences() {
+        Map<String, Object> legacy = Map.of(
+                "storageType", "local-file",
+                "location", "payloads/input.bin",
+                "sizeBytes", 10L,
+                "sha256", "a".repeat(64)
+        );
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> PayloadLimits.maximumReferencedPayloadBytes(legacy)
+        );
+
+        assertTrue(error.getMessage().contains("Local filesystem"));
+    }
+
+    @Test
+    void measuresDecodedInlinePayloadBytesAndRejectsMalformedBase64() {
+        Map<String, Object> payload = Map.of(
+                "fileName", "sample.png",
+                "base64Data", Base64.getEncoder().encodeToString(new byte[] {1, 2, 3})
+        );
+
+        assertEquals(3L, PayloadLimits.maximumInlinePayloadBytes(payload));
+        assertEquals(-1L, PayloadLimits.maximumInlinePayloadBytes(Map.of("text", "value")));
+        assertThrows(IllegalArgumentException.class, () ->
+                PayloadLimits.maximumInlinePayloadBytes(Map.of("base64Data", "%%%")));
+    }
+
+    private static ObjectReference reference(long sizeBytes, String digestCharacter) {
+        return new ObjectReference(
+                TaskFlowObjectKeys.objectKey("inputs", "input"),
                 sizeBytes,
-                digestCharacter.repeat(64)
+                digestCharacter.repeat(64),
+                "application/octet-stream"
         );
     }
 }

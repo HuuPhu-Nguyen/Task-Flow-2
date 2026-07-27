@@ -91,7 +91,7 @@ nodes may enable the requester role, executor role, or both.
   original submission because plugins may transform submitted payloads while
   creating tasks.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
-- Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid Base64 file data, and invalid conversion payload-reference shapes.
+- Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid/oversized Base64 file data, malformed/oversized object references, and the removed local-filesystem reference shape.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns executor work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
 
 ## Participant Requester and Result Handling
@@ -100,7 +100,13 @@ nodes may enable the requester role, executor role, or both.
 - RabbitMQ command-line and JavaFX participants use explicit sanitized peer IDs as compatibility identifiers. `TASKFLOW_PEER_ID` provides a stable configured ID; otherwise the runtime generates a unique process-scoped fallback ID for local use.
 - Current RabbitMQ participant routes are keyed by peer ID; duplicate active participants with the same ID are an invalid deployment configuration because the broker cannot disambiguate ownership of the shared peer route.
 - When SQLite persistence is available, the coordinator records durable last-known peer metadata for peer ID, runtime type, transport, capabilities, heartbeat/disconnect times, status, and scheduling metric snapshots. Broker consumers, connections, and channels are not persisted.
-- Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input handling. Conversion submitters inline Base64 by default and can use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured.
+- Submitter paths use `ClientJobPlugin.buildPayloads(...)` for local input
+  handling. Conversion submitters inline only files smaller than
+  `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES`; at or above the exclusive limit they
+  upload to object storage under an immutable `taskflow/inputs/<uuid>` key and
+  submit `ObjectReference` metadata. Executors download by key through their
+  own configured provider. No distributed payload contains a local filesystem
+  location.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
 - The JavaFX GUI is the supported participant UI and has RabbitMQ service-level support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.
@@ -292,7 +298,10 @@ nodes may enable the requester role, executor role, or both.
   `TASKFLOW_MAX_JOB_PAYLOAD_BYTES`, default `67108864`, measures UTF-8 JSON
   bytes of the task payloads plus parameter. `TASKFLOW_MAX_INPUT_BYTES`,
   default `33554432`, is enforced per recursively discovered
-  `PayloadReference.sizeBytes`.
+  `ObjectReference.contentLength`. `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES`, default
+  `8388608`, is an exclusive raw-byte ceiling for recursively discovered
+  `base64Data` in submissions, assignments, task results, and final results;
+  `0` disables conversion-file inlining.
 - A SQLite-backed coordinator rejects new work when the current unpublished
   broker-outbox count is at least `maxPendingOutboxRows` /
   `TASKFLOW_MAX_PENDING_OUTBOX_ROWS`, default `100000`. The count uses a SQL

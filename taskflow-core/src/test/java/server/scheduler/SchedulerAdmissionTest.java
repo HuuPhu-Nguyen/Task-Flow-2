@@ -1,11 +1,12 @@
 package server.scheduler;
 
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 import protocol.AdmissionRejection;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
 import protocol.PayloadLimits;
-import protocol.PayloadReference;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
 import server.job.JobFactory;
@@ -15,6 +16,7 @@ import server.registry.PeerInfo;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Base64;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -207,11 +209,11 @@ class SchedulerAdmissionTest {
 
     @Test
     void referencedPayloadLimitReturnsTypedBoundaryDetail() throws Exception {
-        PayloadReference reference = new PayloadReference(
-                PayloadReference.LOCAL_FILE,
-                "payloads/input.bin",
+        ObjectReference reference = new ObjectReference(
+                TaskFlowObjectKeys.objectKey("inputs", "input"),
                 2L,
-                "a".repeat(64)
+                "a".repeat(64),
+                "application/octet-stream"
         );
         System.setProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY, "1");
         try {
@@ -230,6 +232,32 @@ class SchedulerAdmissionTest {
             }
         } finally {
             System.clearProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY);
+        }
+    }
+
+    @Test
+    void inlineFilePayloadLimitReturnsTypedBoundaryDetail() throws Exception {
+        Map<String, Object> inlinePayload = Map.of(
+                "fileName", "sample.png",
+                "base64Data", Base64.getEncoder().encodeToString(new byte[] {1, 2})
+        );
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "2");
+        try {
+            try (Fixture fixture = new Fixture(SchedulerConfig.defaults())) {
+                fixture.submit(testSubmission(
+                        "job-inline-file-limit",
+                        List.of(inlinePayload)
+                ));
+
+                assertRejection(
+                        fixture.awaitResult(),
+                        AdmissionRejection.Limit.MAX_INLINE_PAYLOAD_BYTES,
+                        2L,
+                        2L
+                );
+            }
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
         }
     }
 

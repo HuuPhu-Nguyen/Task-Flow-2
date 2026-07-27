@@ -1,67 +1,68 @@
 # Payload Storage
 
-TaskFlow can keep binary conversion inputs and results out of protocol message
-bodies by using local-file payload references. Inline Base64 remains the default
-when no storage root is configured. A framework-owned object-store port and
-MinIO adapter now exist as a tested Phase 5 boundary, but runtime payload flows
-are not wired to that boundary yet.
+RabbitMQ carries TaskFlow control metadata, not large image/video bodies.
+Conversion submitters keep small files inline only below an exclusive configured
+limit. At or above that limit they upload the input to MinIO/S3-compatible
+object storage and submit a portable `ObjectReference`.
+
+Local/shared-filesystem payload references are no longer part of the
+distributed protocol. A participant never resolves a path supplied by another
+machine.
 
 ## Current Scope
 
-The implemented storage option is local/shared filesystem storage for the
-conversion plugin's `FilePayload` objects:
+The Phase 5 input path is implemented for built-in image and video conversion:
 
-- image and video submitters can write large input files to storage and send a
-  small JSON reference in `JOB_SUBMIT`;
-- image and video peer processors can write large result files to storage and
-  send a small JSON reference in `TASK_RESULT` / `JOB_RESULT`;
-- result handlers can read referenced result files and save them into the
-  selected output directory.
+- submitters upload large inputs under immutable TaskFlow-generated
+  `taskflow/inputs/<uuid>` keys;
+- `JOB_SUBMIT` and `TASK_ASSIGN` carry only file metadata and
+  `ObjectReference(key, contentLength, sha256, contentType)`;
+- executor processors open their own configured object-store client and
+  download by `key`;
+- requester result handlers can download an object-referenced result by key;
+- protocol validation recursively rejects malformed/oversized references,
+  legacy local-file reference metadata, malformed Base64, and inline file
+  payloads at or above the configured limit.
 
-Text analysis and plugin-owned semantic payloads still use their existing
-inline JSON payloads unless those plugins add their own reference support.
+Text analysis and plugin-owned semantic JSON remain inline. Image/video outputs
+remain inline only below the same limit. A larger conversion output fails
+instead of placing a large body on RabbitMQ; TF-0505 owns immutable
+attempt-specific output keys and the authoritative SQLite result pointer.
 
-## Object-store boundary
+## Object-store Boundary and Runtime Provider
 
-`taskflow-spi` owns `ObjectStore` and
-`ObjectReference(key, contentLength, sha256, contentType)`. The port provides:
+`taskflow-spi` owns:
 
-- upload from a caller-owned stream;
-- download as a caller-closed stream;
-- stat/head metadata;
-- idempotent deletion;
-- copy/promotion;
-- lexically paged listing within the controlled `taskflow/` prefix, with a
-  maximum page size of 1,000 objects.
+- `ObjectStore`, the streaming data-plane port;
+- `ObjectReference`, the portable wire metadata;
+- `ObjectStoreProvider`, the runtime construction boundary; and
+- `ObjectStores`, which requires exactly one provider discovered through
+  `ServiceLoader`.
 
-Object names reject path traversal, URI/path-shaped segments, backslashes,
-empty segments, and names outside `taskflow/`. Missing objects, invalid stored
-metadata, and infrastructure failures have distinct port-level
-classifications. The MinIO SDK is confined to
-`taskflow-objectstore-minio`; framework core and SPI sources do not import it.
+`taskflow-objectstore-minio` supplies the provider and contains all MinIO SDK
+usage. Command-line and JavaFX participant runtimes include that adapter;
+coordinator/core/persistence sources and the coordinator runtime remain
+MinIO-free.
 
-The same contract tests run against an in-memory fake and a real MinIO
-Testcontainers service. Those tests prove operation/metadata parity, streaming
-ownership, bounded prefix pagination, independent attempt-shaped keys,
-idempotent deletion, outage classification, and object/metadata survival across
-a real MinIO container restart. They do not prove I9 end-to-end content
-integrity: TF-0504 still owns digest calculation during upload and exact
-length/SHA-256 verification before processing.
+The MinIO provider reads:
 
-## Local MinIO environment
+| Environment variable | System property | Default |
+|---|---|---|
+| `TASKFLOW_MINIO_ENDPOINT` | `taskflow.minioEndpoint` | `http://localhost:9000` |
+| `TASKFLOW_MINIO_ACCESS_KEY` | `taskflow.minioAccessKey` | required |
+| `TASKFLOW_MINIO_SECRET_KEY` | `taskflow.minioSecretKey` | required |
+| `TASKFLOW_MINIO_BUCKET` | `taskflow.minioBucket` | `taskflow` |
 
-`docker-compose.yml` contains an opt-in `object-store` profile with:
+Credentials have no source-controlled fallback. Missing provider/credentials do
+not affect small inline text/testing payloads, but a large conversion input or
+referenced download fails clearly; TaskFlow never falls back to a local path.
+Bucket creation remains an operator/deployment action.
 
-- the pinned MinIO release used by the adapter integration tests;
-- S3 on port `9000` and the console on port `9001`;
-- a named `taskflow-minio-data` volume;
-- the MinIO-native `mc ready local` health check;
-- a pinned, one-shot `mc` initializer that creates the configured bucket
-  idempotently and verifies it exists.
+## Local MinIO Environment
 
-The profile has no committed credential values or credential fallbacks. Export
-`MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD` in the shell that runs Compose.
-`TASKFLOW_MINIO_BUCKET` is non-secret and defaults to `taskflow`.
+The opt-in `object-store` Compose profile provides a pinned MinIO server,
+persistent `taskflow-minio-data` volume, native health check, and idempotent
+private-bucket initializer. Export server credentials before starting it:
 
 ```powershell
 $env:MINIO_ROOT_USER = "<local-access-key>"
@@ -71,8 +72,21 @@ docker compose --profile object-store up --detach minio minio-init
 docker compose --profile object-store ps --all minio minio-init
 ```
 
-The expected state is a healthy `minio` service and an exited-zero
-`minio-init`. Bucket initialization and the restart check are repeatable:
+For participant processes launched on the host, point TaskFlow at that service:
+
+```powershell
+$env:TASKFLOW_MINIO_ENDPOINT = "http://localhost:9000"
+$env:TASKFLOW_MINIO_ACCESS_KEY = $env:MINIO_ROOT_USER
+$env:TASKFLOW_MINIO_SECRET_KEY = $env:MINIO_ROOT_PASSWORD
+$env:TASKFLOW_MINIO_BUCKET = "taskflow"
+```
+
+Compose participant services receive the same credentials as TaskFlow runtime
+variables and use `http://minio:9000` inside the Compose network. The tiny
+default demo inputs remain inline; start the `object-store` profile when testing
+large conversion inputs.
+
+The initializer and restart checks remain repeatable:
 
 ```powershell
 docker compose --profile object-store run --rm --no-deps minio-init
@@ -81,89 +95,76 @@ docker compose --profile object-store ps minio
 docker compose --profile object-store run --rm --no-deps minio-init
 ```
 
-Removing the two containers does not remove the named volume:
+Ordinary removal retains the named volume:
 
 ```powershell
 docker compose --profile object-store rm --stop --force minio minio-init
 ```
 
-Do not add `--volumes` unless deleting all local object data is intentional.
-The default Git ignore rules exclude `.env` and local `.env.*` files if a
-developer elects to keep the variables there. `.env.example` remains
-intentionally trackable for placeholders only and must not contain real
-credentials.
+Do not add `--volumes` unless deleting local object data is intentional.
 
-The MinIO service and adapter have no coordinator-state dependency. SQLite
-remains the sole coordinator authority, and current runtime payload flows do
-not call the object store. TF-0503 owns that runtime wiring.
+## Inline Limit and Reference Format
 
-## Configuration
+`TASKFLOW_MAX_INLINE_PAYLOAD_BYTES` (system property
+`taskflow.maxInlinePayloadBytes`) is the exclusive raw-byte ceiling for a
+`base64Data` file payload. It defaults to `8388608` bytes:
 
-Set `TASKFLOW_PAYLOAD_STORAGE_DIR` on every process that must write or read
-referenced payloads. The system property equivalent is
-`taskflow.payloadStorageDir`.
+- raw size `< limit`: inline Base64 is allowed;
+- raw size `>= limit`: the conversion client must use object storage;
+- value `0`: conversion file inlining is disabled.
 
-Set `TASKFLOW_EXTERNAL_PAYLOAD_THRESHOLD_BYTES` to the raw byte threshold for
-externalizing conversion inputs and results. The system property equivalent is
-`taskflow.externalPayloadThresholdBytes`. The default threshold is `8388608`
-bytes when a storage root is configured. A threshold of `0` externalizes every
-conversion file payload.
+This is separate from:
 
-If `TASKFLOW_PAYLOAD_STORAGE_DIR` is unset, conversion plugins keep the existing
-inline Base64 behavior regardless of the threshold.
+- `TASKFLOW_MAX_INPUT_BYTES`, default `33554432`, the inclusive per-input
+  reference/content bound;
+- `TASKFLOW_MAX_JOB_PAYLOAD_BYTES`, default `67108864`, the inclusive exact
+  UTF-8 JSON envelope bound; and
+- `TASKFLOW_MAX_RESULT_BYTES`, default `67108864`, the inclusive per-result
+  bound.
 
-## Reference Format
+An object-backed conversion input serializes as:
 
-Payload references are JSON metadata, not raw paths:
+```json
+{
+  "fileName": "sample.png",
+  "objectReference": {
+    "key": "taskflow/inputs/550e8400-e29b-41d4-a716-446655440000",
+    "contentLength": 12345678,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "contentType": "image/png"
+  }
+}
+```
 
-- `storageType`: currently `local-file`;
-- `location`: a storage-root-relative location generated by TaskFlow;
-- `sizeBytes`: expected raw byte count;
-- `sha256`: expected SHA-256 digest in lowercase hex.
+Keys reject path traversal, URI/path-shaped segments, backslashes, empty
+segments, and names outside `taskflow/`. The file name is display/output
+metadata and is never interpreted as an object-store or remote filesystem
+location.
 
-Readers resolve `location` under `TASKFLOW_PAYLOAD_STORAGE_DIR`, reject paths
-that escape the root, verify `sizeBytes`, enforce the configured input/result
-limit, and verify the SHA-256 digest before returning bytes to plugin code.
+The removed form used `payloadReference` with `storageType`, `location`,
+`sizeBytes`, and `sha256`. Shared validation rejects that metadata. Conversion
+participants using the old and new referenced-media shapes are not compatible
+and must be upgraded together.
 
-## Ownership And Cleanup
+## Ownership, Failure, and Remaining Integrity Work
 
-Referenced payload files are owned by the configured storage root. TaskFlow does
-not automatically delete successfully submitted inputs or delivered results,
-because a requester may need to reconnect, save a result again, inspect a
-failed job, or retry a broker delivery.
+Input objects are immutable staging data, not authoritative coordinator state.
+If payload building fails after uploads, the submitter deletes objects from
+that build best-effort. An object may remain after an uncertain broker publish,
+process crash, or failed cleanup; TF-0506 owns bounded orphan collection.
 
-Payload files created during a failed client payload-build attempt are deleted
-best-effort before the error is returned. Operators should use their normal
-storage-retention policy for successful or abandoned payload files.
+An unavailable store or missing object fails payload building, execution, or
+result saving through the existing failure path. No SQLite job/task state is
+created when submission payload construction fails before publication.
 
-For multi-process or RabbitMQ runs, the coordinator, submitter, executor peers,
-and result handler must either share the same filesystem path or use equivalent
-mounted paths that resolve the same stored files. If a peer or result handler
-receives a reference without access to the configured storage root, the task or
-result handling fails clearly instead of falling back to unsafe path reads.
+Submitters currently calculate and carry SHA-256 metadata, and readers enforce
+configured upper bounds while downloading. They do not yet prove that the
+downloaded stream has the exact declared length and digest before processor
+invocation. TF-0504 owns that end-to-end streaming verification and explicit
+corrupt-byte rejection; metadata presence and a successful MinIO round trip do
+not close invariant I9.
 
-## Limits And Failure Behavior
-
-`TASKFLOW_MAX_INPUT_BYTES`, default `33554432`, applies per input reference.
-The coordinator recursively traverses submitted JSON maps/lists without a
-plugin-specific type dependency and rejects a new job before J0/T0 when any
-`PayloadReference.sizeBytes` is greater than that value. This is admission
-metadata enforcement; readers still verify the actual length and SHA-256
-digest before returning bytes to plugin code.
-
-`TASKFLOW_MAX_RESULT_BYTES` still applies to raw referenced result bytes.
-`TASKFLOW_MAX_JOB_PAYLOAD_BYTES`, default `67108864`, applies to the exact
-UTF-8 JSON bytes of submitted task payloads plus parameter, including inline
-data and reference metadata. Both limits allow the exact configured maximum
-and reject one byte over.
-
-Invalid references, missing storage roots, missing files, size mismatches,
-checksum mismatches, and unsupported storage types fail the current task or
-result handling operation. They do not grant access outside the configured
-payload storage directory.
-
-The active conversion protocol remains intentionally local/shared-filesystem
-based. A local MinIO environment, external credentials, health check, bucket
-bootstrap, and restart evidence now exist, but distributed object references,
-attempt-specific authoritative output pointers, distributed cleanup, and
-signed expiring URLs are not implemented.
+`MinioObjectStoreContractTest#separateConversionParticipantsExchangeInputOnlyByPortableObjectKey`
+uploads with one provider/client, serializes the payload, and processes it with
+a separately constructed provider/client against real Testcontainers MinIO.
+The test asserts that no local path fields or submitter path cross the wire.

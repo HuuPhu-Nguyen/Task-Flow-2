@@ -143,7 +143,8 @@ SQLite aggregate pending-outbox count, then the pure `AdmissionPolicy` checks:
 | `maxActiveTasks` / `TASKFLOW_MAX_ACTIVE_TASKS` | `100000` | Allow resulting retained task objects `<=`; reject `>` |
 | `TASKFLOW_MAX_TASKS_PER_JOB` | `256` | Allow both submitted payload count and plugin-produced tasks `<=` |
 | `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` | `67108864` | Allow UTF-8 JSON bytes of submitted task payloads plus parameter `<=` |
-| `TASKFLOW_MAX_INPUT_BYTES` | `33554432` | Allow each recursively discovered `PayloadReference.sizeBytes` `<=` |
+| `TASKFLOW_MAX_INPUT_BYTES` | `33554432` | Allow each recursively discovered `ObjectReference.contentLength` `<=` |
+| `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES` | `8388608` | Allow recursively discovered Base64 file data only when raw bytes are `<`; reject the exact boundary and above |
 | `maxPendingOutboxRows` / `TASKFLOW_MAX_PENDING_OUTBOX_ROWS` | `100000` | Reject when the current pending count is `>=` |
 | `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY` | `1000` | Queue exactly the capacity; the next broker delivery receives `RETRY_TRANSIENT` |
 

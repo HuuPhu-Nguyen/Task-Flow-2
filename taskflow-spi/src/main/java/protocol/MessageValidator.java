@@ -33,6 +33,8 @@ public final class MessageValidator {
     public static final String REASON_INVALID_CAPACITY_ADVERTISEMENT = "invalid_capacity_advertisement";
     public static final String REASON_MAX_TASKS_PER_JOB = "max_tasks_per_job";
     public static final String REASON_MAX_INLINE_MESSAGE_BYTES = "max_inline_message_bytes";
+    public static final String REASON_MAX_INLINE_PAYLOAD_BYTES = "max_inline_payload_bytes";
+    public static final String REASON_INVALID_INLINE_PAYLOAD = "invalid_inline_payload";
     public static final String REASON_MAX_REFERENCED_PAYLOAD_BYTES = "max_referenced_payload_bytes";
     public static final String REASON_INVALID_PAYLOAD_REFERENCE = "invalid_payload_reference";
 
@@ -95,25 +97,12 @@ public final class MessageValidator {
             );
         }
 
-        long maximumReferenceBytes;
-        try {
-            maximumReferenceBytes = PayloadLimits.maximumReferencedPayloadBytes(
-                    submit.getTaskPayloads()
-            );
-        } catch (IllegalArgumentException e) {
-            throw new MessageValidationException(
-                    REASON_INVALID_PAYLOAD_REFERENCE,
-                    e.getMessage()
-            );
-        }
-        if (maximumReferenceBytes > PayloadLimits.maxInputBytes()) {
-            throw new MessageValidationException(
-                    REASON_MAX_REFERENCED_PAYLOAD_BYTES,
-                    "Job submit payload reference exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
-                            + " (" + PayloadLimits.maxInputBytes() + " bytes): "
-                            + maximumReferenceBytes
-            );
-        }
+        validatePortablePayloads(
+                submit.getTaskPayloads(),
+                PayloadLimits.maxInputBytes(),
+                PayloadLimits.MAX_INPUT_BYTES_ENV,
+                "Job submit"
+        );
     }
 
     public static void validateJobResultRequest(JobResultRequestMessage request) {
@@ -219,6 +208,12 @@ public final class MessageValidator {
         payloadEnvelope.put("parameter", assignment.getParameter() == null ? "" : assignment.getParameter());
         validateJsonBytes(payloadEnvelope, PayloadLimits.maxJobPayloadBytes(),
                 "Task assignment payload", PayloadLimits.MAX_JOB_PAYLOAD_BYTES_ENV);
+        validatePortablePayloads(
+                assignment.getPayload(),
+                PayloadLimits.maxInputBytes(),
+                PayloadLimits.MAX_INPUT_BYTES_ENV,
+                "Task assignment"
+        );
     }
 
     private static void validateTaskResult(TaskResultMessage result) {
@@ -230,6 +225,12 @@ public final class MessageValidator {
         payloadEnvelope.put("errorMessage", result.getErrorMessage() == null ? "" : result.getErrorMessage());
         validateJsonBytes(payloadEnvelope, PayloadLimits.maxResultBytes(),
                 "Task result payload", PayloadLimits.MAX_RESULT_BYTES_ENV);
+        validatePortablePayloads(
+                result.getResultPayload(),
+                PayloadLimits.maxResultBytes(),
+                PayloadLimits.MAX_RESULT_BYTES_ENV,
+                "Task result"
+        );
     }
 
     private static void validateJobResult(JobResultMessage result) {
@@ -253,6 +254,12 @@ public final class MessageValidator {
         payloadEnvelope.put("errorMessage", result.getErrorMessage() == null ? "" : result.getErrorMessage());
         validateJsonBytes(payloadEnvelope, PayloadLimits.maxResultBytes(),
                 "Job result payload", PayloadLimits.MAX_RESULT_BYTES_ENV);
+        validatePortablePayloads(
+                payloadEnvelope,
+                PayloadLimits.maxResultBytes(),
+                PayloadLimits.MAX_RESULT_BYTES_ENV,
+                "Job result"
+        );
     }
 
     private static void validatePeerDisconnected(PeerDisconnectedMessage disconnected) {
@@ -427,6 +434,41 @@ public final class MessageValidator {
         if (bytes > maxBytes) {
             throw new MessageValidationException(fieldName + " exceeds " + envName
                     + " (" + maxBytes + " bytes): " + bytes + " bytes.");
+        }
+    }
+
+    private static void validatePortablePayloads(Object value,
+                                                 long maximumReferenceBytes,
+                                                 String referenceLimitName,
+                                                 String messageName) {
+        long referencedBytes;
+        try {
+            referencedBytes = PayloadLimits.maximumReferencedPayloadBytes(value);
+        } catch (IllegalArgumentException e) {
+            throw new MessageValidationException(REASON_INVALID_PAYLOAD_REFERENCE, e.getMessage());
+        }
+        if (referencedBytes > maximumReferenceBytes) {
+            throw new MessageValidationException(
+                    REASON_MAX_REFERENCED_PAYLOAD_BYTES,
+                    messageName + " object reference exceeds " + referenceLimitName
+                            + " (" + maximumReferenceBytes + " bytes): " + referencedBytes
+            );
+        }
+
+        long inlineBytes;
+        try {
+            inlineBytes = PayloadLimits.maximumInlinePayloadBytes(value);
+        } catch (IllegalArgumentException e) {
+            throw new MessageValidationException(REASON_INVALID_INLINE_PAYLOAD, e.getMessage());
+        }
+        long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
+        if (inlineBytes >= inlineLimit && inlineBytes >= 0L) {
+            throw new MessageValidationException(
+                    REASON_MAX_INLINE_PAYLOAD_BYTES,
+                    messageName + " inline file payload must be smaller than "
+                            + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
+                            + " bytes): " + inlineBytes
+            );
         }
     }
 }

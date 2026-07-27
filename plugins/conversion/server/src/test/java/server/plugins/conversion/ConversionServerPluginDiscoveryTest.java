@@ -2,10 +2,12 @@ package server.plugins.conversion;
 
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
-import protocol.PayloadReference;
+import protocol.PayloadLimits;
 import server.job.TaskPlugin;
 
 import java.time.Instant;
@@ -67,7 +69,7 @@ class ConversionServerPluginDiscoveryTest {
     }
 
     @Test
-    void imagePluginAcceptsPayloadReferenceSubmission() {
+    void imagePluginAcceptsObjectReferenceSubmission() {
         JobSubmitMessage submit = submit(
                 ConversionTaskTypes.IMAGE_CONVERSION,
                 List.<Object>of(new FilePayload("sample.png", null, reference("sample.png"))),
@@ -92,33 +94,32 @@ class ConversionServerPluginDiscoveryTest {
     }
 
     @Test
-    void imagePluginRejectsUnsupportedPayloadReferenceStorageType() {
+    void imagePluginRejectsOversizedObjectReference() {
         JobSubmitMessage submit = submit(
                 ConversionTaskTypes.IMAGE_CONVERSION,
-                List.<Object>of(new FilePayload("sample.png", null, new PayloadReference(
-                        "s3",
-                        "payloads/sample.png",
-                        7,
-                        "0".repeat(64)
-                ))),
+                List.<Object>of(new FilePayload("sample.png", null, reference("sample.png"))),
                 "png"
         );
+        System.setProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY, "6");
+        try {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                    new ImageConversionTaskPlugin().validateSubmission(submit));
 
-        IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
-                new ImageConversionTaskPlugin().validateSubmission(submit));
-
-        assertTrue(error.getMessage().contains("unsupported payload reference storage type"));
+            assertTrue(error.getMessage().contains(PayloadLimits.MAX_INPUT_BYTES_ENV));
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INPUT_BYTES_PROPERTY);
+        }
     }
 
     @Test
-    void imagePluginRejectsEmptyPayloadReference() {
+    void imagePluginRejectsEmptyObjectReference() {
         JobSubmitMessage submit = submit(
                 ConversionTaskTypes.IMAGE_CONVERSION,
-                List.<Object>of(new FilePayload("sample.png", null, new PayloadReference(
-                        PayloadReference.LOCAL_FILE,
-                        "payloads/sample.png",
+                List.<Object>of(new FilePayload("sample.png", null, new ObjectReference(
+                        TaskFlowObjectKeys.objectKey("inputs", "empty"),
                         0,
-                        "0".repeat(64)
+                        "0".repeat(64),
+                        "image/png"
                 ))),
                 "png"
         );
@@ -127,6 +128,24 @@ class ConversionServerPluginDiscoveryTest {
                 new ImageConversionTaskPlugin().validateSubmission(submit));
 
         assertTrue(error.getMessage().contains("non-empty file"));
+    }
+
+    @Test
+    void imagePluginRejectsInlinePayloadAtExclusiveBoundary() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.IMAGE_CONVERSION,
+                List.<Object>of(filePayload("sample.png")),
+                "png"
+        );
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "7");
+        try {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class, () ->
+                    new ImageConversionTaskPlugin().validateSubmission(submit));
+
+            assertTrue(error.getMessage().contains(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV));
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
+        }
     }
 
     @Test
@@ -189,12 +208,12 @@ class ConversionServerPluginDiscoveryTest {
         );
     }
 
-    private static PayloadReference reference(String fileName) {
-        return new PayloadReference(
-                PayloadReference.LOCAL_FILE,
-                "payloads/" + fileName,
+    private static ObjectReference reference(String fileName) {
+        return new ObjectReference(
+                TaskFlowObjectKeys.objectKey("inputs", "test-" + fileName.replace('.', '-')),
                 7,
-                "0".repeat(64)
+                "0".repeat(64),
+                "application/octet-stream"
         );
     }
 }

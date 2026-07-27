@@ -1,35 +1,60 @@
 package objectstore.minio;
 
+import client.plugins.conversion.ImageConversionClientPlugin;
+import com.google.gson.Gson;
 import com.github.dockerjava.api.model.ExposedPort;
+import conversion.model.ConversionTaskTypes;
+import conversion.model.FilePayload;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
+import objectstore.ObjectStoreProvider;
 import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import peer.processors.ImageConversionProcessor;
+import protocol.PayloadLimits;
+import protocol.TaskAssignMessage;
 import org.rnorth.ducttape.unreliables.Unreliables;
 import org.testcontainers.containers.MinIOContainer;
 
+import javax.imageio.ImageIO;
+import java.awt.Color;
+import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.Base64;
 import java.util.HexFormat;
+import java.util.List;
+import java.util.ServiceLoader;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MinioObjectStoreContractTest extends ObjectStoreContractTest {
     private static final String IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z";
     private static final String BUCKET = "taskflow-contract-" + UUID.randomUUID();
     private static final MinIOContainer MINIO = new MinIOContainer(IMAGE);
+
+    @TempDir
+    Path tempDir;
 
     @BeforeAll
     static void startMinio() throws Exception {
@@ -113,6 +138,67 @@ class MinioObjectStoreContractTest extends ObjectStoreContractTest {
         }
     }
 
+    @Test
+    void serviceLoaderDiscoversMinioRuntimeProvider() {
+        List<Class<? extends ObjectStoreProvider>> providerTypes =
+                ServiceLoader.load(ObjectStoreProvider.class).stream()
+                .map(ServiceLoader.Provider::type)
+                .toList();
+
+        assertEquals(List.of(MinioObjectStoreProvider.class), providerTypes);
+    }
+
+    @Test
+    void separateConversionParticipantsExchangeInputOnlyByPortableObjectKey() throws Exception {
+        byte[] inputBytes = pngBytes();
+        Path input = tempDir.resolve("remote-input.png");
+        Files.write(input, inputBytes);
+        MinioObjectStoreProvider submitterProvider = provider();
+        MinioObjectStoreProvider executorProvider = provider();
+        FilePayload wirePayload;
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
+        try {
+            List<Object> payloads = new ImageConversionClientPlugin(submitterProvider)
+                    .buildPayloads(List.of(input), "png");
+            String wireJson = new Gson().toJson(payloads.getFirst());
+            assertFalse(wireJson.contains("storageType"));
+            assertFalse(wireJson.contains("location"));
+            assertFalse(wireJson.contains(input.toAbsolutePath().toString()));
+            wirePayload = new Gson().fromJson(wireJson, FilePayload.class);
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
+        }
+
+        assertTrue(wirePayload.hasObjectReference());
+        assertTrue(wirePayload.objectReference().key().startsWith("taskflow/inputs/"));
+        try {
+            TaskAssignMessage assignment = new TaskAssignMessage(
+                    "coordinator-1",
+                    Instant.now().toString(),
+                    "task-remote",
+                    "job-remote",
+                    ConversionTaskTypes.IMAGE_CONVERSION,
+                    1,
+                    "550e8400-e29b-41d4-a716-446655440000",
+                    1_780_000_000_000L,
+                    wirePayload,
+                    "png"
+            );
+
+            FilePayload result = new ImageConversionProcessor(executorProvider)
+                    .process(assignment);
+
+            assertTrue(result.hasInlineData());
+            assertNotNull(ImageIO.read(new ByteArrayInputStream(
+                    Base64.getDecoder().decode(result.base64Data())
+            )));
+        } finally {
+            try (ObjectStore store = provider().open()) {
+                store.delete(wirePayload.objectReference().key());
+            }
+        }
+    }
+
     private static void restartMinioContainer() {
         MINIO.getDockerClient()
                 .stopContainerCmd(MINIO.getContainerId())
@@ -144,5 +230,35 @@ class MinioObjectStoreContractTest extends ObjectStoreContractTest {
                 .endpoint("http://" + MINIO.getHost() + ":" + bindings[0].getHostPortSpec())
                 .credentials(MINIO.getUserName(), MINIO.getPassword())
                 .build();
+    }
+
+    private static MinioObjectStoreProvider provider() {
+        var bindings = MINIO.getDockerClient()
+                .inspectContainerCmd(MINIO.getContainerId())
+                .exec()
+                .getNetworkSettings()
+                .getPorts()
+                .getBindings()
+                .get(ExposedPort.tcp(9000));
+        if (bindings == null || bindings.length == 0) {
+            throw new IllegalStateException("MinIO S3 port is not mapped.");
+        }
+        return new MinioObjectStoreProvider(
+                "http://" + MINIO.getHost() + ":" + bindings[0].getHostPortSpec(),
+                MINIO.getUserName(),
+                MINIO.getPassword(),
+                BUCKET
+        );
+    }
+
+    private static byte[] pngBytes() throws Exception {
+        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
+        image.setRGB(0, 0, Color.RED.getRGB());
+        image.setRGB(1, 0, Color.GREEN.getRGB());
+        image.setRGB(0, 1, Color.BLUE.getRGB());
+        image.setRGB(1, 1, Color.WHITE.getRGB());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ImageIO.write(image, "png", output);
+        return output.toByteArray();
     }
 }

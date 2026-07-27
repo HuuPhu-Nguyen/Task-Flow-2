@@ -4,8 +4,8 @@ Status: Accepted
 
 Date: 2026-07-22
 
-Scope: Frozen end-state for Phases 0–8; MinIO/S3 support is planned in Phase 5
-and the current local/shared-filesystem reference path remains transitional.
+Scope: Frozen end-state for Phases 0–8; MinIO/S3 input references are active in
+Phase 5 and local/shared-filesystem references are removed.
 
 ## Context
 
@@ -71,7 +71,7 @@ does not waive those requirements.
 
 ## Evidence And Implementation Status
 
-- [Payload storage — current transitional behavior](../PAYLOAD_STORAGE.md)
+- [Payload storage](../PAYLOAD_STORAGE.md)
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
 - TF-0501 implements the framework-owned
@@ -89,10 +89,15 @@ does not waive those requirements.
   initializer, and a real stop/start test that re-reads object bytes and
   metadata before deletion. Coordinator/core/persistence source remains
   independent from the MinIO SDK.
-- TF-0503 through TF-0506 still own runtime protocol references, end-to-end
-  integrity verification, attempt-specific authoritative output pointers, and
-  garbage collection. Environment readiness and metadata survival do not close
-  I9.
+- TF-0503 replaces conversion local-file metadata with portable
+  `ObjectReference`, adds ServiceLoader-backed participant runtime
+  configuration, uploads large inputs under immutable TaskFlow keys, downloads
+  them through a separately configured executor client, and rejects oversized
+  inline media and legacy filesystem references. A real MinIO test proves that
+  no submitter path crosses the serialized payload.
+- TF-0504 through TF-0506 still own exact streamed length/SHA-256 verification,
+  attempt-specific authoritative output pointers, and garbage collection.
+  Portable references and metadata survival alone do not close I9.
 
 ## Related Documents
 

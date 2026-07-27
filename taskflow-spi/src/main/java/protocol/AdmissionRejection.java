@@ -13,9 +13,11 @@ public record AdmissionRejection(
         if (limit == null) {
             throw new IllegalArgumentException("Admission rejection limit is required.");
         }
-        if (configuredMaximum <= 0L) {
+        if (configuredMaximum < 0L
+                || (configuredMaximum == 0L && limit != Limit.MAX_INLINE_PAYLOAD_BYTES)) {
             throw new IllegalArgumentException(
-                    "Admission rejection configuredMaximum must be positive."
+                    "Admission rejection configuredMaximum must be positive, except that "
+                            + "MAX_INLINE_PAYLOAD_BYTES may be zero."
             );
         }
         if (observedValue < 0L) {
@@ -30,6 +32,7 @@ public record AdmissionRejection(
         MAX_ACTIVE_TASKS,
         MAX_TASKS_PER_JOB,
         MAX_INLINE_MESSAGE_BYTES,
+        MAX_INLINE_PAYLOAD_BYTES,
         MAX_REFERENCED_PAYLOAD_BYTES,
         MAX_PENDING_OUTBOX_ROWS,
         MAX_SCHEDULER_MAILBOX_DEPTH

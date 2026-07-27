@@ -33,6 +33,16 @@
             <artifactId>testcontainers-minio</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>com.dickinson.cs</groupId>
+            <artifactId>taskflow-plugin-conversion-client</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.dickinson.cs</groupId>
+            <artifactId>taskflow-plugin-conversion-peer</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

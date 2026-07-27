@@ -112,7 +112,7 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-peer` - RabbitMQ command-line participant runtime; the compatibility artifact name provides requester-only, executor-only, and combined profiles
 - `taskflow-gui` - RabbitMQ JavaFX participant runtime with GUI-facing adapters and requester-only, executor-only, and combined profiles
 
-Framework core no longer imports concrete image, video, text, or example job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Coordinator-side scheduling uses `server.job.TaskPlugin`, executor-role processing uses `peer.engine.PeerProcessorPlugin`, and requester-role upload/final-result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. Conversion plugins can keep binary file bytes inline as Base64 or use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist, executable example harness, and role-by-role plugin contract, `docs/PAYLOAD_STORAGE.md` for payload-reference ownership and limits, and `docs/PEER_LIFECYCLE.md` for the participant requester/result-handling lifecycle.
+Framework core no longer imports concrete image, video, text, or example job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Coordinator-side scheduling uses `server.job.TaskPlugin`, executor-role processing uses `peer.engine.PeerProcessorPlugin`, and requester-role upload/final-result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. Conversion plugins keep only small file bytes inline as Base64; inputs at or above the configured inline limit are uploaded to object storage and sent as portable `ObjectReference` metadata. Local/shared-filesystem references are rejected. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist, executable example harness, and role-by-role plugin contract, `docs/PAYLOAD_STORAGE.md` for payload-reference ownership and limits, and `docs/PEER_LIFECYCLE.md` for the participant requester/result-handling lifecycle.
 
 `taskflow-spi` now owns a streaming `ObjectStore` port and validated
 `ObjectReference(key, contentLength, sha256, contentType)` metadata. Its
@@ -120,9 +120,12 @@ put/get/stat/delete/copy/bounded-prefix-list contract runs unchanged against an
 in-memory fake and a real Testcontainers MinIO service. The opt-in
 `object-store` Docker Compose profile provides a persistent local MinIO service,
 health check, and idempotent bucket bootstrap using environment-supplied
-credentials. Runtime conversion payloads are not wired to that port yet:
-protocol references, end-to-end byte verification, attempt-specific output
-commitment, and orphan cleanup remain Phase 5 work.
+credentials. Participant runtimes discover the MinIO provider without adding
+the SDK to coordinator/core/persistence code. Conversion submitters upload
+large inputs under immutable `taskflow/inputs/<uuid>` keys, and executors
+download by key without a shared filesystem. End-to-end downloaded-byte
+verification, attempt-specific output commitment, and orphan cleanup remain
+TF-0504 through TF-0506 work.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, requester-role job submission and result routing, executor-role task execution, and history reads. It is a participant UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for broker delivery, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -331,14 +334,16 @@ Currently implemented job types:
 - Converts between PNG, JPG, BMP, GIF
 - Supports PDF to image conversion
 - Uses Apache PDFBox for PDF rendering
-- Uses the conversion client plugin to encode local files as inline Base64 payloads by default, or local-file payload references when configured, and save decoded results
+- Uses inline Base64 only below the configured media threshold; larger inputs
+  upload to object storage and executors download them by portable key
 
 **Video transcoding features:**
 - Converts between MP4, AVI, MKV, MOV, WEBM, FLV, WMV
 - Uses JavaCV with bundled FFmpeg native libraries
 - Uses broadly available FFmpeg encoders for portability across machines
 - Preserves source audio streams when supported by the target format
-- Uses the conversion client plugin to encode local files as inline Base64 payloads by default, or local-file payload references when configured, and save decoded results
+- Uses inline Base64 only below the configured media threshold; larger inputs
+  upload to object storage and executors download them by portable key
 
 **Text analysis features:**
 - Reads TXT, Markdown, CSV, and log files as UTF-8 text
@@ -554,13 +559,19 @@ Environment overrides:
 - `TASKFLOW_EXECUTOR_TYPE_CONCURRENCY_LIMITS` - optional comma-separated
   `TASK_TYPE:LIMIT` overrides; each limit defaults to the executor pool size
 - `TASKFLOW_MAX_INPUT_BYTES` - maximum declared byte size of each recursively
-  discovered submitted payload reference, default `33554432` bytes; payload
-  readers still verify the actual referenced content independently
+  discovered submitted object reference, default `33554432` bytes; TF-0504
+  still owns exact downloaded length/digest verification
 - `TASKFLOW_MAX_TASKS_PER_JOB` - maximum input files/tasks per submitted client job, default `256`
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` - maximum total inline client payload data per job, default `67108864` bytes
 - `TASKFLOW_MAX_RESULT_BYTES` - maximum single conversion result payload size before saving/sending, default `67108864` bytes
-- `TASKFLOW_PAYLOAD_STORAGE_DIR` - optional local/shared filesystem root for conversion payload references
-- `TASKFLOW_EXTERNAL_PAYLOAD_THRESHOLD_BYTES` - raw byte threshold for externalizing conversion inputs/results when a payload storage root is configured, default `8388608` bytes
+- `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES` - exclusive raw-byte ceiling for inline
+  conversion file data, default `8388608`; inputs at or above it use object
+  storage, and `0` disables conversion-file inlining
+- `TASKFLOW_MINIO_ENDPOINT` - participant object-store endpoint, default
+  `http://localhost:9000`
+- `TASKFLOW_MINIO_ACCESS_KEY` - required access key for object-backed payloads
+- `TASKFLOW_MINIO_SECRET_KEY` - required secret key for object-backed payloads
+- `TASKFLOW_MINIO_BUCKET` - object bucket, default `taskflow`
 
 PowerShell override example:
 
@@ -738,7 +749,10 @@ The coordinator live suites cover broker-backed job completion; a confirmed, rou
 ### Object-store Contract Tests
 
 The object-store contract is part of the normal Maven reactor. It runs once
-against the in-memory fake and once against an ephemeral MinIO container:
+against the in-memory fake and once against an ephemeral MinIO container. The
+real suite also uploads a conversion input with one client, serializes its
+portable reference, and processes it through a separately constructed executor
+client:
 
 ```powershell
 .\mvnw.cmd -pl taskflow-objectstore-minio -am test
@@ -810,9 +824,18 @@ TaskFlow's `.gitignore` excludes `.env` and local `.env.*` files.
 `.env.example` is the explicit placeholder-only exception and must never
 contain real credentials.
 
-This profile provides and verifies the local object-store environment only.
-TF-0503 still owns coordinator/requester/executor payload wiring, so stopping
-or restarting MinIO cannot mutate the current SQLite coordinator state.
+Host-launched participants use separate TaskFlow runtime variables:
+
+```powershell
+$env:TASKFLOW_MINIO_ENDPOINT = "http://localhost:9000"
+$env:TASKFLOW_MINIO_ACCESS_KEY = $env:MINIO_ROOT_USER
+$env:TASKFLOW_MINIO_SECRET_KEY = $env:MINIO_ROOT_PASSWORD
+$env:TASKFLOW_MINIO_BUCKET = "taskflow"
+```
+
+Compose participants receive equivalent variables and connect to
+`http://minio:9000`. Object input uploads are staging data only; stopping or
+restarting MinIO cannot mutate authoritative SQLite coordinator state.
 
 ---
 
@@ -890,10 +913,12 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
   prefix pages, idempotent deletion, and typed missing/invalid-metadata/storage
   failures. The opt-in Compose environment adds persistent local MinIO,
   environment-only credentials, health checking, idempotent bucket bootstrap,
-  and restart evidence. Production runtime paths still use inline Base64 or the
-  transitional local/shared-file reference. TF-0503 through TF-0506 own
-  distributed object references, end-to-end digest/length verification, fenced
-  attempt output ownership, and orphan cleanup.
+  and restart evidence. Conversion inputs at or above the inline threshold now
+  use portable TaskFlow-owned object keys across separately configured
+  participants, and legacy local/shared-file metadata is rejected. TF-0504
+  through TF-0506 own end-to-end digest/length verification, fenced attempt
+  output ownership, and orphan cleanup. Until TF-0505, large conversion outputs
+  fail instead of being placed inline on RabbitMQ.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.
 - SQLite is the current `JobStateStore`, peer registry store, and coordinator broker outbox store implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, and schema-v12 stores the canonical job-submission request hash. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows for RabbitMQ runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
@@ -934,8 +959,10 @@ It should run on a normal Windows, macOS, or Linux desktop/laptop if all of thes
 - The machine can download Maven dependencies the first time it builds.
 - The GUI machine has a desktop environment available. Headless servers can run the coordinator or command-line participant, but not the JavaFX GUI.
 - A RabbitMQ broker is reachable on port `5672` between the coordinator and participant machines.
+- For image/video inputs at or above the inline threshold, every submitting or
+  executing participant can reach the same MinIO/S3-compatible endpoint.
 
-For multiple computers, run or expose RabbitMQ on one machine. On every coordinator or participant machine, set `TASKFLOW_RABBITMQ_HOST` to the broker machine's IP address or enter that broker host in the GUI instead of `localhost`.
+For multiple computers, run or expose RabbitMQ on one machine. On every coordinator or participant machine, set `TASKFLOW_RABBITMQ_HOST` to the broker machine's IP address or enter that broker host in the GUI instead of `localhost`. For large conversion inputs, configure the same reachable `TASKFLOW_MINIO_ENDPOINT`, credentials, and bucket on requester/executor participants; do not share filesystem paths.
 
 ### Prerequisites
 

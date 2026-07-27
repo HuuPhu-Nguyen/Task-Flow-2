@@ -53,6 +53,20 @@ class ObjectStoreArchitectureTest {
                     stateOwnerPom + " must not make MinIO an authority for coordinator state"
             );
         }
+        for (String participantPom : List.of(
+                "taskflow-peer/pom.xml",
+                "taskflow-gui/pom.xml"
+        )) {
+            assertTrue(
+                    Files.readString(repository.resolve(participantPom))
+                            .contains("taskflow-objectstore-minio"),
+                    participantPom + " must package the participant object-store provider"
+            );
+        }
+        assertTrue(Files.isRegularFile(repository.resolve(
+                "taskflow-objectstore-minio/src/main/resources/META-INF/services/"
+                        + "objectstore.ObjectStoreProvider"
+        )));
     }
 
     private static Path repositoryRoot() {

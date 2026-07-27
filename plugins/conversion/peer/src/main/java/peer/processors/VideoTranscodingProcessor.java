@@ -1,9 +1,10 @@
 package peer.processors;
 
-import protocol.LocalPayloadStorage;
 import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.FilePayload;
+import objectstore.ObjectStoreProvider;
+import objectstore.ObjectStores;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
@@ -18,6 +19,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Base64;
+import java.util.Objects;
 
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AAC;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_FLV1;
@@ -33,13 +35,26 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
     private static final Logger LOGGER = LoggerFactory.getLogger(VideoTranscodingProcessor.class);
 
     private final Gson gson = new Gson();
+    private final ObjectStoreProvider objectStoreProvider;
+
+    public VideoTranscodingProcessor() {
+        this(ObjectStores::open);
+    }
+
+    public VideoTranscodingProcessor(ObjectStoreProvider objectStoreProvider) {
+        this.objectStoreProvider = Objects.requireNonNull(objectStoreProvider, "objectStoreProvider");
+    }
 
     @Override
     public FilePayload process(TaskAssignMessage task) throws Exception {
         String targetFormat = task.getParam().toLowerCase();
 
         FilePayload input = gson.fromJson(gson.toJson(task.getPayload()), FilePayload.class);
-        byte[] rawBytes = readPayloadBytes(input, PayloadLimits.maxInputBytes());
+        byte[] rawBytes = ObjectBackedPayloadReader.readInput(
+                input,
+                "Video",
+                objectStoreProvider
+        );
         if (rawBytes.length == 0) {
             throw new IOException("Video task decoded to an empty file: " + input.fileName());
         }
@@ -63,9 +78,12 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
                         + " (" + maxResultBytes + " bytes): " + input.fileName());
             }
             String newFileName = stripExtension(inputFileName) + "." + targetFormat;
-            if (LocalPayloadStorage.shouldExternalize(outputSize)) {
-                return new FilePayload(newFileName, null,
-                        LocalPayloadStorage.storeFile(tempOut.toPath(), newFileName));
+            long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
+            if (outputSize >= inlineLimit) {
+                throw new IOException("Video result must be smaller than "
+                        + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
+                        + " bytes) until object-backed result ownership is available: "
+                        + input.fileName());
             }
             byte[] outputBytes = Files.readAllBytes(tempOut.toPath());
             return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
@@ -73,30 +91,6 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             deleteTempFile(tempIn);
             deleteTempFile(tempOut);
         }
-    }
-
-    private byte[] readPayloadBytes(FilePayload payload, long maxBytes) throws IOException {
-        if (payload == null || (!payload.hasInlineData() && !payload.hasPayloadReference())) {
-            throw new IOException("Video task has no input data.");
-        }
-        if (payload.hasInlineData() == payload.hasPayloadReference()) {
-            throw new IOException("Video task must contain exactly one of Base64 data or a payload reference: "
-                    + payload.fileName());
-        }
-        if (payload.hasPayloadReference()) {
-            return LocalPayloadStorage.read(payload.payloadReference(), maxBytes);
-        }
-        byte[] rawBytes;
-        try {
-            rawBytes = Base64.getDecoder().decode(payload.base64Data());
-        } catch (IllegalArgumentException e) {
-            throw new IOException("Video task payload is not valid Base64: " + payload.fileName(), e);
-        }
-        if (rawBytes.length > maxBytes) {
-            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
-                    + " (" + maxBytes + " bytes): " + payload.fileName());
-        }
-        return rawBytes;
     }
 
     private void deleteTempFile(File file) {

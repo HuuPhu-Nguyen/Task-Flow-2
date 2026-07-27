@@ -171,6 +171,36 @@ message before returning an inbound transport message. Invalid deliveries are
 rejected; with dead-lettering enabled, RabbitMQ can route them to the TaskFlow
 DLQ for inspection, discard, or redrive after compatible code is deployed.
 
+## Conversion Object-reference Compatibility
+
+TF-0503 changes the conversion plugin-owned `FilePayload` JSON, not the
+framework message envelope. Its referenced form is now:
+
+```json
+{
+  "fileName": "sample.png",
+  "objectReference": {
+    "key": "taskflow/inputs/550e8400-e29b-41d4-a716-446655440000",
+    "contentLength": 1234,
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "contentType": "image/png"
+  }
+}
+```
+
+The former `payloadReference` / `storageType: local-file` / `location` /
+`sizeBytes` shape is intentionally rejected as `invalid_payload_reference`.
+It cannot identify portable data on another machine. All requester,
+coordinator-plugin, and executor conversion artifacts must therefore be
+upgraded together before sending referenced conversion media. Small legacy
+inline conversion payloads remain readable only when their raw bytes are below
+the configured inline limit.
+
+No protocol-version bump is used because `JOB_SUBMIT` and `TASK_ASSIGN` already
+treat task payload JSON as plugin-owned semantic data and no framework envelope
+field or assignment/result identity changed. This does not claim mixed-version
+compatibility for the changed plugin payload shape.
+
 ## Field and Size Validation
 
 `protocol.MessageValidator` remains the shared framework boundary. In addition
@@ -183,9 +213,20 @@ to version-2 assignment identity and version-3 capacity fields, it enforces:
   and `-`;
 - `TASKFLOW_MAX_TASKS_PER_JOB` on submitted payloads and advertised task types;
 - `TASKFLOW_MAX_JOB_PAYLOAD_BYTES` on job payloads and task assignments;
-- `TASKFLOW_MAX_INPUT_BYTES` on each recursively discovered submitted
-  `PayloadReference.sizeBytes`;
-- `TASKFLOW_MAX_RESULT_BYTES` on task and final job results.
+- `TASKFLOW_MAX_INPUT_BYTES` on each recursively discovered submitted or
+  assigned `ObjectReference.contentLength`;
+- `TASKFLOW_MAX_RESULT_BYTES` on task and final job results, including
+  recursively discovered result references;
+- `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES` as an exclusive raw-byte ceiling for
+  recursively discovered `base64Data` in submissions, assignments, task
+  results, and final job results;
+- valid portable object-reference metadata, valid Base64, and explicit
+  rejection of the removed local-filesystem reference shape.
+
+The inline-media boundary returns `max_inline_payload_bytes`; malformed Base64
+returns `invalid_inline_payload`; malformed, unsafe, or legacy references
+return `invalid_payload_reference`; and a declared object length above the
+applicable input/result bound returns `max_referenced_payload_bytes`.
 
 Invalid `JOB_SUBMIT` and `JOB_RESULT_REQUEST` messages that reach the scheduler
 are converted to failed `JOB_RESULT` responses when the requester can be

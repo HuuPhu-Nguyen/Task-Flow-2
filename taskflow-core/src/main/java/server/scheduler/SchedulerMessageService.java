@@ -366,6 +366,11 @@ final class SchedulerMessageService {
                             submit.getParameter()
                     )
             );
+            case MessageValidator.REASON_MAX_INLINE_PAYLOAD_BYTES -> new AdmissionRejection(
+                    AdmissionRejection.Limit.MAX_INLINE_PAYLOAD_BYTES,
+                    PayloadLimits.maxInlinePayloadBytes(),
+                    PayloadLimits.maximumInlinePayloadBytes(submit.getTaskPayloads())
+            );
             case MessageValidator.REASON_MAX_REFERENCED_PAYLOAD_BYTES -> new AdmissionRejection(
                     AdmissionRejection.Limit.MAX_REFERENCED_PAYLOAD_BYTES,
                     PayloadLimits.maxInputBytes(),

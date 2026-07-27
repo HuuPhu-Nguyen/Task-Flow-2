@@ -1,11 +1,11 @@
 package conversion.model;
 
-import protocol.PayloadReference;
+import objectstore.ObjectReference;
 
 /**
  * File payload model owned by the conversion plugin.
  */
-public record FilePayload(String fileName, String base64Data, PayloadReference payloadReference) {
+public record FilePayload(String fileName, String base64Data, ObjectReference objectReference) {
     public FilePayload(String fileName, String base64Data) {
         this(fileName, base64Data, null);
     }
@@ -14,7 +14,7 @@ public record FilePayload(String fileName, String base64Data, PayloadReference p
         return base64Data != null && !base64Data.isBlank();
     }
 
-    public boolean hasPayloadReference() {
-        return payloadReference != null;
+    public boolean hasObjectReference() {
+        return objectReference != null;
     }
 }

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import conversion.model.FilePayload;
 import protocol.JobSubmitMessage;
+import protocol.PayloadLimits;
 
 import java.util.Base64;
 import java.util.Collection;
@@ -65,30 +66,38 @@ final class ConversionTaskValidation {
             throw new IllegalArgumentException("Unsupported conversion input file type for " + payload.fileName()
                     + ". Supported extensions: " + allowedInputExtensions);
         }
-        if (payload.hasInlineData() == payload.hasPayloadReference()) {
+        if (payload.hasInlineData() == payload.hasObjectReference()) {
             throw new IllegalArgumentException("Conversion payload " + index
-                    + " requires exactly one of Base64 data or a payload reference.");
+                    + " requires exactly one of Base64 data or an object reference.");
         }
-        if (payload.hasPayloadReference()) {
-            validatePayloadReference(payload, index);
+        if (payload.hasObjectReference()) {
+            validateObjectReference(payload, index);
             return;
         }
+        byte[] decoded;
         try {
-            Base64.getDecoder().decode(payload.base64Data());
+            decoded = Base64.getDecoder().decode(payload.base64Data());
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("Conversion payload " + index + " has invalid Base64 data.", e);
         }
+        long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
+        if (decoded.length >= inlineLimit) {
+            throw new IllegalArgumentException("Conversion payload " + index
+                    + " inline data must be smaller than "
+                    + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
+                    + " bytes).");
+        }
     }
 
-    private static void validatePayloadReference(FilePayload payload, int index) {
-        if (!payload.payloadReference().isLocalFile()) {
+    private static void validateObjectReference(FilePayload payload, int index) {
+        if (payload.objectReference().contentLength() <= 0) {
             throw new IllegalArgumentException("Conversion payload " + index
-                    + " has unsupported payload reference storage type: "
-                    + payload.payloadReference().storageType());
+                    + " object reference must point to a non-empty file.");
         }
-        if (payload.payloadReference().sizeBytes() <= 0) {
+        if (payload.objectReference().contentLength() > PayloadLimits.maxInputBytes()) {
             throw new IllegalArgumentException("Conversion payload " + index
-                    + " payload reference must point to a non-empty file.");
+                    + " object reference exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV + " ("
+                    + PayloadLimits.maxInputBytes() + " bytes).");
         }
     }
 

@@ -2,9 +2,13 @@ package peer.processors;
 
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
+import objectstore.ObjectListing;
+import objectstore.ObjectReference;
+import objectstore.ObjectStore;
+import objectstore.ObjectStoreException;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-import protocol.LocalPayloadStorage;
+import protocol.PayloadLimits;
 import protocol.TaskAssignMessage;
 
 import javax.imageio.ImageIO;
@@ -12,56 +16,55 @@ import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.nio.file.Path;
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ImageConversionProcessorTest {
-    @TempDir
-    Path tempDir;
-
     @Test
-    void readsReferencedInputPayload() throws Exception {
-        configureExternalPayloadStorage("1000");
-        try {
-            byte[] inputBytes = pngBytes();
-            FilePayload input = new FilePayload(
-                    "sample.png",
-                    null,
-                    LocalPayloadStorage.storeBytes("sample.png", inputBytes)
-            );
+    void downloadsReferencedInputByObjectKey() throws Exception {
+        byte[] inputBytes = pngBytes();
+        MemoryObjectStore store = new MemoryObjectStore();
+        ObjectReference reference = reference(inputBytes.length);
+        store.put(reference, new ByteArrayInputStream(inputBytes));
+        FilePayload input = new FilePayload("sample.png", null, reference);
 
-            FilePayload result = new ImageConversionProcessor().process(task(input));
+        FilePayload result = new ImageConversionProcessor(() -> store).process(task(input));
 
-            assertEquals("sample.png", result.fileName());
-            assertTrue(result.hasInlineData());
-            assertNotNull(ImageIO.read(new ByteArrayInputStream(Base64.getDecoder().decode(result.base64Data()))));
-        } finally {
-            clearExternalPayloadStorage();
-        }
+        assertEquals("sample.png", result.fileName());
+        assertTrue(result.hasInlineData());
+        assertNotNull(ImageIO.read(
+                new ByteArrayInputStream(Base64.getDecoder().decode(result.base64Data()))
+        ));
+        assertEquals(reference.key(), store.lastGetKey);
     }
 
     @Test
-    void externalizesResultPayloadWhenConfigured() throws Exception {
-        configureExternalPayloadStorage("0");
+    void rejectsOutputAtExclusiveInlineBoundaryUntilObjectResultsExist() throws Exception {
+        byte[] inputBytes = pngBytes();
+        MemoryObjectStore store = new MemoryObjectStore();
+        ObjectReference reference = reference(inputBytes.length);
+        store.put(reference, new ByteArrayInputStream(inputBytes));
+        FilePayload input = new FilePayload("sample.png", null, reference);
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
         try {
-            FilePayload input = new FilePayload(
-                    "sample.png",
-                    Base64.getEncoder().encodeToString(pngBytes())
+            IOException error = assertThrows(
+                    IOException.class,
+                    () -> new ImageConversionProcessor(() -> store).process(task(input))
             );
 
-            FilePayload result = new ImageConversionProcessor().process(task(input));
-
-            assertEquals("sample.png", result.fileName());
-            assertTrue(result.hasPayloadReference());
-            byte[] outputBytes = LocalPayloadStorage.read(result.payloadReference(), 1024);
-            assertNotNull(ImageIO.read(new ByteArrayInputStream(outputBytes)));
+            assertTrue(error.getMessage().contains(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV));
         } finally {
-            clearExternalPayloadStorage();
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
         }
     }
 
@@ -99,35 +102,106 @@ class ImageConversionProcessorTest {
     }
 
     private byte[] pngBytes() throws Exception {
-        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
-        image.setRGB(0, 0, Color.RED.getRGB());
-        image.setRGB(1, 0, Color.GREEN.getRGB());
-        image.setRGB(0, 1, Color.BLUE.getRGB());
-        image.setRGB(1, 1, Color.WHITE.getRGB());
+        BufferedImage image = image();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         ImageIO.write(image, "png", output);
         return output.toByteArray();
     }
 
     private byte[] jpegBytes() throws Exception {
-        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
-        image.setRGB(0, 0, Color.RED.getRGB());
-        image.setRGB(1, 0, Color.GREEN.getRGB());
-        image.setRGB(0, 1, Color.BLUE.getRGB());
-        image.setRGB(1, 1, Color.WHITE.getRGB());
+        BufferedImage image = image();
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         ImageIO.write(image, "jpg", output);
         return output.toByteArray();
     }
 
-    private void configureExternalPayloadStorage(String threshold) {
-        System.setProperty(LocalPayloadStorage.PAYLOAD_STORAGE_DIR_PROPERTY,
-                tempDir.resolve("payloads").toString());
-        System.setProperty(LocalPayloadStorage.EXTERNAL_PAYLOAD_THRESHOLD_BYTES_PROPERTY, threshold);
+    private BufferedImage image() {
+        BufferedImage image = new BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB);
+        image.setRGB(0, 0, Color.RED.getRGB());
+        image.setRGB(1, 0, Color.GREEN.getRGB());
+        image.setRGB(0, 1, Color.BLUE.getRGB());
+        image.setRGB(1, 1, Color.WHITE.getRGB());
+        return image;
     }
 
-    private void clearExternalPayloadStorage() {
-        System.clearProperty(LocalPayloadStorage.PAYLOAD_STORAGE_DIR_PROPERTY);
-        System.clearProperty(LocalPayloadStorage.EXTERNAL_PAYLOAD_THRESHOLD_BYTES_PROPERTY);
+    private static ObjectReference reference(long contentLength) {
+        return new ObjectReference(
+                TaskFlowObjectKeys.objectKey("inputs", "image-test"),
+                contentLength,
+                "0".repeat(64),
+                "image/png"
+        );
+    }
+
+    private static final class MemoryObjectStore implements ObjectStore {
+        private final Map<String, StoredObject> objects = new ConcurrentHashMap<>();
+        private String lastGetKey;
+
+        @Override
+        public ObjectReference put(ObjectReference reference, InputStream content)
+                throws ObjectStoreException {
+            try {
+                objects.put(reference.key(), new StoredObject(reference, content.readAllBytes()));
+                return reference;
+            } catch (IOException e) {
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.STORAGE_FAILURE,
+                        "Test upload failed.",
+                        e
+                );
+            }
+        }
+
+        @Override
+        public InputStream get(String key) throws ObjectStoreException {
+            lastGetKey = TaskFlowObjectKeys.requireObjectKey(key);
+            StoredObject object = objects.get(lastGetKey);
+            if (object == null) {
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.NOT_FOUND,
+                        "Missing test object."
+                );
+            }
+            return new ByteArrayInputStream(object.bytes());
+        }
+
+        @Override
+        public ObjectReference stat(String key) throws ObjectStoreException {
+            StoredObject object = objects.get(TaskFlowObjectKeys.requireObjectKey(key));
+            if (object == null) {
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.NOT_FOUND,
+                        "Missing test object."
+                );
+            }
+            return object.reference();
+        }
+
+        @Override
+        public void delete(String key) {
+            objects.remove(TaskFlowObjectKeys.requireObjectKey(key));
+        }
+
+        @Override
+        public ObjectReference copy(String sourceKey, String destinationKey)
+                throws ObjectStoreException {
+            throw new ObjectStoreException(
+                    ObjectStoreException.Reason.STORAGE_FAILURE,
+                    "Copy is not used by this test."
+            );
+        }
+
+        @Override
+        public ObjectListing list(String prefix, String startAfter, int limit) {
+            return new ObjectListing(List.of(), null);
+        }
+
+        @Override
+        public void close() {
+            // Shared test instance deliberately survives separate provider opens.
+        }
+
+        private record StoredObject(ObjectReference reference, byte[] bytes) {
+        }
     }
 }

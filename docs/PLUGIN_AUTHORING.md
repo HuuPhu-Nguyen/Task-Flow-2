@@ -190,11 +190,15 @@ Use `PayloadLimits` when reading local inputs and writing results:
 - `maxInputBytes()` for each local input file.
 - `maxJobPayloadBytes()` for aggregate inline data or reference metadata size.
 - `maxResultBytes()` for decoded result payloads written to disk.
+- `maxInlinePayloadBytes()` as the exclusive raw-byte ceiling for a
+  `base64Data` file body.
 
-For large binary payloads, use the shared `PayloadReference` /
-`LocalPayloadStorage` contract or document a plugin-owned equivalent. See
-`docs/PAYLOAD_STORAGE.md` for the current local-file reference behavior,
-ownership, cleanup, and failure rules.
+For large binary payloads, use the shared `ObjectReference` and
+`ObjectStoreProvider` boundaries. Generate keys with `TaskFlowObjectKeys`; do
+not serialize filesystem paths, arbitrary URLs, credentials, or vendor SDK
+types. A requester uploads inputs and an executor downloads by key using its
+own provider instance. See `docs/PAYLOAD_STORAGE.md` for the current input
+ownership, limit, compatibility, cleanup, and integrity boundaries.
 
 Use `SafeFileNames.safeOutputPath(...)` or an equivalent safe path strategy when
 writing files from result-provided names. Do not trust result filenames to stay
@@ -332,9 +336,13 @@ Client module tests should cover:
 - Unsupported input extensions are rejected.
 - `PayloadLimits` failures are surfaced for input count, input bytes, and total
   job payload bytes.
-- Referenced payload tests cover missing storage roots, unsupported references,
-  size/checksum failures, and safe fallback to inline payloads when the storage
-  root is unset.
+- Object-backed payload tests cover exclusive inline boundaries, upload
+  failure, portable serialized references, download by key through a separate
+  provider instance, and best-effort cleanup after a failed payload build.
+- Legacy local-file references must be rejected. Missing provider/configuration
+  must fail object-backed work without falling back to a filesystem path.
+- Exact downloaded length/checksum mismatch rejection is required once the
+  TF-0504 integrity reader is available.
 - Result handling writes or presents the expected final payload, stays inside
   the selected output directory when writing files, handles duplicate names
   safely, and enforces result-size limits when the result contains file data.

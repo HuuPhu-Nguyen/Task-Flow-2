@@ -86,6 +86,10 @@ services:
         condition: service_started
     environment:
       TASKFLOW_PEER_ID: compose-peer-a
+      TASKFLOW_MINIO_ENDPOINT: http://minio:9000
+      TASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      TASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
+      TASKFLOW_MINIO_BUCKET: ${TASKFLOW_MINIO_BUCKET:-taskflow}
     command:
       - java
       - -Xmx256m
@@ -102,6 +106,10 @@ services:
         condition: service_started
     environment:
       TASKFLOW_PEER_ID: compose-peer-b
+      TASKFLOW_MINIO_ENDPOINT: http://minio:9000
+      TASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      TASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
+      TASKFLOW_MINIO_BUCKET: ${TASKFLOW_MINIO_BUCKET:-taskflow}
     command:
       - java
       - -Xmx256m
@@ -119,6 +127,10 @@ services:
         condition: service_started
     environment:
       TASKFLOW_PEER_ID: compose-peer-c
+      TASKFLOW_MINIO_ENDPOINT: http://minio:9000
+      TASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      TASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
+      TASKFLOW_MINIO_BUCKET: ${TASKFLOW_MINIO_BUCKET:-taskflow}
     command:
       - java
       - -Xmx256m
@@ -140,6 +152,10 @@ services:
     environment:
       TASKFLOW_PEER_ID: compose-submit
       TASKFLOW_DEMO_FILE_COUNT: 12
+      TASKFLOW_MINIO_ENDPOINT: http://minio:9000
+      TASKFLOW_MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-}
+      TASKFLOW_MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-}
+      TASKFLOW_MINIO_BUCKET: ${TASKFLOW_MINIO_BUCKET:-taskflow}
     volumes:
       - ./target/demo-results:/app/target/demo-results
       - ./target/rabbitmq-results:/app/target/rabbitmq-results

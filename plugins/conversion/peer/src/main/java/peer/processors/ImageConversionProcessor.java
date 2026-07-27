@@ -1,9 +1,10 @@
 package peer.processors;
 
-import protocol.LocalPayloadStorage;
 import protocol.PayloadLimits;
 import com.google.gson.Gson;
 import conversion.model.FilePayload;
+import objectstore.ObjectStoreProvider;
+import objectstore.ObjectStores;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.rendering.PDFRenderer;
@@ -20,16 +21,29 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.Objects;
 
 public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
     private final Gson gson = new Gson();
+    private final ObjectStoreProvider objectStoreProvider;
+
+    public ImageConversionProcessor() {
+        this(ObjectStores::open);
+    }
+
+    public ImageConversionProcessor(ObjectStoreProvider objectStoreProvider) {
+        this.objectStoreProvider = Objects.requireNonNull(objectStoreProvider, "objectStoreProvider");
+    }
 
     @Override
     public FilePayload process(TaskAssignMessage task) throws Exception {
         String format = normalizeFormat(task.getParam());
         FilePayload input = gson.fromJson(gson.toJson(task.getPayload()), FilePayload.class);
-        long maxInputBytes = PayloadLimits.maxInputBytes();
-        byte[] rawBytes = readPayloadBytes(input, maxInputBytes, "Image task has no input data.");
+        byte[] rawBytes = ObjectBackedPayloadReader.readInput(
+                input,
+                "Image",
+                objectStoreProvider
+        );
         BufferedImage img;
         String inputFileName = SafeFileNames.sanitize(input.fileName());
         if (inputFileName.toLowerCase(Locale.ROOT).endsWith(".pdf")) {
@@ -72,38 +86,14 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
         byte[] outputBytes = baos.toByteArray();
         String newFileName = stripExtension(inputFileName) + "." + format;
 
-        return outputPayload(newFileName, outputBytes);
-    }
-
-    private byte[] readPayloadBytes(FilePayload payload, long maxBytes, String emptyMessage) throws IOException {
-        if (payload == null || (!payload.hasInlineData() && !payload.hasPayloadReference())) {
-            throw new IOException(emptyMessage);
+        long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
+        if (outputBytes.length >= inlineLimit) {
+            throw new IOException("Image result must be smaller than "
+                    + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
+                    + " bytes) until object-backed result ownership is available: "
+                    + input.fileName());
         }
-        if (payload.hasInlineData() == payload.hasPayloadReference()) {
-            throw new IOException("Image task must contain exactly one of Base64 data or a payload reference: "
-                    + payload.fileName());
-        }
-        if (payload.hasPayloadReference()) {
-            return LocalPayloadStorage.read(payload.payloadReference(), maxBytes);
-        }
-        byte[] rawBytes;
-        try {
-            rawBytes = Base64.getDecoder().decode(payload.base64Data());
-        } catch (IllegalArgumentException e) {
-            throw new IOException("Image task payload is not valid Base64: " + payload.fileName(), e);
-        }
-        if (rawBytes.length > maxBytes) {
-            throw new IOException("Input payload exceeds " + PayloadLimits.MAX_INPUT_BYTES_ENV
-                    + " (" + maxBytes + " bytes): " + payload.fileName());
-        }
-        return rawBytes;
-    }
-
-    private FilePayload outputPayload(String fileName, byte[] bytes) throws IOException {
-        if (LocalPayloadStorage.shouldExternalize(bytes.length)) {
-            return new FilePayload(fileName, null, LocalPayloadStorage.storeBytes(fileName, bytes));
-        }
-        return new FilePayload(fileName, Base64.getEncoder().encodeToString(bytes));
+        return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
     }
 
     private String normalizeFormat(String format) throws IOException {
