@@ -282,6 +282,26 @@ guarantees.
   and correctness-chaos evidence remain planned work and are not implied by
   that focused scenario.
 
+## Reusable plugin-contract evidence
+
+The abstract
+[`PluginContractTest`](../taskflow-spi/src/test/java/plugin/PluginContractTest.java)
+runs the same seven test methods through the
+[example](../plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java),
+[text](../plugins/text/server/src/test/java/server/plugins/text/TextAnalysisPluginContractTest.java),
+[image](../plugins/conversion/server/src/test/java/server/plugins/conversion/ImageConversionPluginContractTest.java),
+and
+[video](../plugins/conversion/server/src/test/java/server/plugins/conversion/VideoTranscodingPluginContractTest.java)
+bindings. It proves deterministic splitting with stable task identifiers,
+payload and pre-commit result validation, explicit paired retry/resource
+declarations, arrival-order-independent aggregation, production coordinator
+dependency separation, and portable object-reference preservation where
+applicable.
+
+This is black-box plugin-contract evidence, not a native-codec benchmark or an
+object-store integration test. Focused peer/client and MinIO tests retain those
+responsibilities.
+
 ## Explicit non-goals
 
 - Exactly-once execution of arbitrary plugin side effects.

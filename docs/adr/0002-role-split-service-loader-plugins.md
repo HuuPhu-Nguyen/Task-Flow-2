@@ -46,8 +46,9 @@ Runtime packages include only the role artifacts needed by that package.
   dependencies.
 - Role-specific dependency-tree checks are required when plugin wiring or
   package profiles change.
-- Cross-role plugin behavior should be covered by harness tests similar to
-  `plugins/example/harness`.
+- Every task type binds the same reusable `PluginContractTest`; family bindings
+  provide only domain samples and concrete role providers. Native codec and
+  external-service behavior remains in focused role tests.
 
 ## Evidence
 
@@ -55,6 +56,11 @@ Runtime packages include only the role artifacts needed by that package.
 - `plugins/example`
 - `plugins/conversion`
 - `plugins/text`
+- `taskflow-spi/src/test/java/plugin/PluginContractTest.java`
+- `plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java`
+- `plugins/text/server/src/test/java/server/plugins/text/TextAnalysisPluginContractTest.java`
+- `plugins/conversion/server/src/test/java/server/plugins/conversion/ImageConversionPluginContractTest.java`
+- `plugins/conversion/server/src/test/java/server/plugins/conversion/VideoTranscodingPluginContractTest.java`
 - `taskflow-spi/src/main/java/server/job/TaskPlugin.java`
 - `taskflow-spi/src/main/java/client/ClientJobPlugin.java`
 - `taskflow-spi/src/main/java/peer/engine/PeerProcessorPlugin.java`

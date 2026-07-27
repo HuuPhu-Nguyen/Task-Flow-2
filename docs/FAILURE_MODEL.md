@@ -36,6 +36,16 @@ requires a positive retry value. This admission check prevents knowingly unsafe
 retry-capable work from entering the state machine, but declarations cannot
 make an external side effect transactional with SQLite or RabbitMQ.
 
+Malformed plugin-owned result data is rejected before the coordinator calls
+the authoritative result store. The current assignment remains durable and
+can later expire or receive a valid result; the malformed delivery is rejected
+without requeue. This combines the family-neutral
+[`PluginContractTest#resultValidationAcceptsValidAndRejectsMalformedResults`](../taskflow-spi/src/test/java/plugin/PluginContractTest.java)
+with the shared
+[`DeliveryFailureClassifierTest#everyExceptionCategoryMapsToOneDisposition`](../taskflow-spi/src/test/java/transport/DeliveryFailureClassifierTest.java).
+It does not alter the crash windows below or claim that plugin payload
+validation verifies arbitrary external side effects.
+
 ## Failure-window matrix
 
 | Failure window | Durable state before failure | Expected recovery | Duplicate allowed? | Required test |

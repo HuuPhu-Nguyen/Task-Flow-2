@@ -327,6 +327,8 @@ Server module tests should cover:
 - Invalid parameters are rejected.
 - Empty or malformed payload lists are rejected.
 - Unsupported input shape, extension, format, or encoded data is rejected.
+- `parseResult(...)` rejects missing, malformed, or domain-invalid task
+  results before the coordinator attempts authoritative persistence.
 - Job initialization, result recording, and aggregation work for typed payloads
   when the job has nontrivial aggregation behavior.
 
@@ -370,12 +372,26 @@ Peer module tests should cover:
 If a new plugin changes runtime dependencies or role classpaths, run dependency
 tree checks for the affected modules in addition to focused tests.
 
-For new domains, keep a harness test similar to
-`plugins/example/harness/src/test/java/example/harness/ExamplePluginContractHarnessTest.java`.
-That test should prove the new plugin can run across client, server, peer, and
-result-handler contracts, and that the paired server/executor retry-safety
-declarations match, without core, scheduler, transport, GUI, or peer-engine
-source changes.
+Every new task type must bind the reusable
+`taskflow-spi/src/test/java/plugin/PluginContractTest.java` test fixture. The
+binding supplies fresh valid/invalid submissions, valid/invalid task results,
+the paired server/executor providers, expected retry safety, role POM
+coordinates, and an object-reference submission when applicable. Its seven
+inherited tests run unchanged and prove:
+
+- deterministic task splitting with stable, unique identifiers;
+- acceptance of valid payloads and rejection of invalid payloads;
+- matching server/executor task type, retry safety, and resource profile;
+- task-result validation before commit preparation;
+- deterministic aggregation when the same results commit in reverse order;
+- absence of executor artifacts and peer-only libraries from production
+  coordinator/server dependency declarations;
+- portable object-reference preservation for reference-capable plugins, with
+  an explicit inline/model-only path for other plugins.
+
+Keep client payload construction, result-file handling, and native processor
+correctness in their focused role-module tests; the shared contract does not
+execute native codecs or access external object storage.
 
 ## Add A New Task Type Without Touching Core
 
@@ -396,10 +412,9 @@ Use this checklist for each new task type:
 6. Add server artifacts to `taskflow-coordinator` runtime dependencies.
 7. Add client and peer artifacts to `taskflow-peer` and `taskflow-gui` profiles
    according to `combined-runtime`, `submitter-runtime`, and `executor-runtime`.
-8. Add focused server, client, peer, and harness tests for discovery,
-   matching retry-safety and resource-profile declarations, validation,
-   payload creation,
-   final-result handling, processing, aggregation, and no-core-change wiring.
+8. Bind `PluginContractTest`, then add focused server, client, and peer tests
+   for discovery, payload creation, final-result handling, native processing,
+   and domain-specific edge cases beyond the shared contract.
 9. Run the focused tests for the new plugin modules and harness.
 10. Run `git diff --check`; run broader Maven and dependency-tree gates if the
     plugin changed runtime classpaths or packaged runtime behavior.

@@ -1,6 +1,7 @@
 package server.plugins.text;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import protocol.JobSubmitMessage;
 import protocol.TaskAssignMessage;
 import server.job.EmbarrassinglyParallelJob;
@@ -57,7 +58,16 @@ public class TextAnalysisJob extends EmbarrassinglyParallelJob<TextAnalysisPaylo
 
     @Override
     protected TextAnalysisResult parseResult(Object payloads) {
-        return gson.fromJson(gson.toJson(payloads), TextAnalysisResult.class);
+        try {
+            return TextAnalysisTaskValidation.validateResult(
+                    gson.fromJson(gson.toJson(payloads), TextAnalysisResult.class)
+            );
+        } catch (JsonParseException e) {
+            throw new IllegalArgumentException(
+                    "Text analysis result has an invalid shape.",
+                    e
+            );
+        }
     }
 
     @Override

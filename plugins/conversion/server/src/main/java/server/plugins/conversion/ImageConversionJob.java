@@ -1,6 +1,7 @@
 package server.plugins.conversion;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
 import org.slf4j.Logger;
@@ -64,7 +65,17 @@ public class ImageConversionJob extends EmbarrassinglyParallelJob<FilePayload, F
 
     @Override
     protected FilePayload parseResult(Object rawData) {
-        return gson.fromJson(gson.toJson(rawData), FilePayload.class);
+        try {
+            return ConversionTaskValidation.validateResult(
+                    gson.fromJson(gson.toJson(rawData), FilePayload.class),
+                    targetFormat
+            );
+        } catch (JsonParseException e) {
+            throw new IllegalArgumentException(
+                    "Image conversion result has an invalid shape.",
+                    e
+            );
+        }
     }
 
     @Override

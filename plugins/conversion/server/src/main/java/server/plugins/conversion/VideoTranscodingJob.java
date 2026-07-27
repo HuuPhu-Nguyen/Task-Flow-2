@@ -1,6 +1,7 @@
 package server.plugins.conversion;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
 import org.slf4j.Logger;
@@ -13,6 +14,7 @@ import server.job.TaskUnit;
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,7 +28,7 @@ public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, 
 
     public VideoTranscodingJob(String jobId, String requesterId, String targetFormat) {
         super(jobId, requesterId, ConversionTaskTypes.VIDEO_TRANSCODING);
-        this.targetFormat = targetFormat;
+        this.targetFormat = normalizeTargetFormat(targetFormat);
     }
 
     @Override
@@ -62,7 +64,17 @@ public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, 
 
     @Override
     protected FilePayload parseResult(Object rawData) {
-        return gson.fromJson(gson.toJson(rawData), FilePayload.class);
+        try {
+            return ConversionTaskValidation.validateResult(
+                    gson.fromJson(gson.toJson(rawData), FilePayload.class),
+                    targetFormat
+            );
+        } catch (JsonParseException e) {
+            throw new IllegalArgumentException(
+                    "Video transcoding result has an invalid shape.",
+                    e
+            );
+        }
     }
 
     @Override
@@ -87,5 +99,11 @@ public class VideoTranscodingJob extends EmbarrassinglyParallelJob<FilePayload, 
         } catch (NumberFormatException ignored) {
             return Integer.MAX_VALUE;
         }
+    }
+
+    private static String normalizeTargetFormat(String targetFormat) {
+        return targetFormat == null
+                ? null
+                : targetFormat.trim().toLowerCase(Locale.ROOT);
     }
 }

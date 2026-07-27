@@ -93,6 +93,14 @@ nodes may enable the requester role, executor role, or both.
 - Coordinator-side `TaskPlugin` implementations validate submitted parameters and payload shapes during job startup.
 - Built-in server plugins reject missing or unsupported task options, empty payload lists, malformed payload objects, unsupported conversion file extensions, invalid/oversized Base64 file data, malformed/oversized object references, and the removed local-filesystem reference shape.
 - Invalid submissions return a failed terminal `JOB_RESULT` before scheduler startup persists tasks or assigns executor work when the requester can be routed. Invalid non-submit broker deliveries are rejected instead of requeued indefinitely.
+- For an otherwise current successful `TASK_RESULT`, the server job parses and
+  validates the plugin-owned result before `commitTaskResult(...)`. Built-in
+  example/text results reject missing names and invalid counts; conversion
+  results additionally require the requested extension, exactly one non-empty
+  bounded inline body or portable object reference, and valid reference
+  bounds. `IllegalArgumentException` remains the shared invalid-delivery
+  classification, so malformed result data cannot become an authoritative
+  task snapshot.
 
 ## Participant Requester and Result Handling
 

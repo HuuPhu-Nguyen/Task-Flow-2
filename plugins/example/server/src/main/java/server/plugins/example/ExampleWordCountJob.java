@@ -1,6 +1,7 @@
 package server.plugins.example;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonParseException;
 import example.model.ExampleJobSummary;
 import example.model.ExamplePayload;
 import example.model.ExampleTaskResult;
@@ -64,7 +65,29 @@ public class ExampleWordCountJob extends EmbarrassinglyParallelJob<ExamplePayloa
 
     @Override
     protected ExampleTaskResult parseResult(Object payloads) {
-        return gson.fromJson(gson.toJson(payloads), ExampleTaskResult.class);
+        ExampleTaskResult result;
+        try {
+            result = gson.fromJson(gson.toJson(payloads), ExampleTaskResult.class);
+        } catch (JsonParseException e) {
+            throw new IllegalArgumentException(
+                    "Example word count result has an invalid shape.",
+                    e
+            );
+        }
+        if (result == null) {
+            throw new IllegalArgumentException("Example word count result is required.");
+        }
+        if (result.documentName() == null || result.documentName().isBlank()) {
+            throw new IllegalArgumentException(
+                    "Example word count result requires a document name."
+            );
+        }
+        if (result.wordCount() < 0) {
+            throw new IllegalArgumentException(
+                    "Example word count result must not have a negative word count."
+            );
+        }
+        return result;
     }
 
     @Override

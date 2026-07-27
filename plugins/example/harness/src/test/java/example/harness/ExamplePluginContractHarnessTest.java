@@ -2,11 +2,14 @@ package example.harness;
 
 import client.ClientJobPlugin;
 import example.model.ExampleJobSummary;
+import example.model.ExamplePayload;
+import example.model.ExampleTaskResult;
 import example.model.ExampleTaskTypes;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import peer.engine.PeerProcessorPlugin;
 import peer.engine.TaskProcessor;
+import plugin.PluginContractTest;
 import plugin.RetrySafety;
 import protocol.JobResultMessage;
 import protocol.JobSubmitMessage;
@@ -20,9 +23,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.ServiceLoader;
-import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,9 +32,75 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class ExamplePluginContractHarnessTest {
+class ExamplePluginContractHarnessTest extends PluginContractTest {
     @TempDir
     Path tempDir;
+
+    @Override
+    protected TaskPlugin taskPlugin() {
+        return loadTaskPlugin();
+    }
+
+    @Override
+    protected PeerProcessorPlugin peerPlugin() {
+        return loadPeerPlugin();
+    }
+
+    @Override
+    protected RetrySafety expectedRetrySafety() {
+        return RetrySafety.PURE;
+    }
+
+    @Override
+    protected JobSubmitMessage validSubmission() {
+        return new JobSubmitMessage(
+                "example-client",
+                Instant.EPOCH.toString(),
+                "job-example-contract",
+                ExampleTaskTypes.WORD_COUNT,
+                List.<Object>of(
+                        new ExamplePayload("first.txt", "one two"),
+                        new ExamplePayload("second.txt", "three four five")
+                ),
+                "summary"
+        );
+    }
+
+    @Override
+    protected JobSubmitMessage invalidSubmission() {
+        return new JobSubmitMessage(
+                "example-client",
+                Instant.EPOCH.toString(),
+                "job-example-invalid",
+                ExampleTaskTypes.WORD_COUNT,
+                List.<Object>of(new ExamplePayload("missing.txt", null)),
+                "summary"
+        );
+    }
+
+    @Override
+    protected Object validResultFor(TaskUnit<?> task) {
+        ExamplePayload payload = (ExamplePayload) task.getPayload();
+        int wordCount = payload.text().isBlank()
+                ? 0
+                : payload.text().trim().split("\\s+").length;
+        return new ExampleTaskResult(payload.documentName(), wordCount);
+    }
+
+    @Override
+    protected Object invalidResult() {
+        return Map.of("documentName", "invalid.txt", "wordCount", -1);
+    }
+
+    @Override
+    protected String serverModulePom() {
+        return "plugins/example/server/pom.xml";
+    }
+
+    @Override
+    protected String peerArtifactId() {
+        return "taskflow-plugin-example-peer";
+    }
 
     @Test
     void examplePluginRunsAcrossClientServerPeerAndResultHandlerContracts() throws Exception {

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import plugin.RetrySafety;
 import protocol.JobSubmitMessage;
 import protocol.PayloadLimits;
+import server.job.EmbarrassinglyParallelJob;
 import server.job.TaskPlugin;
 
 import java.time.Instant;
@@ -174,6 +175,25 @@ class ConversionServerPluginDiscoveryTest {
                 new VideoTranscodingTaskPlugin().validateSubmission(submit));
 
         assertTrue(error.getMessage().contains("invalid Base64"));
+    }
+
+    @Test
+    void videoPluginNormalizesAcceptedTargetFormatBeforeAssignment() {
+        JobSubmitMessage submit = submit(
+                ConversionTaskTypes.VIDEO_TRANSCODING,
+                List.<Object>of(filePayload("clip.mp4")),
+                " MP4 "
+        );
+        VideoTranscodingTaskPlugin plugin = new VideoTranscodingTaskPlugin();
+        assertDoesNotThrow(() -> plugin.validateSubmission(submit));
+
+        EmbarrassinglyParallelJob<?, ?> job =
+                plugin.createJob(submit, "client-1");
+        job.initializeTasks(submit);
+
+        assertEquals("mp4", job.createTaskAssignMessage(
+                job.getPendingTasks().getFirst()
+        ).getParam());
     }
 
     @Test

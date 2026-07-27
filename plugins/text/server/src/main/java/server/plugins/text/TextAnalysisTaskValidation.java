@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import protocol.JobSubmitMessage;
 import text.model.TextAnalysisPayload;
+import text.model.TextAnalysisResult;
 
 import java.util.List;
 
@@ -25,6 +26,27 @@ final class TextAnalysisTaskValidation {
             TextAnalysisPayload payload = parsePayload(payloads.get(i), i);
             validatePayload(payload, i);
         }
+    }
+
+    static TextAnalysisResult validateResult(TextAnalysisResult result) {
+        if (result == null) {
+            throw new IllegalArgumentException("Text analysis result is required.");
+        }
+        if (result.documentName() == null || result.documentName().isBlank()) {
+            throw new IllegalArgumentException("Text analysis result requires a document name.");
+        }
+        if (result.lineCount() < 0
+                || result.wordCount() < 0
+                || result.characterCount() < 0
+                || result.uniqueWordCount() < 0) {
+            throw new IllegalArgumentException("Text analysis result counts must not be negative.");
+        }
+        if (result.uniqueWordCount() > result.wordCount()) {
+            throw new IllegalArgumentException(
+                    "Text analysis unique-word count must not exceed word count."
+            );
+        }
+        return result;
     }
 
     private static void validateParameter(String parameter) {

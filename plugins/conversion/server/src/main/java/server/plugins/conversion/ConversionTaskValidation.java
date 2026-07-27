@@ -32,6 +32,72 @@ final class ConversionTaskValidation {
         }
     }
 
+    static FilePayload validateResult(FilePayload result, String targetFormat) {
+        if (result == null) {
+            throw new IllegalArgumentException("Conversion result is required.");
+        }
+        if (result.fileName() == null || result.fileName().isBlank()) {
+            throw new IllegalArgumentException("Conversion result requires a file name.");
+        }
+        String normalizedTarget = targetFormat == null
+                ? ""
+                : targetFormat.trim().toLowerCase(Locale.ROOT);
+        if ("jpeg".equals(normalizedTarget)) {
+            normalizedTarget = "jpg";
+        }
+        if (normalizedTarget.isBlank()
+                || !hasAllowedExtension(result.fileName(), List.of(normalizedTarget))) {
+            throw new IllegalArgumentException(
+                    "Conversion result file name must use target format '" + normalizedTarget + "'."
+            );
+        }
+        if (result.hasInlineData() == result.hasObjectReference()) {
+            throw new IllegalArgumentException(
+                    "Conversion result requires exactly one of Base64 data or an object reference."
+            );
+        }
+        if (result.hasObjectReference()) {
+            long contentLength = result.objectReference().contentLength();
+            if (contentLength <= 0L) {
+                throw new IllegalArgumentException(
+                        "Conversion result object reference must point to a non-empty file."
+                );
+            }
+            if (contentLength > PayloadLimits.maxResultBytes()) {
+                throw new IllegalArgumentException(
+                        "Conversion result object reference exceeds "
+                                + PayloadLimits.MAX_RESULT_BYTES_ENV + " ("
+                                + PayloadLimits.maxResultBytes() + " bytes)."
+                );
+            }
+            return result;
+        }
+
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(result.base64Data());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Conversion result has invalid Base64 data.", e);
+        }
+        if (decoded.length == 0) {
+            throw new IllegalArgumentException("Conversion result must not be empty.");
+        }
+        if (decoded.length > PayloadLimits.maxResultBytes()) {
+            throw new IllegalArgumentException(
+                    "Conversion result exceeds " + PayloadLimits.MAX_RESULT_BYTES_ENV + " ("
+                            + PayloadLimits.maxResultBytes() + " bytes)."
+            );
+        }
+        if (decoded.length >= PayloadLimits.maxInlinePayloadBytes()) {
+            throw new IllegalArgumentException(
+                    "Conversion result inline data must be smaller than "
+                            + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " ("
+                            + PayloadLimits.maxInlinePayloadBytes() + " bytes)."
+            );
+        }
+        return result;
+    }
+
     private static void validateParameter(String parameter, Collection<String> allowedTargetFormats) {
         if (parameter == null || parameter.isBlank()) {
             throw new IllegalArgumentException("Conversion target format is required.");
