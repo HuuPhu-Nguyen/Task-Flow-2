@@ -128,6 +128,24 @@ Task assignment, retry, and failure:
   durably closes the exact current attempt as terminal. It carries the complete
   assignment correlation tuple, `PERMANENT_PAYLOAD_INTEGRITY`, the error, and
   the current `taskflow_payload_integrity_failures_total` value.
+- `orphan_output_gc_configured` records the safety window, fixed interval, and
+  batch bound when the coordinator owns cleanup. `orphan_output_gc_disabled`
+  gives the stable reason `configuration`, `invalid_configuration`, or
+  `object_store_configuration` without logging credentials.
+- `orphan_output_deleted` records the exact old attempt key only after SQLite
+  classifies it `orphan_candidate` and idempotent deletion succeeds.
+  `orphan_output_preserved` is debug-level evidence for `active` and
+  `authoritative` classifications.
+- `orphan_output_delete_deferred` records a typed object-store failure after
+  schema-v13 retry state commits.
+  `orphan_output_delete_failure_unrecorded` distinguishes the separate SQLite
+  write failure, and `orphan_output_gc_retry_clear_failed` records a harmless
+  repeated-delete requirement after the object side effect succeeded.
+- `orphan_output_gc_deferred` records listing, classification-state, retry-state,
+  or unexpected failure for a pass. `orphan_output_gc_batch` reports examined,
+  deleted, active, authoritative, ignored/preserved, failed, store-unavailable,
+  and configured-limit values. These bounded log fields are current evidence;
+  `taskflow_orphan_outputs_total` remains a Phase 6 exporter item.
 - `task_lease_expired` records assigned work whose persisted lease expired
   before a result was accepted.
 - `peer_unavailable_tasks_released` records how many tasks were returned for

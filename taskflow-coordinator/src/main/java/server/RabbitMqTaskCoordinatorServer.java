@@ -1,5 +1,8 @@
 package server;
 
+import objectstore.ObjectStore;
+import objectstore.ObjectStoreException;
+import objectstore.ObjectStores;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import protocol.Message;
@@ -12,6 +15,8 @@ import server.db.BrokerOutboxStore;
 import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
+import server.objectstore.OrphanOutputGc;
+import server.objectstore.OrphanOutputGcConfig;
 import server.rabbitmq.RabbitMqOutboxReplayer;
 import server.rabbitmq.RabbitMqSchedulerOutput;
 import server.registry.InMemoryPeerRegistry;
@@ -128,6 +133,7 @@ public class RabbitMqTaskCoordinatorServer {
                         schedulerConfig.schedulerOutboxBatchSize(),
                         () -> refreshPendingOutboxPressure(schedulerLogic, finalDb)
                 );
+        OrphanOutputGc orphanOutputGc = createOrphanOutputGc(finalDb, clock);
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,
@@ -161,6 +167,7 @@ public class RabbitMqTaskCoordinatorServer {
                 transport,
                 List.of(jobSubmitConsumerTag, taskResultConsumerTag, heartbeatConsumerTag),
                 monitor::shutdown,
+                orphanOutputGc,
                 finalOutboxReplayer,
                 schedulerLogic::requestShutdownAfterDrain,
                 schedulerThread,
@@ -174,11 +181,58 @@ public class RabbitMqTaskCoordinatorServer {
 
         monitor.start();
         schedulerThread.start();
+        if (orphanOutputGc != null) {
+            orphanOutputGc.start();
+        }
         if (outboxReplayer != null) {
             outboxReplayer.start();
         }
         LOGGER.info("event=coordinator_started transport=rabbitmq");
         Thread.currentThread().join();
+    }
+
+    private static OrphanOutputGc createOrphanOutputGc(
+            DatabaseManager database,
+            TaskFlowClock clock
+    ) {
+        if (database == null) {
+            return null;
+        }
+        OrphanOutputGcConfig config;
+        try {
+            config = OrphanOutputGcConfig.fromRuntime();
+        } catch (RuntimeException e) {
+            LOGGER.warn(
+                    "event=orphan_output_gc_disabled reason=invalid_configuration error={}",
+                    e.getMessage()
+            );
+            return null;
+        }
+        if (!config.enabled()) {
+            LOGGER.info("event=orphan_output_gc_disabled reason=configuration");
+            return null;
+        }
+
+        ObjectStore objectStore;
+        try {
+            objectStore = ObjectStores.open();
+        } catch (ObjectStoreException e) {
+            LOGGER.warn(
+                    "event=orphan_output_gc_disabled reason=object_store_configuration "
+                            + "failure_reason={} error={}",
+                    e.reason(),
+                    e.getMessage()
+            );
+            return null;
+        }
+        LOGGER.info(
+                "event=orphan_output_gc_configured safety_window_ms={} interval_ms={} "
+                        + "batch_size={}",
+                config.safetyWindowMillis(),
+                config.intervalMillis(),
+                config.batchSize()
+        );
+        return new OrphanOutputGc(objectStore, database, config, clock);
     }
 
     private static void enqueueForScheduler(SchedulerMailbox.BrokerIngress brokerIngress,

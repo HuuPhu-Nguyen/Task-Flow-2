@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -67,6 +68,43 @@ public final class TaskFlowObjectKeys {
                 canonicalAssignmentId,
                 "output"
         );
+    }
+
+    /**
+     * Parses only the canonical assignment-owned output key shape.
+     *
+     * <p>Other valid TaskFlow keys return an empty result so cleanup cannot
+     * infer ownership from a shared prefix alone.</p>
+     */
+    public static Optional<AttemptOutputIdentity> parseAttemptOutputKey(String key) {
+        String validatedKey = requireObjectKey(key);
+        String[] segments = validatedKey.substring(ROOT_PREFIX.length()).split("/", -1);
+        if (segments.length != 8
+                || !"jobs".equals(segments[0])
+                || !"tasks".equals(segments[2])
+                || !"attempts".equals(segments[4])
+                || !"output".equals(segments[7])) {
+            return Optional.empty();
+        }
+        int attemptNumber;
+        try {
+            attemptNumber = Integer.parseInt(segments[5]);
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
+        try {
+            AttemptOutputIdentity identity = new AttemptOutputIdentity(
+                    segments[1],
+                    segments[3],
+                    attemptNumber,
+                    segments[6]
+            );
+            return identity.key().equals(validatedKey)
+                    ? Optional.of(identity)
+                    : Optional.empty();
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
     }
 
     public static String requireObjectKey(String key) {
@@ -158,5 +196,25 @@ public final class TaskFlowObjectKeys {
             }
         }
         return candidate;
+    }
+
+    public record AttemptOutputIdentity(
+            String jobId,
+            String taskId,
+            int attemptNumber,
+            String assignmentId
+    ) {
+        public AttemptOutputIdentity {
+            String key = attemptOutputKey(jobId, taskId, attemptNumber, assignmentId);
+            String[] segments = key.substring(ROOT_PREFIX.length()).split("/");
+            jobId = segments[1];
+            taskId = segments[3];
+            attemptNumber = Integer.parseInt(segments[5]);
+            assignmentId = segments[6];
+        }
+
+        public String key() {
+            return attemptOutputKey(jobId, taskId, attemptNumber, assignmentId);
+        }
     }
 }

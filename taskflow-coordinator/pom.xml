@@ -21,6 +21,11 @@
         </dependency>
         <dependency>
             <groupId>com.dickinson.cs</groupId>
+            <artifactId>taskflow-objectstore-minio</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.dickinson.cs</groupId>
             <artifactId>taskflow-plugin-conversion-server</artifactId>
             <scope>runtime</scope>
         </dependency>

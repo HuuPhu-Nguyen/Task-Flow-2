@@ -51,9 +51,10 @@ key. Different attempts may therefore stage independent objects.
   `ServiceLoader`.
 
 `taskflow-objectstore-minio` supplies the provider and contains all MinIO SDK
-usage. Command-line and JavaFX participant runtimes include that adapter;
-coordinator/core/persistence sources and the coordinator runtime remain
-MinIO-free.
+usage. Command-line and JavaFX participant runtimes include that adapter for
+uploads/downloads. The coordinator runtime includes it for orphan-output
+collection. Coordinator/core/persistence source remains independent from the
+MinIO SDK, and SQLite—not MinIO—remains the authority.
 
 The MinIO provider reads:
 
@@ -83,7 +84,8 @@ docker compose --profile object-store up --detach minio minio-init
 docker compose --profile object-store ps --all minio minio-init
 ```
 
-For participant processes launched on the host, point TaskFlow at that service:
+For participant and coordinator processes launched on the host, point TaskFlow
+at that service:
 
 ```powershell
 $env:TASKFLOW_MINIO_ENDPOINT = "http://localhost:9000"
@@ -168,7 +170,9 @@ and must be upgraded together.
 Input objects are immutable staging data, not authoritative coordinator state.
 If payload building fails after uploads, the submitter deletes objects from
 that build best-effort. An object may remain after an uncertain broker publish,
-process crash, or failed cleanup; TF-0506 owns bounded orphan collection.
+process crash, or failed cleanup. These `taskflow/inputs/` objects are
+classified as referenced input, but TF-0506 deliberately does not infer their
+retention from coordinator task state and does not delete them automatically.
 
 Attempt output objects are also staging data until the exact assignment result
 transaction commits. That transaction changes the task to `COMPLETED`, stores
@@ -181,8 +185,55 @@ SQLite commit is the authority boundary:
 - a late attempt result cannot replace the committed pointer; and
 - no S3 rename, copy promotion, or object upload is treated as commitment.
 
-TF-0506 owns discovering and deleting old non-authoritative output objects; it
-does not change which reference is authoritative.
+## Orphan-output lifecycle and collection
+
+Stored payloads have these lifecycle classifications:
+
+- **referenced input:** immutable `taskflow/inputs/` data; outside the current
+  automatic deletion policy;
+- **staged attempt output:** an exact attempt key whose upload alone has no
+  authority;
+- **authoritative output:** a key present in the matching task's committed
+  `tasks.result_payload_json`;
+- **orphan candidate:** an exact attempt output old enough for the safety
+  window whose assignment is neither active nor authoritative; and
+- **deleted:** an orphan candidate for which idempotent deletion succeeded,
+  including when the object was already absent.
+
+The coordinator scans only `taskflow/jobs/` in bounded lexical pages. Each
+listing entry carries the immutable object's real creation timestamp. This is
+important: using attempt age would let a stale executor upload a new object
+after the attempt was closed and lose the safety window.
+
+For every old exact output key, SQLite classifies the complete job/task/attempt/
+assignment identity under the same synchronized state boundary as result
+commit. `AUTHORITATIVE` is preserved first; the exact current `ASSIGNED`
+generation is preserved as `ACTIVE`; only the remaining key is an
+`ORPHAN_CANDIDATE`. Once a generation is no longer active, the existing result
+fence prevents it from becoming authoritative later.
+
+Schema v13 stores failed deletes in `orphan_output_gc_failures`, including
+first/last failure time, saturated attempt count, and bounded last error. Every
+later batch reclassifies the oldest failures before retrying. Delete is
+idempotent. A crash before delete leaves the object discoverable; a crash after
+delete but before failure-row removal repeats a harmless delete; and a crash
+after a failed delete but before its row is written still leaves the object for
+the next bounded lexical scan.
+
+| Environment variable | System property | Default |
+|---|---|---|
+| `TASKFLOW_ORPHAN_OUTPUT_GC_ENABLED` | `taskflow.orphanOutputGcEnabled` | `true` |
+| `TASKFLOW_ORPHAN_OUTPUT_GC_SAFETY_WINDOW_MS` | `taskflow.orphanOutputGcSafetyWindowMs` | `86400000` (24 hours) |
+| `TASKFLOW_ORPHAN_OUTPUT_GC_INTERVAL_MS` | `taskflow.orphanOutputGcIntervalMs` | `300000` (5 minutes) |
+| `TASKFLOW_ORPHAN_OUTPUT_GC_BATCH_SIZE` | `taskflow.orphanOutputGcBatchSize` | `100` |
+
+The interval and safety window must be positive. Batch size must be `2..1000`
+so every pass can reserve work for durable retries and new discovery. A store
+outage stops external work for the current pass and waits for the fixed delay;
+there is no immediate retry loop. Missing provider/credentials disable only GC
+for that coordinator run, with a structured reason, so small-inline scheduling
+can continue. Set `TASKFLOW_ORPHAN_OUTPUT_GC_ENABLED=false` only when an
+external lifecycle owner is deliberately responsible for cleanup.
 
 An unavailable store or missing object fails payload building, execution, or
 result saving through the existing failure path. No SQLite job/task state is

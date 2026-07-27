@@ -595,6 +595,11 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
   submissions store a `v1:` SHA-256 fingerprint in the same transaction as the
   job/tasks. Migrated rows retain the empty default and therefore cannot claim
   exact-submission replay.
+- Schema version 13 adds `orphan_output_gc_failures`. Each exact object key
+  retains first/last deletion-failure time, a saturated attempt count, and a
+  bounded last error until idempotent deletion succeeds or SQLite later
+  classifies the key as active/authoritative. Migration from v12 creates an
+  empty retry set without changing task/result authority.
 - Coordinator startup rebuilds resumable `RUNNING` and `FINALIZING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks only when their complete persisted identity has an unexpired lease, releases expired assignments with a `lease_expired` attempt reason, and releases incomplete legacy assignments with an inspectable restart reason. Recovered task results are supplied to plugins in canonical task order for deterministic aggregation.
 - Legacy or otherwise non-resumable `RUNNING` or `FINALIZING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.

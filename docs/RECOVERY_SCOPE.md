@@ -26,13 +26,16 @@ version 12 adds the canonical job-submission request hash used to classify an
 exact requester-scoped replay after coordinator restart. Migrated rows retain
 an empty hash and remain non-replayable as original submissions because task
 snapshots may be plugin-transformed rather than the original submitted values.
+Schema version 13 adds durable orphan-output deletion failures; the coordinator
+loads and reclassifies them in bounded scheduled batches after restart.
 PostgreSQL/Flyway is not implemented.
 
 Coordinator shutdown now stops RabbitMQ intake before draining the bounded
 scheduler mailbox. A delivery that was admitted drains to its typed
 scheduler/store disposition; a delivery that reaches the closed ingress gate
 remains unacknowledged and returns to RabbitMQ when the channel closes.
-SQLite closes only after the scheduler, peer monitor, and outbox replayer stop.
+SQLite closes only after the scheduler, peer monitor, orphan-output collector,
+and outbox replayer stop.
 Healthy-connection acknowledgement windows remain separate from the managed
 single-broker restart proof. The latter starts with RabbitMQ unavailable,
 stops it again during active work, preserves SQLite assignment/outbox state,

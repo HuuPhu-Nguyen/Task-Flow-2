@@ -14,6 +14,7 @@ import io.minio.errors.ErrorResponseException;
 import io.minio.errors.MinioException;
 import io.minio.messages.Item;
 import objectstore.ObjectListing;
+import objectstore.ObjectMetadata;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
@@ -190,7 +191,7 @@ public final class MinioObjectStore implements ObjectStore {
                 : TaskFlowObjectKeys.requireStartAfter(validatedPrefix, startAfter);
         int validatedLimit = ObjectStore.requireListLimit(limit);
 
-        List<ObjectReference> objects = new ArrayList<>(validatedLimit);
+        List<ObjectMetadata> objects = new ArrayList<>(validatedLimit);
         try {
             ListObjectsArgs.Builder builder = ListObjectsArgs.builder()
                     .bucket(bucket)
@@ -205,7 +206,10 @@ public final class MinioObjectStore implements ObjectStore {
                 if (item.isDir()) {
                     continue;
                 }
-                objects.add(stat(item.objectName()));
+                objects.add(new ObjectMetadata(
+                        stat(item.objectName()),
+                        item.lastModified().toInstant().toEpochMilli()
+                ));
                 if (objects.size() == validatedLimit) {
                     break;
                 }

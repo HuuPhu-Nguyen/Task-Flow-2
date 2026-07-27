@@ -36,14 +36,16 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-public class DatabaseManager implements JobStateStore, PeerRegistryStore, BrokerOutboxStore, AutoCloseable {
+public class DatabaseManager implements JobStateStore, PeerRegistryStore, BrokerOutboxStore,
+        OrphanOutputStateStore, AutoCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 12;
+    public static final int CURRENT_SCHEMA_VERSION = 13;
     private static final int ASSIGNMENT_IDENTITY_SCHEMA_VERSION = 10;
     private static final int FINALIZATION_INTENT_SCHEMA_VERSION = 11;
+    private static final int MAX_GC_ERROR_LENGTH = 1_024;
     private static final Gson GSON = new Gson();
 
     private final Connection conn;
@@ -106,6 +108,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             }
             createPeerRegistryTable();
             createBrokerOutboxTable();
+            createOrphanOutputGcFailuresTable();
             if (version < FINALIZATION_INTENT_SCHEMA_VERSION) {
                 migrateFinalizationIntentSchema();
             }
@@ -239,6 +242,24 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                     last_attempt_at INTEGER NOT NULL DEFAULT 0,
                     last_error      TEXT    NOT NULL DEFAULT ''
                 )
+            """);
+        }
+    }
+
+    private void createOrphanOutputGcFailuresTable() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE TABLE IF NOT EXISTS orphan_output_gc_failures (
+                    object_key      TEXT    PRIMARY KEY,
+                    first_failed_at INTEGER NOT NULL,
+                    last_attempt_at INTEGER NOT NULL,
+                    attempt_count   INTEGER NOT NULL CHECK(attempt_count > 0),
+                    last_error      TEXT    NOT NULL DEFAULT ''
+                )
+            """);
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_orphan_output_gc_retry
+                ON orphan_output_gc_failures(last_attempt_at, object_key)
             """);
         }
     }
@@ -570,6 +591,16 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 || !columnExists("broker_outbox", "last_attempt_at")
                 || !columnExists("broker_outbox", "last_error")) {
             throw new SQLException("Database schema is missing broker outbox columns.");
+        }
+        if (!tableExists("orphan_output_gc_failures")
+                || !columnExists("orphan_output_gc_failures", "object_key")
+                || !columnExists("orphan_output_gc_failures", "first_failed_at")
+                || !columnExists("orphan_output_gc_failures", "last_attempt_at")
+                || !columnExists("orphan_output_gc_failures", "attempt_count")
+                || !columnExists("orphan_output_gc_failures", "last_error")) {
+            throw new SQLException(
+                    "Database schema is missing orphan-output GC failure columns."
+            );
         }
         if (countInvalidFinalizingJobs() > 0) {
             throw new SQLException(
@@ -3359,6 +3390,167 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             return TaskAttemptOutcome.JOB_FAILED;
         }
         return outcome;
+    }
+
+    @Override
+    public synchronized AttemptOutputClassification classifyAttemptOutput(
+            TaskFlowObjectKeys.AttemptOutputIdentity identity
+    ) {
+        Objects.requireNonNull(identity, "identity");
+        String sql = """
+                SELECT status, attempt_number, assignment_id, result_payload_json
+                FROM tasks
+                WHERE job_id=? AND task_id=?
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, identity.jobId());
+            ps.setString(2, identity.taskId());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return AttemptOutputClassification.ORPHAN_CANDIDATE;
+                }
+
+                String resultJson = rs.getString("result_payload_json");
+                if (resultJson != null) {
+                    Object resultPayload = fromJson(resultJson);
+                    boolean authoritative = PayloadLimits.objectReferences(resultPayload)
+                            .stream()
+                            .anyMatch(reference -> identity.key().equals(reference.key()));
+                    if (authoritative) {
+                        return AttemptOutputClassification.AUTHORITATIVE;
+                    }
+                }
+
+                boolean active = "ASSIGNED".equals(rs.getString("status"))
+                        && identity.attemptNumber() == rs.getInt("attempt_number")
+                        && Objects.equals(
+                                identity.assignmentId(),
+                                rs.getString("assignment_id")
+                        );
+                return active
+                        ? AttemptOutputClassification.ACTIVE
+                        : AttemptOutputClassification.ORPHAN_CANDIDATE;
+            }
+        } catch (SQLException | RuntimeException e) {
+            LOGGER.error(
+                    "event=orphan_output_classification_failed object_key={} error={}",
+                    identity.key(),
+                    e.getMessage(),
+                    e
+            );
+            return AttemptOutputClassification.STORAGE_FAILURE;
+        }
+    }
+
+    @Override
+    public synchronized DeletionFailureBatch loadOrphanOutputDeletionFailures(int limit) {
+        int validatedLimit = OrphanOutputStateStore.requireFailureBatchLimit(limit);
+        String sql = """
+                SELECT object_key,
+                       first_failed_at,
+                       last_attempt_at,
+                       attempt_count,
+                       last_error
+                FROM orphan_output_gc_failures
+                ORDER BY last_attempt_at, object_key
+                LIMIT ?
+                """;
+        List<DeletionFailure> failures = new ArrayList<>(validatedLimit);
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, validatedLimit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    failures.add(new DeletionFailure(
+                            rs.getString("object_key"),
+                            rs.getLong("first_failed_at"),
+                            rs.getLong("last_attempt_at"),
+                            rs.getInt("attempt_count"),
+                            rs.getString("last_error")
+                    ));
+                }
+            }
+            return DeletionFailureBatch.loaded(failures);
+        } catch (SQLException | RuntimeException e) {
+            LOGGER.error(
+                    "event=orphan_output_gc_retry_load_failed limit={} error={}",
+                    validatedLimit,
+                    e.getMessage(),
+                    e
+            );
+            return DeletionFailureBatch.storageFailure();
+        }
+    }
+
+    @Override
+    public synchronized MutationOutcome recordOrphanOutputDeletionFailure(
+            String objectKey,
+            long failedAt,
+            String error
+    ) {
+        String validatedKey = TaskFlowObjectKeys.requireObjectKey(objectKey);
+        long normalizedFailedAt = Math.max(0L, failedAt);
+        String normalizedError = boundedError(error);
+        String sql = """
+                INSERT INTO orphan_output_gc_failures(
+                    object_key,
+                    first_failed_at,
+                    last_attempt_at,
+                    attempt_count,
+                    last_error
+                ) VALUES(?, ?, ?, 1, ?)
+                ON CONFLICT(object_key) DO UPDATE SET
+                    last_attempt_at=excluded.last_attempt_at,
+                    attempt_count=CASE
+                        WHEN orphan_output_gc_failures.attempt_count < 2147483647
+                        THEN orphan_output_gc_failures.attempt_count + 1
+                        ELSE orphan_output_gc_failures.attempt_count
+                    END,
+                    last_error=excluded.last_error
+                """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, validatedKey);
+            ps.setLong(2, normalizedFailedAt);
+            ps.setLong(3, normalizedFailedAt);
+            ps.setString(4, normalizedError);
+            return ps.executeUpdate() == 1
+                    ? MutationOutcome.COMMITTED
+                    : MutationOutcome.STORAGE_FAILURE;
+        } catch (SQLException e) {
+            LOGGER.error(
+                    "event=orphan_output_gc_failure_record_failed object_key={} error={}",
+                    validatedKey,
+                    e.getMessage(),
+                    e
+            );
+            return MutationOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    @Override
+    public synchronized MutationOutcome clearOrphanOutputDeletionFailure(String objectKey) {
+        String validatedKey = TaskFlowObjectKeys.requireObjectKey(objectKey);
+        String sql = "DELETE FROM orphan_output_gc_failures WHERE object_key=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, validatedKey);
+            return ps.executeUpdate() == 1
+                    ? MutationOutcome.COMMITTED
+                    : MutationOutcome.ALREADY_APPLIED;
+        } catch (SQLException e) {
+            LOGGER.error(
+                    "event=orphan_output_gc_failure_clear_failed object_key={} error={}",
+                    validatedKey,
+                    e.getMessage(),
+                    e
+            );
+            return MutationOutcome.STORAGE_FAILURE;
+        }
+    }
+
+    private static String boundedError(String error) {
+        String normalized = error == null ? "" : error;
+        return normalized.length() <= MAX_GC_ERROR_LENGTH
+                ? normalized
+                : normalized.substring(0, MAX_GC_ERROR_LENGTH);
     }
 
     private static String toJson(Object payload) {

@@ -618,6 +618,217 @@ class DatabaseManagerTest {
     }
 
     @Test
+    void classifiesExactAttemptOutputAgainstActiveAndAuthoritativeState()
+            throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-output-gc-classification.db");
+        String jobId = "job-output-gc";
+        String taskId = "task-output-gc";
+        TaskFlowObjectKeys.AttemptOutputIdentity first =
+                new TaskFlowObjectKeys.AttemptOutputIdentity(
+                        jobId,
+                        taskId,
+                        1,
+                        ASSIGNMENT_ID
+                );
+        TaskFlowObjectKeys.AttemptOutputIdentity second =
+                new TaskFlowObjectKeys.AttemptOutputIdentity(
+                        jobId,
+                        taskId,
+                        2,
+                        SECOND_ASSIGNMENT_ID
+                );
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob(jobId, "TEST_TASK", "requester-1", 1);
+            db.insertTask(taskId, jobId);
+            assertTrue(db.markTaskAssigned(
+                    taskId,
+                    "peer-1",
+                    100L,
+                    "lease-1",
+                    500L,
+                    1,
+                    ASSIGNMENT_ID
+            ));
+            assertEquals(
+                    OrphanOutputStateStore.AttemptOutputClassification.ACTIVE,
+                    db.classifyAttemptOutput(first)
+            );
+
+            assertTrue(db.markTaskRetried(
+                    taskId,
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "lease_expired",
+                    150L
+            ));
+            assertTrue(db.markTaskAssigned(
+                    taskId,
+                    "peer-1",
+                    200L,
+                    "lease-2",
+                    900L,
+                    2,
+                    SECOND_ASSIGNMENT_ID
+            ));
+            assertEquals(
+                    OrphanOutputStateStore.AttemptOutputClassification.ORPHAN_CANDIDATE,
+                    db.classifyAttemptOutput(first)
+            );
+            assertEquals(
+                    OrphanOutputStateStore.AttemptOutputClassification.ACTIVE,
+                    db.classifyAttemptOutput(second)
+            );
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            taskId,
+                            2,
+                            SECOND_ASSIGNMENT_ID,
+                            "peer-1",
+                            300L,
+                            100L,
+                            Map.of(
+                                    "objectReference",
+                                    outputReference(
+                                            jobId,
+                                            taskId,
+                                            2,
+                                            SECOND_ASSIGNMENT_ID,
+                                            "2"
+                                    )
+                            )
+                    )
+            );
+            assertEquals(
+                    OrphanOutputStateStore.AttemptOutputClassification.AUTHORITATIVE,
+                    db.classifyAttemptOutput(second)
+            );
+            assertEquals(
+                    OrphanOutputStateStore.AttemptOutputClassification.ORPHAN_CANDIDATE,
+                    db.classifyAttemptOutput(
+                            new TaskFlowObjectKeys.AttemptOutputIdentity(
+                                    "missing-job",
+                                    "missing-task",
+                                    1,
+                                    OTHER_ASSIGNMENT_ID
+                            )
+                    )
+            );
+        }
+    }
+
+    @Test
+    void deletionFailureRetryStateSurvivesRestartAndClearsIdempotently()
+            throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-output-gc-retry.db");
+        String key = TaskFlowObjectKeys.attemptOutputKey(
+                "job-gc-retry",
+                "task-gc-retry",
+                1,
+                ASSIGNMENT_ID
+        );
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            assertEquals(
+                    OrphanOutputStateStore.MutationOutcome.COMMITTED,
+                    db.recordOrphanOutputDeletionFailure(key, 100L, "first")
+            );
+            assertEquals(
+                    OrphanOutputStateStore.MutationOutcome.COMMITTED,
+                    db.recordOrphanOutputDeletionFailure(
+                            key,
+                            200L,
+                            "x".repeat(2_000)
+                    )
+            );
+            OrphanOutputStateStore.DeletionFailure failure =
+                    db.loadOrphanOutputDeletionFailures(10).failures().getFirst();
+            assertEquals(100L, failure.firstFailedAt());
+            assertEquals(200L, failure.lastAttemptAt());
+            assertEquals(2, failure.attemptCount());
+            assertEquals(1_024, failure.lastError().length());
+        }
+
+        try (DatabaseManager reopened = new DatabaseManager(dbPath.toString())) {
+            OrphanOutputStateStore.DeletionFailureBatch recovered =
+                    reopened.loadOrphanOutputDeletionFailures(10);
+            assertEquals(OrphanOutputStateStore.LoadOutcome.LOADED, recovered.outcome());
+            assertEquals(List.of(key),
+                    recovered.failures().stream()
+                            .map(OrphanOutputStateStore.DeletionFailure::objectKey)
+                            .toList());
+            assertEquals(
+                    OrphanOutputStateStore.MutationOutcome.COMMITTED,
+                    reopened.clearOrphanOutputDeletionFailure(key)
+            );
+            assertEquals(
+                    OrphanOutputStateStore.MutationOutcome.ALREADY_APPLIED,
+                    reopened.clearOrphanOutputDeletionFailure(key)
+            );
+            assertEquals(
+                    List.of(),
+                    reopened.loadOrphanOutputDeletionFailures(10).failures()
+            );
+        }
+    }
+
+    @Test
+    void closedDatabaseClassifiesGcOperationsAsStorageFailures() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-output-gc-storage-failure.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+        db.close();
+        String key = TaskFlowObjectKeys.attemptOutputKey(
+                "job-gc-storage",
+                "task-gc-storage",
+                1,
+                ASSIGNMENT_ID
+        );
+
+        assertEquals(
+                OrphanOutputStateStore.AttemptOutputClassification.STORAGE_FAILURE,
+                db.classifyAttemptOutput(
+                        TaskFlowObjectKeys.parseAttemptOutputKey(key).orElseThrow()
+                )
+        );
+        assertEquals(
+                OrphanOutputStateStore.LoadOutcome.STORAGE_FAILURE,
+                db.loadOrphanOutputDeletionFailures(10).outcome()
+        );
+        assertEquals(
+                OrphanOutputStateStore.MutationOutcome.STORAGE_FAILURE,
+                db.recordOrphanOutputDeletionFailure(key, 100L, "unavailable")
+        );
+        assertEquals(
+                OrphanOutputStateStore.MutationOutcome.STORAGE_FAILURE,
+                db.clearOrphanOutputDeletionFailure(key)
+        );
+    }
+
+    @Test
+    void migratesSchemaVersion12WithEmptyDurableGcRetryState() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v12-output-gc-migration.db");
+        try (DatabaseManager ignored = new DatabaseManager(dbPath.toString())) {
+            // Create a complete current schema before reconstructing the v12 boundary.
+        }
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement statement = connection.createStatement()) {
+            statement.execute("DROP TABLE orphan_output_gc_failures");
+            statement.execute("UPDATE schema_version SET version=12 WHERE id=1");
+        }
+
+        try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
+            assertEquals(13, migrated.getSchemaVersion());
+            assertTrue(tableExists(dbPath, "orphan_output_gc_failures"));
+            assertEquals(
+                    List.of(),
+                    migrated.loadOrphanOutputDeletionFailures(10).failures()
+            );
+        }
+    }
+
+    @Test
     void resultCommitStorageFailureRollsBackTaskAndAttempt() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-result-commit-storage-failure.db");
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
@@ -2606,7 +2817,7 @@ class DatabaseManagerTest {
         createVersion9AssignmentDatabase(dbPath);
 
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
-            assertEquals(12, DatabaseManager.CURRENT_SCHEMA_VERSION);
+            assertEquals(13, DatabaseManager.CURRENT_SCHEMA_VERSION);
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(columnExists(dbPath, "tasks", "attempt_number"));
             assertTrue(columnExists(dbPath, "tasks", "assignment_id"));
@@ -2700,7 +2911,7 @@ class DatabaseManagerTest {
         }
 
         try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
-            assertEquals(12, migrated.getSchemaVersion());
+            assertEquals(13, migrated.getSchemaVersion());
             assertEquals("FINALIZING", migrated.getJobHistory().getFirst().status());
             assertTrue(columnExists(dbPath, "jobs", "request_hash"));
             assertEquals(
@@ -2735,7 +2946,7 @@ class DatabaseManagerTest {
         }
 
         assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
-        assertEquals(12, schemaVersion(dbPath));
+        assertEquals(13, schemaVersion(dbPath));
     }
 
     @Test

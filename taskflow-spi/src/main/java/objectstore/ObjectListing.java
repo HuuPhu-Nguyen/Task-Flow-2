@@ -9,7 +9,7 @@ import java.util.List;
  * @param nextStartAfter last returned key when another page may exist, otherwise {@code null}
  */
 public record ObjectListing(
-        List<ObjectReference> objects,
+        List<ObjectMetadata> objects,
         String nextStartAfter
 ) {
     public ObjectListing {

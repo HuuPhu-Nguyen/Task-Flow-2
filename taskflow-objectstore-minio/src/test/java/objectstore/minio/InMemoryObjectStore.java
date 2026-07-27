@@ -1,6 +1,7 @@
 package objectstore.minio;
 
 import objectstore.ObjectListing;
+import objectstore.ObjectMetadata;
 import objectstore.ObjectReference;
 import objectstore.ObjectStore;
 import objectstore.ObjectStoreException;
@@ -37,7 +38,11 @@ final class InMemoryObjectStore implements ObjectStore {
                     reference,
                     reference.contentLength()
             );
-            objects.put(reference.key(), new StoredObject(reference, bytes));
+            objects.put(reference.key(), new StoredObject(
+                    reference,
+                    bytes,
+                    System.currentTimeMillis()
+            ));
             return reference;
         } catch (IOException e) {
             if (e instanceof ObjectStoreException objectStoreException) {
@@ -59,7 +64,7 @@ final class InMemoryObjectStore implements ObjectStore {
             );
             StoredObject existing = objects.putIfAbsent(
                     reference.key(),
-                    new StoredObject(reference, bytes)
+                    new StoredObject(reference, bytes, System.currentTimeMillis())
             );
             if (existing != null) {
                 throw new ObjectStoreException(
@@ -120,7 +125,11 @@ final class InMemoryObjectStore implements ObjectStore {
                 object.reference().sha256(),
                 object.reference().contentType()
         );
-        objects.put(destination, new StoredObject(copied, object.content().clone()));
+        objects.put(destination, new StoredObject(
+                copied,
+                object.content().clone(),
+                System.currentTimeMillis()
+        ));
         return copied;
     }
 
@@ -133,12 +142,15 @@ final class InMemoryObjectStore implements ObjectStore {
         int validatedLimit = ObjectStore.requireListLimit(limit);
         requireAvailable("list", validatedPrefix);
 
-        ArrayList<ObjectReference> listed = objects.values().stream()
-                .map(StoredObject::reference)
-                .filter(reference -> reference.key().startsWith(validatedPrefix))
-                .filter(reference -> validatedStartAfter == null
-                        || reference.key().compareTo(validatedStartAfter) > 0)
-                .sorted(Comparator.comparing(ObjectReference::key))
+        ArrayList<ObjectMetadata> listed = objects.values().stream()
+                .map(object -> new ObjectMetadata(
+                        object.reference(),
+                        object.lastModifiedAtEpochMillis()
+                ))
+                .filter(metadata -> metadata.key().startsWith(validatedPrefix))
+                .filter(metadata -> validatedStartAfter == null
+                        || metadata.key().compareTo(validatedStartAfter) > 0)
+                .sorted(Comparator.comparing(ObjectMetadata::key))
                 .limit(validatedLimit)
                 .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         String nextStartAfter = listed.size() == validatedLimit ? listed.getLast().key() : null;
@@ -156,7 +168,11 @@ final class InMemoryObjectStore implements ObjectStore {
         if (stored == null) {
             throw new IllegalArgumentException("Missing test object: " + key);
         }
-        objects.put(validatedKey, new StoredObject(stored.reference(), content.clone()));
+        objects.put(validatedKey, new StoredObject(
+                stored.reference(),
+                content.clone(),
+                stored.lastModifiedAtEpochMillis()
+        ));
     }
 
     private void requireAvailable(String operation, String key) throws ObjectStoreException {
@@ -180,6 +196,10 @@ final class InMemoryObjectStore implements ObjectStore {
         );
     }
 
-    private record StoredObject(ObjectReference reference, byte[] content) {
+    private record StoredObject(
+            ObjectReference reference,
+            byte[] content,
+            long lastModifiedAtEpochMillis
+    ) {
     }
 }

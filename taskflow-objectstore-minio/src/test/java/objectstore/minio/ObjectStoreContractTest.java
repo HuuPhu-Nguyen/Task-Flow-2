@@ -203,6 +203,8 @@ abstract class ObjectStoreContractTest {
         assertEquals(names.stream().map(name -> key("selected", name)).toList(), returned);
         assertEquals(2, first.objects().size());
         assertEquals(first.objects().getLast().key(), first.nextStartAfter());
+        assertTrue(first.objects().stream()
+                .allMatch(metadata -> metadata.lastModifiedAtEpochMillis() > 0L));
         assertEquals(1, second.objects().size());
         assertEquals(null, second.nextStartAfter());
         assertTrue(returned.stream().allMatch(key -> key.startsWith(selectedPrefix)));

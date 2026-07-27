@@ -43,16 +43,16 @@ class ObjectStoreArchitectureTest {
         );
         assertFalse(adapterPom.contains("taskflow-persistence-sqlite"));
         assertFalse(adapterPom.contains("taskflow-core"));
-        for (String stateOwnerPom : List.of(
-                "taskflow-persistence-sqlite/pom.xml",
-                "taskflow-coordinator/pom.xml"
-        )) {
-            assertFalse(
-                    Files.readString(repository.resolve(stateOwnerPom))
-                            .contains("taskflow-objectstore-minio"),
-                    stateOwnerPom + " must not make MinIO an authority for coordinator state"
-            );
-        }
+        assertFalse(
+                Files.readString(repository.resolve("taskflow-persistence-sqlite/pom.xml"))
+                        .contains("taskflow-objectstore-minio"),
+                "SQLite authority must not depend on the MinIO adapter"
+        );
+        String coordinatorPom = Files.readString(
+                repository.resolve("taskflow-coordinator/pom.xml")
+        );
+        assertTrue(coordinatorPom.contains("taskflow-objectstore-minio"));
+        assertTrue(coordinatorPom.contains("<scope>runtime</scope>"));
         for (String participantPom : List.of(
                 "taskflow-peer/pom.xml",
                 "taskflow-gui/pom.xml"

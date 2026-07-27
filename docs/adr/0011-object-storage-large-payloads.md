@@ -108,8 +108,13 @@ does not waive those requirements.
   SQLite transaction both enforce that ownership. The transaction's
   `tasks.result_payload_json` write is the sole pointer commit point, and
   restart recovery retains it. No object rename or copy promotion is used.
-- TF-0506 still owns bounded garbage collection for non-authoritative staged
-  inputs and attempt outputs.
+- TF-0506 packages the provider in the coordinator runtime and adds a
+  fixed-delay, safety-window and batch-bounded collector. Listings carry real
+  immutable-object creation time; synchronized SQLite classification preserves
+  exact active and authoritative output keys. Schema v13 records failed
+  deletes for reclassification and idempotent retry. `taskflow/inputs/` objects
+  are classified as referenced inputs but remain outside automatic deletion
+  because coordinator task state alone does not define their retention.
 
 ## Related Documents
 

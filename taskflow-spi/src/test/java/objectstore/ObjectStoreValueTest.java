@@ -77,18 +77,61 @@ class ObjectStoreValueTest {
                         1,
                         "not-a-uuid"
                 ));
+
+        TaskFlowObjectKeys.AttemptOutputIdentity parsed =
+                TaskFlowObjectKeys.parseAttemptOutputKey(
+                        TaskFlowObjectKeys.attemptOutputKey(
+                                "job-1",
+                                "task-1",
+                                2,
+                                assignmentId
+                        )
+                ).orElseThrow();
+        assertEquals("job-1", parsed.jobId());
+        assertEquals("task-1", parsed.taskId());
+        assertEquals(2, parsed.attemptNumber());
+        assertEquals(assignmentId, parsed.assignmentId());
+        assertEquals(
+                TaskFlowObjectKeys.attemptOutputKey("job-1", "task-1", 2, assignmentId),
+                parsed.key()
+        );
+        assertEquals(
+                java.util.Optional.empty(),
+                TaskFlowObjectKeys.parseAttemptOutputKey(
+                        TaskFlowObjectKeys.objectKey("jobs", "job-1", "input")
+                )
+        );
+        assertEquals(
+                java.util.Optional.empty(),
+                TaskFlowObjectKeys.parseAttemptOutputKey(
+                        TaskFlowObjectKeys.objectKey(
+                                "jobs",
+                                "job-1",
+                                "tasks",
+                                "task-1",
+                                "attempts",
+                                "not-a-number",
+                                assignmentId,
+                                "output"
+                        )
+                )
+        );
     }
 
     @Test
     void listingIsImmutableAndContinuationMustMatchLastObject() {
         ObjectReference first = reference("first");
         ObjectReference second = reference("second");
-        ObjectListing listing = new ObjectListing(List.of(first, second), second.key());
+        ObjectMetadata firstMetadata = new ObjectMetadata(first, 10L);
+        ObjectMetadata secondMetadata = new ObjectMetadata(second, 20L);
+        ObjectListing listing =
+                new ObjectListing(List.of(firstMetadata, secondMetadata), second.key());
 
-        assertEquals(List.of(first, second), listing.objects());
+        assertEquals(List.of(firstMetadata, secondMetadata), listing.objects());
         assertThrows(UnsupportedOperationException.class, () -> listing.objects().clear());
         assertThrows(IllegalArgumentException.class, () ->
-                new ObjectListing(List.of(first, second), first.key()));
+                new ObjectListing(List.of(firstMetadata, secondMetadata), first.key()));
+        assertThrows(IllegalArgumentException.class, () -> new ObjectMetadata(first, -1L));
         assertThrows(IllegalArgumentException.class, () -> ObjectStore.requireListLimit(0));
         assertThrows(
                 IllegalArgumentException.class,

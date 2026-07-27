@@ -1,6 +1,12 @@
 # Copy this file to config/taskflow.yml for local runtime tuning.
 # Environment variables override values in this file.
 # TASKFLOW_MAX_INPUT_BYTES controls per-file client payload size for plugin inputs.
+# Orphan-output GC is coordinator-owned and currently configured through
+# TASKFLOW_ORPHAN_OUTPUT_GC_ENABLED,
+# TASKFLOW_ORPHAN_OUTPUT_GC_SAFETY_WINDOW_MS,
+# TASKFLOW_ORPHAN_OUTPUT_GC_INTERVAL_MS, and
+# TASKFLOW_ORPHAN_OUTPUT_GC_BATCH_SIZE
+# (defaults: true, 86400000, 300000, and 100).
 
 scheduler:
   taskTimeoutMs: 60000

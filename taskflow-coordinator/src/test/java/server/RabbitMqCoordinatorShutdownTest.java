@@ -15,6 +15,32 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqCoordinatorShutdownTest {
+    @Test
+    void orphanCollectorStopsBeforeSharedDatabaseCloses() {
+        List<String> events = new CopyOnWriteArrayList<>();
+        RecordingTransport transport = new RecordingTransport(events, false);
+        Thread schedulerThread = new Thread(() -> {
+        });
+
+        RabbitMqCoordinatorShutdown shutdown = new RabbitMqCoordinatorShutdown(
+                () -> events.add("stop-intake"),
+                transport,
+                List.of(),
+                () -> events.add("stop-monitor"),
+                () -> events.add("close-orphan-gc"),
+                () -> events.add("close-outbox"),
+                () -> events.add("request-drain"),
+                schedulerThread,
+                () -> events.add("close-database"),
+                25L
+        );
+
+        shutdown.shutdown();
+
+        assertTrue(events.indexOf("close-orphan-gc") >= 0);
+        assertTrue(events.indexOf("close-orphan-gc") < events.indexOf("close-database"));
+    }
+
 
     @Test
     void stopsIntakeCancelsConsumersDrainsSchedulerThenClosesTransportAndDatabase() {

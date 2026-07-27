@@ -5,7 +5,7 @@ import java.util.ServiceConfigurationError;
 import java.util.ServiceLoader;
 
 /**
- * Discovers the single object-store provider packaged with a participant.
+ * Discovers the single object-store provider packaged with a runtime.
  */
 public final class ObjectStores {
     private ObjectStores() {
@@ -17,7 +17,7 @@ public final class ObjectStores {
                     ServiceLoader.load(ObjectStoreProvider.class).iterator();
             if (!providers.hasNext()) {
                 throw storageFailure(
-                        "No ObjectStoreProvider is installed in this participant runtime.",
+                        "No ObjectStoreProvider is installed in this runtime.",
                         null
                 );
             }
