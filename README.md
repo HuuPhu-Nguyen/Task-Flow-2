@@ -96,6 +96,7 @@ TaskFlow is now organized as a Maven reactor:
 
 - `taskflow-spi` - protocol messages, job abstractions, coordinator plugins, requester/client plugins, and executor plugins (the latter retain existing `peer` package names)
 - `taskflow-core` - coordinator scheduler and task state, persistence and messaging boundaries, participant registry, shared executor engine, and metrics
+- `taskflow-objectstore-minio` - MinIO/S3-compatible adapter for the framework-owned streaming `ObjectStore` port; the MinIO SDK remains isolated here
 - `plugins/example` - executable plugin authoring template and contract harness; it is in the reactor for tests but is not wired into runtime classpaths
 - `plugins/conversion/model` - conversion-owned shared payload/type metadata
 - `plugins/conversion/server` - coordinator-side image/video job plugins
@@ -112,6 +113,14 @@ TaskFlow is now organized as a Maven reactor:
 - `taskflow-gui` - RabbitMQ JavaFX participant runtime with GUI-facing adapters and requester-only, executor-only, and combined profiles
 
 Framework core no longer imports concrete image, video, text, or example job classes. New task types should be added under `plugins/<domain>` with separate model, server, client, and peer artifacts when a role needs different dependencies. Coordinator-side scheduling uses `server.job.TaskPlugin`, executor-role processing uses `peer.engine.PeerProcessorPlugin`, and requester-role upload/final-result handling uses `client.ClientJobPlugin`. Providers are registered under `META-INF/services`. Server plugins validate submitted parameters and payload shapes during job startup, so malformed submissions fail with a terminal `JOB_RESULT` before tasks are persisted or assigned. Conversion plugins can keep binary file bytes inline as Base64 or use local-file payload references when `TASKFLOW_PAYLOAD_STORAGE_DIR` is configured. See `docs/PLUGIN_AUTHORING.md` for the contributor checklist, executable example harness, and role-by-role plugin contract, `docs/PAYLOAD_STORAGE.md` for payload-reference ownership and limits, and `docs/PEER_LIFECYCLE.md` for the participant requester/result-handling lifecycle.
+
+`taskflow-spi` now owns a streaming `ObjectStore` port and validated
+`ObjectReference(key, contentLength, sha256, contentType)` metadata. Its
+put/get/stat/delete/copy/bounded-prefix-list contract runs unchanged against an
+in-memory fake and a real Testcontainers MinIO service. Runtime conversion
+payloads are not wired to that port yet: Docker Compose configuration, bucket
+bootstrap, credentials, protocol references, end-to-end byte verification,
+attempt-specific output commitment, and orphan cleanup remain Phase 5 work.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, requester-role job submission and result routing, executor-role task execution, and history reads. It is a participant UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for broker delivery, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -724,6 +733,19 @@ The connection-recovery live test uses the RabbitMQ management API to close the 
 
 The coordinator live suites cover broker-backed job completion; a confirmed, routed assignment with persistent delivery metadata; seeded assignment/final-result outbox replay; pending-row recovery after a closed publish connection and after an unroutable worker assignment; exact duplicate assignment replay after an injected SQLite sent-mark failure; connection-close redelivery both before acknowledgement and after durable result commit; ordered shutdown ownership; and the complete same-participant ABA sequence. The managed Testcontainers/Toxiproxy suite additionally starts with RabbitMQ unavailable, proves timeout-bounded startup attempts with capped backoff, stops the real broker during an active assignment, commits a replacement assignment and pending outbox row while offline, restarts the same broker, waits for shared and peer topology/consumer recovery, replays the exact outbox identity, rejects the stale pre-outage result, and completes once the recovered participant returns a current result. The post-commit acknowledgement-loss case proves SQLite commits once and the redelivery is acknowledged as `DUPLICATE_ALREADY_COMPLETED`. The shutdown case drains a delivery admitted before intake stops and proves a later deferred delivery is marked redelivered after channel close. In the ABA scenario, attempt 1 / assignment X is failed, the same participant receives attempt 2 / assignment Y, a late successful X result is acknowledged as stale without changing Y, and only Y produces the authoritative result.
 
+### Object-store Contract Tests
+
+The object-store contract is part of the normal Maven reactor. It runs once
+against the in-memory fake and once against an ephemeral MinIO container:
+
+```powershell
+.\mvnw.cmd -pl taskflow-objectstore-minio -am test
+```
+
+This command and the full `.\mvnw.cmd test` gate require a working Docker
+engine. Testcontainers starts and removes the pinned MinIO test service; no
+runtime TaskFlow credentials or bucket configuration are used.
+
 ---
 
 ## Quick RabbitMQ Demo
@@ -795,6 +817,13 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
 - RabbitMQ live broker tests cover transport delivery, delayed transient-handler retry, exact-bound deterministic-poison quarantine with metadata and manual redrive, ordinary DLQ inspect/redrive/quarantine behavior, transport-level prefetch backpressure, client recovery after a broker-side connection close, coordinator end-to-end job completion, pre-ack and post-commit/pre-ack redelivery, graceful-shutdown delivery ownership, persistent/confirmed coordinator publication, coordinator outbox replay after seeded intent, connection loss, unroutable assignment, and failed sent marking, plus a managed real-broker stop/restart during active work. Unit coverage verifies all five typed dispositions, bounded scheduler ingress, explicit active-work and pending-outbox admission, bounded interruptible connection ownership, retry topology and header propagation, centralized protocol validation, coordinator outbox behavior, participant publish failures, deterministic execution quarantine, and DLQ/quarantine decisions. Durable peer queues, participant-side result persistence, and adaptive broker/executor throttling are not complete; `docs/BACKPRESSURE_SCOPE.md` records current boundaries.
 - RabbitMQ is the sole supported transport, but the runtime remains transitional rather than production-ready. Implemented pieces include peer-specific routing, explicit peer IDs, peer-scoped job IDs, persisted peer registry metadata, publisher confirms, typed delivery dispositions, bounded delayed retry and automatic final quarantine, coordinator outbox replay, acknowledgement crash-window coverage, ordered shutdown, managed single-broker outage/restart recovery, command-line and JavaFX submit/result handling, automated JavaFX desktop smoke coverage, broker-backed CI, and DLQ/quarantine commands. Remaining support-promotion gaps are listed in `docs/RUNTIME_STRATEGY.md` and `docs/RABBITMQ_SCOPE.md`.
 - The JavaFX GUI can use RabbitMQ for live submit, execute, and result delivery, but it does not send RabbitMQ `JOB_RESULT_REQUEST` messages for post-restart result replay.
+- The object-store port and MinIO adapter contract are implemented, including
+  controlled `taskflow/` keys, required metadata, streaming operations, bounded
+  prefix pages, idempotent deletion, and typed missing/invalid-metadata/storage
+  failures. Production runtime paths still use inline Base64 or the
+  transitional local/shared-file reference. TF-0502 through TF-0506 own MinIO
+  environment wiring, distributed object references, end-to-end digest/length
+  verification, fenced attempt output ownership, and orphan cleanup.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.
 - SQLite is the current `JobStateStore`, peer registry store, and coordinator broker outbox store implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, and schema-v12 stores the canonical job-submission request hash. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows for RabbitMQ runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
@@ -830,7 +859,8 @@ It should run on a normal Windows, macOS, or Linux desktop/laptop if all of thes
 
 - Java 21 or newer is installed.
 - Maven 3.9 or newer is installed.
-- Docker Desktop is installed if you want to run the local RabbitMQ broker or the one-command RabbitMQ demo.
+- Docker Desktop or Docker Engine is installed for the MinIO-backed Maven
+  contract test, the local RabbitMQ broker, or the one-command RabbitMQ demo.
 - The machine can download Maven dependencies the first time it builds.
 - The GUI machine has a desktop environment available. Headless servers can run the coordinator or command-line participant, but not the JavaFX GUI.
 - A RabbitMQ broker is reachable on port `5672` between the coordinator and participant machines.

@@ -2,7 +2,9 @@
 
 TaskFlow can keep binary conversion inputs and results out of protocol message
 bodies by using local-file payload references. Inline Base64 remains the default
-when no storage root is configured.
+when no storage root is configured. A framework-owned object-store port and
+MinIO adapter now exist as a tested Phase 5 boundary, but runtime payload flows
+are not wired to that boundary yet.
 
 ## Current Scope
 
@@ -18,6 +20,32 @@ conversion plugin's `FilePayload` objects:
 
 Text analysis and plugin-owned semantic payloads still use their existing
 inline JSON payloads unless those plugins add their own reference support.
+
+## Object-store boundary
+
+`taskflow-spi` owns `ObjectStore` and
+`ObjectReference(key, contentLength, sha256, contentType)`. The port provides:
+
+- upload from a caller-owned stream;
+- download as a caller-closed stream;
+- stat/head metadata;
+- idempotent deletion;
+- copy/promotion;
+- lexically paged listing within the controlled `taskflow/` prefix, with a
+  maximum page size of 1,000 objects.
+
+Object names reject path traversal, URI/path-shaped segments, backslashes,
+empty segments, and names outside `taskflow/`. Missing objects, invalid stored
+metadata, and infrastructure failures have distinct port-level
+classifications. The MinIO SDK is confined to
+`taskflow-objectstore-minio`; framework core and SPI sources do not import it.
+
+The same contract tests run against an in-memory fake and a real MinIO
+Testcontainers service. Those tests prove operation/metadata parity, streaming
+ownership, bounded prefix pagination, independent attempt-shaped keys,
+idempotent deletion, and outage classification. They do not prove I9
+end-to-end content integrity: TF-0504 still owns digest calculation during
+upload and exact length/SHA-256 verification before processing.
 
 ## Configuration
 
@@ -84,6 +112,7 @@ checksum mismatches, and unsupported storage types fail the current task or
 result handling operation. They do not grant access outside the configured
 payload storage directory.
 
-This is intentionally a local/shared-filesystem contract. Cloud storage,
-object-store credentials, distributed cleanup, and signed expiring URLs are not
-implemented.
+The active conversion protocol remains intentionally local/shared-filesystem
+based. Runtime object-store credentials and bucket bootstrap, distributed
+object references, attempt-specific authoritative output pointers, distributed
+cleanup, and signed expiring URLs are not implemented.

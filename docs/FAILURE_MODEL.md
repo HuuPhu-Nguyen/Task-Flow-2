@@ -309,7 +309,9 @@ can be judged against a stable failure contract. On the current baseline:
 - broker publication remains at least once, and the complete multi-window
   crash harness remains planned even though last-task finalization is now
   replayable;
-- MinIO/S3 attempt output staging and orphan collection are not implemented;
+- the MinIO/S3 streaming port and adapter contract exist, but runtime
+  references, attempt output staging, authoritative pointer commitment, and
+  orphan collection are not implemented;
 - single-broker stop/restart recovery is proved; clustered/zero-downtime
   failover and participant-side durable result replay are not; and
 - weighted capacity, explicit configured admission bounds, persistent-overload

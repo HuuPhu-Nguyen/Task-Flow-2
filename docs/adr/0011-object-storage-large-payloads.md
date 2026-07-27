@@ -74,7 +74,20 @@ does not waive those requirements.
 - [Payload storage — current transitional behavior](../PAYLOAD_STORAGE.md)
 - [Guarantees and non-goals](../GUARANTEES.md)
 - [Failure model](../FAILURE_MODEL.md)
-- Phase 5 owns the port, MinIO adapter, integrity checks, staged output, and GC.
+- TF-0501 implements the framework-owned
+  [`ObjectStore`](../../taskflow-spi/src/main/java/objectstore/ObjectStore.java)
+  port, validated
+  [`ObjectReference`](../../taskflow-spi/src/main/java/objectstore/ObjectReference.java)
+  metadata, and isolated
+  [`MinioObjectStore`](../../taskflow-objectstore-minio/src/main/java/objectstore/minio/MinioObjectStore.java)
+  adapter.
+- One inherited
+  [`ObjectStoreContractTest`](../../taskflow-objectstore-minio/src/test/java/objectstore/minio/ObjectStoreContractTest.java)
+  runs against both the in-memory fake and a real Testcontainers MinIO service.
+- TF-0502 through TF-0506 still own runtime environment wiring, protocol
+  references, end-to-end integrity verification, attempt-specific authoritative
+  output pointers, and garbage collection. The TF-0501 metadata contract alone
+  does not close I9.
 
 ## Related Documents
 

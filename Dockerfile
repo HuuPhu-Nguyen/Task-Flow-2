@@ -10,6 +10,7 @@ COPY config config
 COPY taskflow-spi/pom.xml taskflow-spi/pom.xml
 COPY taskflow-core/pom.xml taskflow-core/pom.xml
 COPY taskflow-persistence-sqlite/pom.xml taskflow-persistence-sqlite/pom.xml
+COPY taskflow-objectstore-minio/pom.xml taskflow-objectstore-minio/pom.xml
 COPY plugins/example/pom.xml plugins/example/pom.xml
 COPY plugins/example/model/pom.xml plugins/example/model/pom.xml
 COPY plugins/example/server/pom.xml plugins/example/server/pom.xml
