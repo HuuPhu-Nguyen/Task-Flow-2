@@ -9,6 +9,7 @@ import java.util.Objects;
 public class ObjectStoreException extends IOException {
     public enum Reason {
         NOT_FOUND,
+        ALREADY_EXISTS,
         INVALID_METADATA,
         PAYLOAD_INTEGRITY,
         STORAGE_FAILURE

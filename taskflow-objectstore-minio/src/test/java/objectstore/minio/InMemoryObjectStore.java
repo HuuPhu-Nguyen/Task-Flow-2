@@ -48,6 +48,35 @@ final class InMemoryObjectStore implements ObjectStore {
     }
 
     @Override
+    public ObjectReference putIfAbsent(ObjectReference reference, InputStream content)
+            throws ObjectStoreException {
+        requireAvailable("putIfAbsent", reference.key());
+        try {
+            byte[] bytes = PayloadIntegrityVerifier.readVerified(
+                    content,
+                    reference,
+                    reference.contentLength()
+            );
+            StoredObject existing = objects.putIfAbsent(
+                    reference.key(),
+                    new StoredObject(reference, bytes)
+            );
+            if (existing != null) {
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.ALREADY_EXISTS,
+                        "Object already exists during putIfAbsent: " + reference.key()
+                );
+            }
+            return reference;
+        } catch (IOException e) {
+            if (e instanceof ObjectStoreException objectStoreException) {
+                throw objectStoreException;
+            }
+            throw storageFailure("putIfAbsent", reference.key(), e);
+        }
+    }
+
+    @Override
     public InputStream get(String key) throws ObjectStoreException {
         String validatedKey = TaskFlowObjectKeys.requireObjectKey(key);
         requireAvailable("get", validatedKey);

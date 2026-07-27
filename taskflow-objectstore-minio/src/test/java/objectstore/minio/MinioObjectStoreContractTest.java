@@ -35,7 +35,6 @@ import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -173,30 +173,85 @@ class MinioObjectStoreContractTest extends ObjectStoreContractTest {
 
         assertTrue(wirePayload.hasObjectReference());
         assertTrue(wirePayload.objectReference().key().startsWith("taskflow/inputs/"));
+        FilePayload firstResult = null;
+        FilePayload secondResult = null;
         try {
-            TaskAssignMessage assignment = new TaskAssignMessage(
+            String firstAssignmentId = "550e8400-e29b-41d4-a716-446655440000";
+            String secondAssignmentId = "550e8400-e29b-41d4-a716-446655440002";
+            TaskAssignMessage firstAssignment = new TaskAssignMessage(
                     "coordinator-1",
                     Instant.now().toString(),
                     "task-remote",
                     "job-remote",
                     ConversionTaskTypes.IMAGE_CONVERSION,
                     1,
-                    "550e8400-e29b-41d4-a716-446655440000",
+                    firstAssignmentId,
+                    1_780_000_000_000L,
+                    wirePayload,
+                    "png"
+            );
+            TaskAssignMessage secondAssignment = new TaskAssignMessage(
+                    "coordinator-1",
+                    Instant.now().toString(),
+                    "task-remote",
+                    "job-remote",
+                    ConversionTaskTypes.IMAGE_CONVERSION,
+                    2,
+                    secondAssignmentId,
                     1_780_000_000_000L,
                     wirePayload,
                     "png"
             );
 
-            FilePayload result = new ImageConversionProcessor(executorProvider)
-                    .process(assignment);
+            System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
+            try {
+                ImageConversionProcessor processor =
+                        new ImageConversionProcessor(executorProvider);
+                firstResult = processor.process(firstAssignment);
+                secondResult = processor.process(secondAssignment);
+            } finally {
+                System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
+            }
 
-            assertTrue(result.hasInlineData());
-            assertNotNull(ImageIO.read(new ByteArrayInputStream(
-                    Base64.getDecoder().decode(result.base64Data())
-            )));
+            assertTrue(firstResult.hasObjectReference());
+            assertTrue(secondResult.hasObjectReference());
+            assertEquals(
+                    TaskFlowObjectKeys.attemptOutputKey(
+                            "job-remote",
+                            "task-remote",
+                            1,
+                            firstAssignmentId
+                    ),
+                    firstResult.objectReference().key()
+            );
+            assertEquals(
+                    TaskFlowObjectKeys.attemptOutputKey(
+                            "job-remote",
+                            "task-remote",
+                            2,
+                            secondAssignmentId
+                    ),
+                    secondResult.objectReference().key()
+            );
+            assertNotEquals(
+                    firstResult.objectReference().key(),
+                    secondResult.objectReference().key()
+            );
+            try (ObjectStore store = provider().open();
+                 InputStream firstOutput = store.get(firstResult.objectReference().key());
+                 InputStream secondOutput = store.get(secondResult.objectReference().key())) {
+                assertNotNull(ImageIO.read(firstOutput));
+                assertNotNull(ImageIO.read(secondOutput));
+            }
         } finally {
             try (ObjectStore store = provider().open()) {
                 store.delete(wirePayload.objectReference().key());
+                if (firstResult != null && firstResult.hasObjectReference()) {
+                    store.delete(firstResult.objectReference().key());
+                }
+                if (secondResult != null && secondResult.hasObjectReference()) {
+                    store.delete(secondResult.objectReference().key());
+                }
             }
         }
     }

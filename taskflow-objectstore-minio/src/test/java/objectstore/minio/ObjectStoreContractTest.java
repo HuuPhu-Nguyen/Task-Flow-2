@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
 
@@ -60,6 +61,36 @@ abstract class ObjectStoreContractTest {
             assertArrayEquals(content, download.readAllBytes());
         }
         upload.close();
+    }
+
+    @Test
+    void putIfAbsentNeverReplacesAnExistingObject() throws Exception {
+        byte[] firstContent = new byte[6 * 1024 * 1024];
+        byte[] replacementContent = new byte[firstContent.length];
+        Arrays.fill(firstContent, (byte) 17);
+        Arrays.fill(replacementContent, (byte) 23);
+        String objectKey = key("immutable-output");
+        ObjectReference first = referenceForKey(objectKey, firstContent, "text/plain");
+        ObjectReference replacement =
+                referenceForKey(objectKey, replacementContent, "text/plain");
+
+        assertEquals(
+                first,
+                store.putIfAbsent(first, new ByteArrayInputStream(firstContent))
+        );
+        ObjectStoreException duplicate = assertThrows(
+                ObjectStoreException.class,
+                () -> store.putIfAbsent(
+                        replacement,
+                        new ByteArrayInputStream(replacementContent)
+                )
+        );
+
+        assertEquals(ObjectStoreException.Reason.ALREADY_EXISTS, duplicate.reason());
+        assertEquals(first, store.stat(objectKey));
+        try (InputStream download = store.get(objectKey)) {
+            assertArrayEquals(firstContent, download.readAllBytes());
+        }
     }
 
     @Test

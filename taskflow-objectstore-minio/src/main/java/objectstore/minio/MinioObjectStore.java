@@ -25,6 +25,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -38,6 +39,7 @@ import java.util.Set;
 public final class MinioObjectStore implements ObjectStore {
     private static final String SHA256_METADATA_KEY = "taskflow-sha256";
     private static final Set<String> NOT_FOUND_CODES = Set.of("NoSuchKey", "NoSuchObject");
+    private static final Set<String> ALREADY_EXISTS_CODES = Set.of("PreconditionFailed");
 
     private final MinioClient client;
     private final String bucket;
@@ -52,6 +54,18 @@ public final class MinioObjectStore implements ObjectStore {
 
     @Override
     public ObjectReference put(ObjectReference reference, InputStream content) throws ObjectStoreException {
+        return put(reference, content, false);
+    }
+
+    @Override
+    public ObjectReference putIfAbsent(ObjectReference reference, InputStream content)
+            throws ObjectStoreException {
+        return put(reference, content, true);
+    }
+
+    private ObjectReference put(ObjectReference reference,
+                                InputStream content,
+                                boolean ifAbsent) throws ObjectStoreException {
         Objects.requireNonNull(reference, "reference");
         Objects.requireNonNull(content, "content");
         PayloadIntegrityVerifier.VerifyingInputStream verified =
@@ -61,34 +75,41 @@ public final class MinioObjectStore implements ObjectStore {
                         reference.contentLength()
                 );
         try {
-            client.putObject(
-                    PutObjectArgs.builder()
-                            .bucket(bucket)
-                            .object(reference.key())
-                            .stream(verified, reference.contentLength(), -1L)
-                            .contentType(reference.contentType())
-                            .userMetadata(java.util.Map.of(SHA256_METADATA_KEY, reference.sha256()))
-                            .build()
-            );
+            PutObjectArgs.Builder builder = PutObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(reference.key())
+                    .stream(verified, reference.contentLength(), -1L)
+                    .contentType(reference.contentType())
+                    .userMetadata(Map.of(SHA256_METADATA_KEY, reference.sha256()));
+            if (ifAbsent) {
+                builder.extraHeaders(Map.of("If-None-Match", "*"));
+            }
+            client.putObject(builder.build());
             verified.verifyEndOfStream();
             return stat(reference.key());
         } catch (PayloadIntegrityException e) {
-            deleteAfterIntegrityFailure(reference.key(), e);
+            if (!ifAbsent) {
+                deleteAfterIntegrityFailure(reference.key(), e);
+            }
             throw e;
         } catch (IOException e) {
             PayloadIntegrityException integrityFailure = findIntegrityFailure(e);
             if (integrityFailure != null) {
-                deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                if (!ifAbsent) {
+                    deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                }
                 throw integrityFailure;
             }
-            throw translate("put", reference.key(), e);
+            throw translate(ifAbsent ? "putIfAbsent" : "put", reference.key(), e);
         } catch (MinioException | IllegalStateException e) {
             PayloadIntegrityException integrityFailure = findIntegrityFailure(e);
             if (integrityFailure != null) {
-                deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                if (!ifAbsent) {
+                    deleteAfterIntegrityFailure(reference.key(), integrityFailure);
+                }
                 throw integrityFailure;
             }
-            throw translate("put", reference.key(), e);
+            throw translate(ifAbsent ? "putIfAbsent" : "put", reference.key(), e);
         }
     }
 
@@ -230,6 +251,14 @@ public final class MinioObjectStore implements ObjectStore {
             return new ObjectStoreException(
                     ObjectStoreException.Reason.NOT_FOUND,
                     "Object not found during " + operation + ": " + key,
+                    failure
+            );
+        }
+        if (failure instanceof ErrorResponseException response
+                && ALREADY_EXISTS_CODES.contains(response.errorResponse().code())) {
+            return new ObjectStoreException(
+                    ObjectStoreException.Reason.ALREADY_EXISTS,
+                    "Object already exists during " + operation + ": " + key,
                     failure
             );
         }

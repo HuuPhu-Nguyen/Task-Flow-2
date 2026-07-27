@@ -18,7 +18,6 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.file.Files;
-import java.util.Base64;
 import java.util.Objects;
 
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AAC;
@@ -78,15 +77,13 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
                         + " (" + maxResultBytes + " bytes): " + input.fileName());
             }
             String newFileName = stripExtension(inputFileName) + "." + targetFormat;
-            long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
-            if (outputSize >= inlineLimit) {
-                throw new IOException("Video result must be smaller than "
-                        + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
-                        + " bytes) until object-backed result ownership is available: "
-                        + input.fileName());
-            }
-            byte[] outputBytes = Files.readAllBytes(tempOut.toPath());
-            return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
+            return ConversionOutputPublisher.publish(
+                    task,
+                    newFileName,
+                    videoContentType(targetFormat),
+                    tempOut.toPath(),
+                    objectStoreProvider
+            );
         } finally {
             deleteTempFile(tempIn);
             deleteTempFile(tempOut);
@@ -187,6 +184,16 @@ public class VideoTranscodingProcessor implements TaskProcessor<FilePayload> {
             case "wmv" -> AV_CODEC_ID_WMAV2;
             case "avi" -> AV_CODEC_ID_MP3;
             default -> AV_CODEC_ID_AAC;
+        };
+    }
+
+    private String videoContentType(String ext) {
+        return switch (ext) {
+            case "avi" -> "video/x-msvideo";
+            case "mkv" -> "video/x-matroska";
+            case "mov" -> "video/quicktime";
+            case "wmv" -> "video/x-ms-wmv";
+            default -> "video/" + ext;
         };
     }
 

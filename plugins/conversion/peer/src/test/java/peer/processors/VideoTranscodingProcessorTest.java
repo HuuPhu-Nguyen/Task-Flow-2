@@ -2,12 +2,15 @@ package peer.processors;
 
 import conversion.model.ConversionTaskTypes;
 import conversion.model.FilePayload;
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.Java2DFrameConverter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import protocol.PayloadLimits;
 import protocol.TaskAssignMessage;
 
 import java.awt.Color;
@@ -16,8 +19,10 @@ import java.awt.image.BufferedImage;
 import java.nio.ShortBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HexFormat;
 
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AAC;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_MPEG4;
@@ -60,6 +65,58 @@ class VideoTranscodingProcessorTest {
         Path output = tempDir.resolve("transcoded.mp4");
         Files.write(output, Base64.getDecoder().decode(result.base64Data()));
         assertTrue(hasAudioSamples(output), "transcoded video should retain audio samples");
+    }
+
+    @Test
+    void stagesTranscodedVideoUnderTheExactAssignmentKey() throws Exception {
+        Path source = tempDir.resolve("staged-source.mp4");
+        createVideoWithAudio(source);
+        byte[] inputBytes = Files.readAllBytes(source);
+        ProcessorMemoryObjectStore store = new ProcessorMemoryObjectStore();
+        ObjectReference inputReference = new ObjectReference(
+                TaskFlowObjectKeys.objectKey("inputs", "video-test"),
+                inputBytes.length,
+                HexFormat.of().formatHex(
+                        MessageDigest.getInstance("SHA-256").digest(inputBytes)
+                ),
+                "video/mp4"
+        );
+        store.put(inputReference, new java.io.ByteArrayInputStream(inputBytes));
+        FilePayload input = new FilePayload("source.mp4", null, inputReference);
+        String assignmentId = "550e8400-e29b-41d4-a716-446655440000";
+        TaskAssignMessage task = new TaskAssignMessage(
+                "COORDINATOR",
+                Instant.now().toString(),
+                "task-video",
+                "job-video",
+                ConversionTaskTypes.VIDEO_TRANSCODING,
+                1,
+                assignmentId,
+                1_780_000_000_000L,
+                input,
+                "mp4"
+        );
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
+        try {
+            FilePayload result = new VideoTranscodingProcessor(() -> store).process(task);
+
+            assertTrue(result.hasObjectReference());
+            assertEquals(
+                    TaskFlowObjectKeys.attemptOutputKey(
+                            "job-video",
+                            "task-video",
+                            1,
+                            assignmentId
+                    ),
+                    result.objectReference().key()
+            );
+            assertEquals(
+                    result.objectReference(),
+                    store.stat(result.objectReference().key())
+            );
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
+        }
     }
 
     private void createVideoWithAudio(Path output) throws Exception {

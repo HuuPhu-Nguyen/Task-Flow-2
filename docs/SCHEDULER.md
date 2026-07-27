@@ -201,6 +201,22 @@ the scheduler changes capacity, failure metrics, or job projection. A storage
 failure retains the assigned projection for redelivery; a committed permanent
 failure creates no pending retry entry or replacement assignment.
 
+## Object-backed result commitment
+
+Large conversion output is staged before result publication at
+`taskflow/jobs/{jobId}/tasks/{taskId}/attempts/{attemptNumber}/{assignmentId}/output`.
+The executor uses atomic create-if-absent, so a replay can reuse identical
+content but cannot overwrite a prior object at that assignment key.
+
+The protocol validator requires each successful `TASK_RESULT` reference to use
+the key derived from its outer assignment identity. SQLite repeats that check
+inside `commitTaskResult` after reading the task's parent job ID. The existing
+conditional result transaction then stores `tasks.result_payload_json`, closes
+the exact running attempt, and may persist `FINALIZING`. Transaction commit is
+the authority boundary; object upload, stat, or copy is not. A zero-row
+assignment mismatch or wrong output key leaves the pointer unchanged, and
+startup recovery reloads the committed result payload.
+
 ## Deadline fencing
 
 Each scheduled deadline carries:

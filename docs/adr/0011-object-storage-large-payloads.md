@@ -4,8 +4,9 @@ Status: Accepted
 
 Date: 2026-07-22
 
-Scope: Frozen end-state for Phases 0–8; MinIO/S3 input references are active in
-Phase 5 and local/shared-filesystem references are removed.
+Scope: Frozen end-state for Phases 0–8; MinIO/S3 input and attempt-output
+references are active in Phase 5 and local/shared-filesystem references are
+removed.
 
 ## Context
 
@@ -101,8 +102,14 @@ does not waive those requirements.
   executor classifies immutable corruption as permanent, and the coordinator
   durably terminalizes the first accepted exact attempt without replacement,
   with a structured event and monotonic counter.
-- TF-0505 and TF-0506 still own attempt-specific authoritative output pointers
-  and garbage collection.
+- TF-0505 conditionally creates conversion output under the exact immutable
+  job/task/attempt/assignment key. The existing protocol-v2 result carries the
+  reference with its outer assignment identity; shared validation and the
+  SQLite transaction both enforce that ownership. The transaction's
+  `tasks.result_payload_json` write is the sole pointer commit point, and
+  restart recovery retains it. No object rename or copy promotion is used.
+- TF-0506 still owns bounded garbage collection for non-authoritative staged
+  inputs and attempt outputs.
 
 ## Related Documents
 

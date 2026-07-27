@@ -97,6 +97,11 @@ Task assignment, retry, and failure:
   identity before the send attempt.
 - `task_result_committed` records the one authoritative successful result after
   the SQLite commit decision has been applied to scheduler memory.
+- `attempt_output_staged` is emitted by a conversion executor after the
+  assignment-owned object is available. It carries `job_id`, `task_id`,
+  `attempt_number`, `assignment_id`, `object_key`, `content_length`, and
+  bounded `outcome=CREATED|REUSED`. This is a staging event, not evidence that
+  SQLite committed the pointer.
 - `task_result_stale_rejected` records an obsolete assignment generation that
   the authoritative store rejected, including the same-participant ABA case.
 - `task_result_duplicate_ignored` records a repeated result for an assignment

@@ -31,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -54,7 +55,7 @@ class ImageConversionProcessorTest {
     }
 
     @Test
-    void rejectsOutputAtExclusiveInlineBoundaryUntilObjectResultsExist() throws Exception {
+    void stagesOutputAtExclusiveInlineBoundary() throws Exception {
         byte[] inputBytes = pngBytes();
         MemoryObjectStore store = new MemoryObjectStore();
         ObjectReference reference = reference(inputBytes);
@@ -62,12 +63,57 @@ class ImageConversionProcessorTest {
         FilePayload input = new FilePayload("sample.png", null, reference);
         System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
         try {
-            IOException error = assertThrows(
-                    IOException.class,
-                    () -> new ImageConversionProcessor(() -> store).process(task(input))
+            FilePayload result =
+                    new ImageConversionProcessor(() -> store).process(task(input));
+
+            assertTrue(result.hasObjectReference());
+            assertEquals(
+                    TaskFlowObjectKeys.attemptOutputKey(
+                            "job-1",
+                            "task-1",
+                            1,
+                            "550e8400-e29b-41d4-a716-446655440000"
+                    ),
+                    result.objectReference().key()
+            );
+            assertEquals(result.objectReference(), store.stat(result.objectReference().key()));
+        } finally {
+            System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
+        }
+    }
+
+    @Test
+    void reusesIdenticalAssignmentOutputAndKeepsAttemptsIndependent() throws Exception {
+        byte[] inputBytes = pngBytes();
+        MemoryObjectStore store = new MemoryObjectStore();
+        ObjectReference reference = reference(inputBytes);
+        store.put(reference, new ByteArrayInputStream(inputBytes));
+        FilePayload input = new FilePayload("sample.png", null, reference);
+        ImageConversionProcessor processor = new ImageConversionProcessor(() -> store);
+        String secondAssignment = "550e8400-e29b-41d4-a716-446655440001";
+        System.setProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY, "1");
+        try {
+            FilePayload first = processor.process(task(input));
+            FilePayload replay = processor.process(task(input));
+            FilePayload secondAttempt = processor.process(
+                    task(input, "png", 2, secondAssignment)
             );
 
-            assertTrue(error.getMessage().contains(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV));
+            assertEquals(first.objectReference(), replay.objectReference());
+            assertEquals(
+                    TaskFlowObjectKeys.attemptOutputKey(
+                            "job-1",
+                            "task-1",
+                            2,
+                            secondAssignment
+                    ),
+                    secondAttempt.objectReference().key()
+            );
+            assertNotEquals(
+                    first.objectReference().key(),
+                    secondAttempt.objectReference().key()
+            );
+            assertEquals(first.objectReference().sha256(), secondAttempt.objectReference().sha256());
         } finally {
             System.clearProperty(PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_PROPERTY);
         }
@@ -120,14 +166,26 @@ class ImageConversionProcessorTest {
     }
 
     private TaskAssignMessage task(FilePayload input, String format) {
+        return task(
+                input,
+                format,
+                1,
+                "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    private TaskAssignMessage task(FilePayload input,
+                                   String format,
+                                   int attemptNumber,
+                                   String assignmentId) {
         return new TaskAssignMessage(
                 "COORDINATOR",
                 Instant.now().toString(),
                 "task-1",
                 "job-1",
                 ConversionTaskTypes.IMAGE_CONVERSION,
-                1,
-                "550e8400-e29b-41d4-a716-446655440000",
+                attemptNumber,
+                assignmentId,
                 1_780_000_000_000L,
                 input,
                 format
@@ -187,6 +245,33 @@ class ImageConversionProcessorTest {
                 objects.put(reference.key(), new StoredObject(reference, content.readAllBytes()));
                 return reference;
             } catch (IOException e) {
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.STORAGE_FAILURE,
+                        "Test upload failed.",
+                        e
+                );
+            }
+        }
+
+        @Override
+        public ObjectReference putIfAbsent(ObjectReference reference, InputStream content)
+                throws ObjectStoreException {
+            try {
+                StoredObject existing = objects.putIfAbsent(
+                        reference.key(),
+                        new StoredObject(reference, content.readAllBytes())
+                );
+                if (existing != null) {
+                    throw new ObjectStoreException(
+                            ObjectStoreException.Reason.ALREADY_EXISTS,
+                            "Test object already exists."
+                    );
+                }
+                return reference;
+            } catch (IOException e) {
+                if (e instanceof ObjectStoreException objectStoreException) {
+                    throw objectStoreException;
+                }
                 throw new ObjectStoreException(
                         ObjectStoreException.Reason.STORAGE_FAILURE,
                         "Test upload failed.",

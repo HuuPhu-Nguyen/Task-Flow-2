@@ -11,7 +11,8 @@ machine.
 
 ## Current Scope
 
-The Phase 5 input path is implemented for built-in image and video conversion:
+The Phase 5 object-backed path is implemented for built-in image and video
+conversion:
 
 - submitters upload large inputs under immutable TaskFlow-generated
   `taskflow/inputs/<uuid>` keys;
@@ -19,15 +20,25 @@ The Phase 5 input path is implemented for built-in image and video conversion:
   `ObjectReference(key, contentLength, sha256, contentType)`;
 - executor processors open their own configured object-store client and
   download by `key`;
+- executors conditionally create large conversion outputs under the exact
+  assignment-owned key and return its `ObjectReference` in `TASK_RESULT`;
 - requester result handlers can download an object-referenced result by key;
 - protocol validation recursively rejects malformed/oversized references,
   legacy local-file reference metadata, malformed Base64, and inline file
   payloads at or above the configured limit.
 
 Text analysis and plugin-owned semantic JSON remain inline. Image/video outputs
-remain inline only below the same limit. A larger conversion output fails
-instead of placing a large body on RabbitMQ; TF-0505 owns immutable
-attempt-specific output keys and the authoritative SQLite result pointer.
+remain inline only below the same limit. At or above it, output bytes are
+staged at:
+
+```text
+taskflow/jobs/{jobId}/tasks/{taskId}/attempts/{attemptNumber}/{assignmentId}/output
+```
+
+The key is created atomically only when absent. Re-execution of the same
+assignment reuses an existing object only when its length and SHA-256 match;
+different content is a permanent integrity failure and never overwrites the
+key. Different attempts may therefore stage independent objects.
 
 ## Object-store Boundary and Runtime Provider
 
@@ -107,10 +118,10 @@ Do not add `--volumes` unless deleting local object data is intentional.
 
 `TASKFLOW_MAX_INLINE_PAYLOAD_BYTES` (system property
 `taskflow.maxInlinePayloadBytes`) is the exclusive raw-byte ceiling for a
-`base64Data` file payload. It defaults to `8388608` bytes:
+`base64Data` input or output file payload. It defaults to `8388608` bytes:
 
 - raw size `< limit`: inline Base64 is allowed;
-- raw size `>= limit`: the conversion client must use object storage;
+- raw size `>= limit`: conversion inputs and outputs must use object storage;
 - value `0`: conversion file inlining is disabled.
 
 This is separate from:
@@ -136,6 +147,12 @@ An object-backed conversion input serializes as:
 }
 ```
 
+An object-backed conversion result uses the same `FilePayload` shape inside
+protocol-v2 `TASK_RESULT.resultPayload`. Its key must exactly match the outer
+`jobId`, `taskId`, `attemptNumber`, and `assignmentId`. A mismatch is rejected
+as `invalid_task_output_reference` before scheduler handling and is checked
+again inside the SQLite result transaction.
+
 Keys reject path traversal, URI/path-shaped segments, backslashes, empty
 segments, and names outside `taskflow/`. The file name is display/output
 metadata and is never interpreted as an object-store or remote filesystem
@@ -152,6 +169,20 @@ Input objects are immutable staging data, not authoritative coordinator state.
 If payload building fails after uploads, the submitter deletes objects from
 that build best-effort. An object may remain after an uncertain broker publish,
 process crash, or failed cleanup; TF-0506 owns bounded orphan collection.
+
+Attempt output objects are also staging data until the exact assignment result
+transaction commits. That transaction changes the task to `COMPLETED`, stores
+the result (including its reference) in `tasks.result_payload_json`, closes the
+exact running attempt as `SUCCEEDED`, and may mark the parent `FINALIZING`.
+SQLite commit is the authority boundary:
+
+- crash before commit leaves a non-authoritative staged object;
+- crash after commit recovers the stored pointer from SQLite;
+- a late attempt result cannot replace the committed pointer; and
+- no S3 rename, copy promotion, or object upload is treated as commitment.
+
+TF-0506 owns discovering and deleting old non-authoritative output objects; it
+does not change which reference is authoritative.
 
 An unavailable store or missing object fails payload building, execution, or
 result saving through the existing failure path. No SQLite job/task state is
@@ -175,9 +206,12 @@ so executor and coordinator participants must be upgraded together to obtain
 the no-retry guarantee.
 
 `MinioObjectStoreContractTest#separateConversionParticipantsExchangeInputOnlyByPortableObjectKey`
-uploads with one provider/client, serializes the payload, and processes it with
-a separately constructed provider/client against real Testcontainers MinIO.
-The test asserts that no local path fields or submitter path cross the wire.
+uploads with one provider/client, serializes the payload, and processes two
+attempts with a separately constructed provider/client against real
+Testcontainers MinIO. The test asserts that no local path fields or submitter
+path cross the wire and that both attempt outputs exist at distinct exact keys.
+The inherited object-store contract proves conditional create never replaces
+an existing key against both the in-memory fake and real MinIO.
 `MinioObjectStoreContractTest#corruptObjectBytesAreRejectedBeforeImageProcessing`
 overwrites that portable object with same-length corrupt bytes and proves that
 the real MinIO download is rejected before image processing.

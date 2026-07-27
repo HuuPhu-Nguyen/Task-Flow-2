@@ -329,6 +329,33 @@ class ConversionClientPluginTest {
         }
 
         @Override
+        public ObjectReference putIfAbsent(ObjectReference reference, InputStream content)
+                throws ObjectStoreException {
+            try {
+                StoredObject existing = objects.putIfAbsent(
+                        reference.key(),
+                        new StoredObject(reference, content.readAllBytes())
+                );
+                if (existing != null) {
+                    throw new ObjectStoreException(
+                            ObjectStoreException.Reason.ALREADY_EXISTS,
+                            "Test object already exists."
+                    );
+                }
+                return reference;
+            } catch (IOException e) {
+                if (e instanceof ObjectStoreException objectStoreException) {
+                    throw objectStoreException;
+                }
+                throw new ObjectStoreException(
+                        ObjectStoreException.Reason.STORAGE_FAILURE,
+                        "Test upload failed.",
+                        e
+                );
+            }
+        }
+
+        @Override
         public InputStream get(String key) throws ObjectStoreException {
             StoredObject object = objects.get(TaskFlowObjectKeys.requireObjectKey(key));
             if (object == null) {

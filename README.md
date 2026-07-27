@@ -116,8 +116,9 @@ Framework core no longer imports concrete image, video, text, or example job cla
 
 `taskflow-spi` now owns a streaming `ObjectStore` port and validated
 `ObjectReference(key, contentLength, sha256, contentType)` metadata. Its
-put/get/stat/delete/copy/bounded-prefix-list contract runs unchanged against an
-in-memory fake and a real Testcontainers MinIO service. The opt-in
+put/atomic-put-if-absent/get/stat/delete/copy/bounded-prefix-list contract runs
+unchanged against an in-memory fake and a real Testcontainers MinIO service.
+The opt-in
 `object-store` Docker Compose profile provides a persistent local MinIO service,
 health check, and idempotent bucket bootstrap using environment-supplied
 credentials. Participant runtimes discover the MinIO provider without adding
@@ -125,8 +126,11 @@ the SDK to coordinator/core/persistence code. Conversion submitters upload
 large inputs under immutable `taskflow/inputs/<uuid>` keys, and executors
 download by key without a shared filesystem. Upload and download streams are
 checked against their exact declared length and SHA-256 before processor or
-requester output acceptance. Attempt-specific output commitment and orphan
-cleanup remain TF-0505 and TF-0506 work.
+requester output acceptance. Large conversion outputs use immutable
+`taskflow/jobs/<jobId>/tasks/<taskId>/attempts/<attemptNumber>/<assignmentId>/output`
+keys. The current assignment's transactional SQLite
+`tasks.result_payload_json` write is the sole commit point; an upload by itself
+is only staged data. Bounded orphan cleanup remains TF-0506 work.
 
 The JavaFX presentation layer talks to GUI-facing services for connection lifecycle, requester-role job submission and result routing, executor-role task execution, and history reads. It is a participant UI, not a separate client architecture. The GUI module depends on `taskflow-core` for shared messaging/execution, `taskflow-persistence-sqlite` for local SQLite-backed history reads, and `taskflow-transport-rabbitmq` for broker delivery, but it does not depend on the command-line `taskflow-peer` runtime.
 
@@ -921,9 +925,12 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
   participants, and legacy local/shared-file metadata is rejected. Exact
   streamed length/SHA-256 verification now gates processing and requester
   output writes; immutable corruption is a terminal classified task failure.
-  TF-0505 and TF-0506 still own fenced attempt output ownership and orphan
-  cleanup. Until TF-0505, large conversion outputs fail instead of being placed
-  inline on RabbitMQ.
+  Conversion outputs at or above the inline threshold are conditionally
+  created under exact assignment keys and returned as `ObjectReference`
+  metadata. Protocol validation and the SQLite result transaction reject
+  references owned by another attempt, while the existing
+  `tasks.result_payload_json` column stores the one authoritative pointer.
+  TF-0506 still owns bounded orphan cleanup.
 - Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs; metrics are currently log-based rather than dashboarded. Assignment generations and committed, stale, or duplicate task results have distinct events with the complete job/task/attempt/assignment/executor correlation tuple, plus stable `taskflow_*_total` counter names. `docs/OBSERVABILITY_SCOPE.md` maps the exact events, counters, and metrics-backend deferral.
 - SQLite is the current `JobStateStore`, peer registry store, and coordinator broker outbox store implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, and schema-v12 stores the canonical job-submission request hash. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows for RabbitMQ runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
@@ -964,10 +971,11 @@ It should run on a normal Windows, macOS, or Linux desktop/laptop if all of thes
 - The machine can download Maven dependencies the first time it builds.
 - The GUI machine has a desktop environment available. Headless servers can run the coordinator or command-line participant, but not the JavaFX GUI.
 - A RabbitMQ broker is reachable on port `5672` between the coordinator and participant machines.
-- For image/video inputs at or above the inline threshold, every submitting or
-  executing participant can reach the same MinIO/S3-compatible endpoint.
+- For image/video inputs or outputs at or above the inline threshold, every
+  submitting, executing, or result-saving participant can reach the same
+  MinIO/S3-compatible endpoint.
 
-For multiple computers, run or expose RabbitMQ on one machine. On every coordinator or participant machine, set `TASKFLOW_RABBITMQ_HOST` to the broker machine's IP address or enter that broker host in the GUI instead of `localhost`. For large conversion inputs, configure the same reachable `TASKFLOW_MINIO_ENDPOINT`, credentials, and bucket on requester/executor participants; do not share filesystem paths.
+For multiple computers, run or expose RabbitMQ on one machine. On every coordinator or participant machine, set `TASKFLOW_RABBITMQ_HOST` to the broker machine's IP address or enter that broker host in the GUI instead of `localhost`. For large conversion inputs or outputs, configure the same reachable `TASKFLOW_MINIO_ENDPOINT`, credentials, and bucket on requester/executor participants; do not share filesystem paths.
 
 ### Prerequisites
 

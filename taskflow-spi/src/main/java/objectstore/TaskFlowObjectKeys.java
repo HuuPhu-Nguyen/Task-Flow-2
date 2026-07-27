@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
@@ -33,6 +34,39 @@ public final class TaskFlowObjectKeys {
             return ROOT_PREFIX;
         }
         return requirePrefix(ROOT_PREFIX + String.join("/", validated) + "/");
+    }
+
+    /**
+     * Returns the immutable output key owned by one exact assignment attempt.
+     */
+    public static String attemptOutputKey(String jobId,
+                                          String taskId,
+                                          int attemptNumber,
+                                          String assignmentId) {
+        if (attemptNumber < 1) {
+            throw new IllegalArgumentException("Attempt number must be positive.");
+        }
+        String canonicalAssignmentId;
+        try {
+            canonicalAssignmentId = UUID.fromString(
+                    requireText(assignmentId, "Assignment id")
+            ).toString();
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Assignment id must be a canonical UUID.", e);
+        }
+        if (!canonicalAssignmentId.equalsIgnoreCase(assignmentId)) {
+            throw new IllegalArgumentException("Assignment id must be a canonical UUID.");
+        }
+        return objectKey(
+                "jobs",
+                requireText(jobId, "Job id"),
+                "tasks",
+                requireText(taskId, "Task id"),
+                "attempts",
+                Integer.toString(attemptNumber),
+                canonicalAssignmentId,
+                "output"
+        );
     }
 
     public static String requireObjectKey(String key) {

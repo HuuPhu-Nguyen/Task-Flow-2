@@ -50,6 +50,36 @@ class ObjectStoreValueTest {
     }
 
     @Test
+    void attemptOutputKeyIncludesTheCompleteAssignmentIdentity() {
+        String assignmentId = "550e8400-e29b-41d4-a716-446655440000";
+
+        assertEquals(
+                "taskflow/jobs/job-1/tasks/task-1/attempts/2/"
+                        + assignmentId + "/output",
+                TaskFlowObjectKeys.attemptOutputKey(
+                        "job-1",
+                        "task-1",
+                        2,
+                        assignmentId
+                )
+        );
+        assertThrows(IllegalArgumentException.class, () ->
+                TaskFlowObjectKeys.attemptOutputKey(
+                        "job-1",
+                        "task-1",
+                        0,
+                        assignmentId
+                ));
+        assertThrows(IllegalArgumentException.class, () ->
+                TaskFlowObjectKeys.attemptOutputKey(
+                        "job-1",
+                        "task-1",
+                        1,
+                        "not-a-uuid"
+                ));
+    }
+
+    @Test
     void listingIsImmutableAndContinuationMustMatchLastObject() {
         ObjectReference first = reference("first");
         ObjectReference second = reference("second");

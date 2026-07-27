@@ -19,7 +19,6 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.Base64;
 import java.util.Locale;
 import java.util.Objects;
 
@@ -78,14 +77,14 @@ public class ImageConversionProcessor implements TaskProcessor<FilePayload> {
         byte[] outputBytes = baos.toByteArray();
         String newFileName = stripExtension(inputFileName) + "." + format;
 
-        long inlineLimit = PayloadLimits.maxInlinePayloadBytes();
-        if (outputBytes.length >= inlineLimit) {
-            throw new IOException("Image result must be smaller than "
-                    + PayloadLimits.MAX_INLINE_PAYLOAD_BYTES_ENV + " (" + inlineLimit
-                    + " bytes) until object-backed result ownership is available: "
-                    + input.fileName());
-        }
-        return new FilePayload(newFileName, Base64.getEncoder().encodeToString(outputBytes));
+        String contentType = format.equals("jpg") ? "image/jpeg" : "image/" + format;
+        return ConversionOutputPublisher.publish(
+                task,
+                newFileName,
+                contentType,
+                outputBytes,
+                objectStoreProvider
+        );
     }
 
     BufferedImage decode(byte[] rawBytes, String inputFileName) throws IOException {

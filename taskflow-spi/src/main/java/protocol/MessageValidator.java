@@ -1,6 +1,8 @@
 package protocol;
 
 import com.google.gson.Gson;
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HashSet;
@@ -39,6 +41,8 @@ public final class MessageValidator {
     public static final String REASON_INVALID_PAYLOAD_REFERENCE = "invalid_payload_reference";
     public static final String REASON_INVALID_TASK_FAILURE_CLASSIFICATION =
             "invalid_task_failure_classification";
+    public static final String REASON_INVALID_TASK_OUTPUT_REFERENCE =
+            "invalid_task_output_reference";
 
     private MessageValidator() {
     }
@@ -239,6 +243,26 @@ public final class MessageValidator {
                 PayloadLimits.MAX_RESULT_BYTES_ENV,
                 "Task result"
         );
+        if (result.isSuccessful()) {
+            validateTaskOutputReferences(result);
+        }
+    }
+
+    private static void validateTaskOutputReferences(TaskResultMessage result) {
+        String expectedKey = TaskFlowObjectKeys.attemptOutputKey(
+                result.getJobId(),
+                result.getTaskId(),
+                result.getAttemptNumber(),
+                result.getAssignmentId()
+        );
+        for (ObjectReference reference : PayloadLimits.objectReferences(result.getResultPayload())) {
+            if (!expectedKey.equals(reference.key())) {
+                throw new MessageValidationException(
+                        REASON_INVALID_TASK_OUTPUT_REFERENCE,
+                        "Task result object reference must use the current assignment output key."
+                );
+            }
+        }
     }
 
     private static void validateJobResult(JobResultMessage result) {

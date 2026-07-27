@@ -112,6 +112,13 @@ nodes may enable the requester role, executor role, or both.
   exact length and SHA-256 before processing or file output. A mismatch becomes
   `PERMANENT_PAYLOAD_INTEGRITY`; after the exact assigned-attempt failure
   transaction commits, no logical task retry is created.
+- Conversion outputs below the exclusive inline threshold remain Base64.
+  Outputs at or above it are conditionally created at the exact immutable
+  job/task/attempt/assignment key. `TASK_RESULT` carries that reference with
+  the same assignment identity. Upload alone is non-authoritative:
+  `tasks.result_payload_json` becomes the sole result pointer only when the
+  exact SQLite task-result transaction commits. A later or mis-keyed attempt
+  cannot replace it, and recovery reloads the committed reference.
 - Successful final `JOB_RESULT` payloads are handled by the matching `ClientJobPlugin.handleResult(...)` in the JavaFX GUI and the RabbitMQ command-line submitter. The default handler calls `saveResults(...)` for list-based file-result plugins.
 - The JavaFX GUI is the supported participant UI and has RabbitMQ service-level support for live submit, execute, result routing, and save flows.
 - The RabbitMQ command-line `submit` path is the supported headless submit-and-save flow today.

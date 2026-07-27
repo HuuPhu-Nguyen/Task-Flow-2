@@ -1,12 +1,15 @@
 package server.db;
 
 import com.google.gson.Gson;
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import protocol.JobResultMessage;
 import protocol.JobResultRequestMessage;
 import protocol.JobSubmitMessage;
 import protocol.Message;
 import protocol.MessageType;
 import protocol.MessageValidator;
+import protocol.PayloadLimits;
 import protocol.PingMessage;
 import protocol.PongMessage;
 import protocol.TaskAssignMessage;
@@ -1180,6 +1183,17 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             originalAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ResultCommitOutcome referenceOwnership =
+                        validateTaskOutputReferenceOwnership(
+                                taskId,
+                                attemptNumber,
+                                assignmentId,
+                                resultPayload
+                        );
+                if (referenceOwnership != null) {
+                    conn.rollback();
+                    return referenceOwnership;
+                }
                 long normalizedDuration = Math.max(0L, durationMs);
                 ps.setLong(1, completedAt);
                 ps.setLong(2, normalizedDuration);
@@ -2833,6 +2847,48 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             return ResultCommitOutcome.DUPLICATE_ALREADY_COMPLETED;
         }
         return ResultCommitOutcome.STALE_ASSIGNMENT;
+    }
+
+    /**
+     * Repeats protocol output ownership validation inside the authoritative
+     * result transaction. A non-null return value rejects the commit.
+     */
+    private ResultCommitOutcome validateTaskOutputReferenceOwnership(String taskId,
+                                                                     int attemptNumber,
+                                                                     String assignmentId,
+                                                                     Object resultPayload)
+            throws SQLException {
+        List<ObjectReference> references = PayloadLimits.objectReferences(resultPayload);
+        if (references.isEmpty()) {
+            return null;
+        }
+        String jobId = loadTaskJobId(taskId).orElse(null);
+        if (jobId == null) {
+            return ResultCommitOutcome.UNKNOWN_TASK;
+        }
+        String expectedKey = TaskFlowObjectKeys.attemptOutputKey(
+                jobId,
+                taskId,
+                attemptNumber,
+                assignmentId
+        );
+        for (ObjectReference reference : references) {
+            if (!expectedKey.equals(reference.key())) {
+                return ResultCommitOutcome.STALE_ASSIGNMENT;
+            }
+        }
+        return null;
+    }
+
+    private Optional<String> loadTaskJobId(String taskId) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT job_id FROM tasks WHERE task_id=?"
+        )) {
+            ps.setString(1, taskId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? Optional.of(rs.getString(1)) : Optional.empty();
+            }
+        }
     }
 
     private Optional<PersistedTaskIdentity> loadPersistedTaskIdentity(String taskId) throws SQLException {

@@ -252,6 +252,72 @@ class MessageValidatorTest {
     }
 
     @Test
+    void acceptsTaskResultReferenceOwnedByItsExactAssignment() {
+        String assignmentId = "550e8400-e29b-41d4-a716-446655440000";
+        ObjectReference reference = new ObjectReference(
+                TaskFlowObjectKeys.attemptOutputKey(
+                        "job-1",
+                        "task-1",
+                        2,
+                        assignmentId
+                ),
+                12L,
+                "a".repeat(64),
+                "application/octet-stream"
+        );
+        TaskResultMessage message = new TaskResultMessage(
+                "peer-1",
+                "2026-07-27T00:00:00Z",
+                "task-1",
+                "job-1",
+                2,
+                assignmentId,
+                Map.of("objectReference", reference),
+                true,
+                ""
+        );
+
+        assertDoesNotThrow(() -> MessageValidator.validate(message));
+    }
+
+    @Test
+    void rejectsTaskResultReferenceOwnedByAnotherAttempt() {
+        String assignmentId = "550e8400-e29b-41d4-a716-446655440000";
+        ObjectReference staleReference = new ObjectReference(
+                TaskFlowObjectKeys.attemptOutputKey(
+                        "job-1",
+                        "task-1",
+                        1,
+                        assignmentId
+                ),
+                12L,
+                "a".repeat(64),
+                "application/octet-stream"
+        );
+        TaskResultMessage message = new TaskResultMessage(
+                "peer-1",
+                "2026-07-27T00:00:00Z",
+                "task-1",
+                "job-1",
+                2,
+                assignmentId,
+                Map.of("objectReference", staleReference),
+                true,
+                ""
+        );
+
+        MessageValidationException error = assertThrows(
+                MessageValidationException.class,
+                () -> MessageValidator.validate(message)
+        );
+
+        assertEquals(
+                MessageValidator.REASON_INVALID_TASK_OUTPUT_REFERENCE,
+                error.reasonCode()
+        );
+    }
+
+    @Test
     void acceptsExecutorAndRequesterOnlyCapacityAdvertisements() {
         PongMessage executor = new PongMessage(
                 "peer-1",

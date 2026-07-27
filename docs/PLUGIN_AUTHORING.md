@@ -197,8 +197,12 @@ For large binary payloads, use the shared `ObjectReference` and
 `ObjectStoreProvider` boundaries. Generate keys with `TaskFlowObjectKeys`; do
 not serialize filesystem paths, arbitrary URLs, credentials, or vendor SDK
 types. A requester uploads inputs and an executor downloads by key using its
-own provider instance. See `docs/PAYLOAD_STORAGE.md` for the current input
-ownership, limit, compatibility, cleanup, and integrity boundaries.
+own provider instance. For large executor outputs, derive the exact key with
+`TaskFlowObjectKeys.attemptOutputKey(...)` and use `ObjectStore.putIfAbsent`;
+never use an ordinary overwriting put, preflight `stat`/`put`, rename, or copy
+as the ownership decision. Return the reference inside the result while
+preserving the `TASK_RESULT` assignment identity. See `docs/PAYLOAD_STORAGE.md`
+for input/output ownership, limits, compatibility, cleanup, and integrity.
 
 Use `SafeFileNames.safeOutputPath(...)` or an equivalent safe path strategy when
 writing files from result-provided names. Do not trust result filenames to stay
@@ -339,6 +343,9 @@ Client module tests should cover:
 - Object-backed payload tests cover exclusive inline boundaries, upload
   failure, portable serialized references, download by key through a separate
   provider instance, and best-effort cleanup after a failed payload build.
+- Object-backed output tests cover the exact attempt key, same-assignment
+  idempotent reuse without overwrite, and distinct staged keys for retry
+  attempts. SQLite—not the object store—selects the authoritative reference.
 - Legacy local-file references must be rejected. Missing provider/configuration
   must fail object-backed work without falling back to a filesystem path.
 - Read object-backed input and result content through

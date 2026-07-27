@@ -1,5 +1,7 @@
 package server.db;
 
+import objectstore.ObjectReference;
+import objectstore.TaskFlowObjectKeys;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import protocol.JobResultMessage;
@@ -515,6 +517,102 @@ class DatabaseManagerTest {
             assertEquals(
                     "current-result",
                     db.loadRunningJobsForResume().getFirst().tasks().getFirst().resultPayload()
+            );
+        }
+    }
+
+    @Test
+    void staleAttemptOutputReferenceCannotReplaceAuthoritativePointer() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-result-output-pointer.db");
+        String jobId = "job-result-output-pointer";
+        String taskId = "task-result-output-pointer";
+        ObjectReference firstAttemptReference = outputReference(
+                jobId,
+                taskId,
+                1,
+                ASSIGNMENT_ID,
+                "1"
+        );
+        ObjectReference secondAttemptReference = outputReference(
+                jobId,
+                taskId,
+                2,
+                SECOND_ASSIGNMENT_ID,
+                "2"
+        );
+
+        try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
+            db.insertJob(jobId, "TEST_TASK", "requester-1", 1);
+            db.insertTask(taskId, jobId);
+            assertTrue(db.markTaskAssigned(
+                    taskId, "peer-1", 100L, "lease-1", 500L, 1, ASSIGNMENT_ID));
+            assertTrue(db.markTaskRetried(
+                    taskId,
+                    1,
+                    JobStateStore.TaskAttemptOutcome.RETRY_SCHEDULED,
+                    "lease_expired",
+                    150L
+            ));
+            assertTrue(db.markTaskAssigned(
+                    taskId,
+                    "peer-1",
+                    200L,
+                    "lease-2",
+                    900L,
+                    2,
+                    SECOND_ASSIGNMENT_ID
+            ));
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            taskId,
+                            2,
+                            SECOND_ASSIGNMENT_ID,
+                            "peer-1",
+                            250L,
+                            50L,
+                            Map.of("objectReference", firstAttemptReference)
+                    )
+            );
+            assertNull(db.loadRunningJobsForResume()
+                    .getFirst().tasks().getFirst().resultPayload());
+
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.COMMITTED,
+                    db.commitTaskResult(
+                            taskId,
+                            2,
+                            SECOND_ASSIGNMENT_ID,
+                            "peer-1",
+                            300L,
+                            100L,
+                            Map.of("objectReference", secondAttemptReference)
+                    )
+            );
+            assertEquals(
+                    JobStateStore.ResultCommitOutcome.STALE_ASSIGNMENT,
+                    db.commitTaskResult(
+                            taskId,
+                            1,
+                            ASSIGNMENT_ID,
+                            "peer-1",
+                            350L,
+                            250L,
+                            Map.of("objectReference", firstAttemptReference)
+                    )
+            );
+        }
+
+        try (DatabaseManager restarted = new DatabaseManager(dbPath.toString())) {
+            Object restored = restarted.loadRunningJobsForResume()
+                    .getFirst().tasks().getFirst().resultPayload();
+            assertInstanceOf(Map.class, restored);
+            Object nested = ((Map<?, ?>) restored).get("objectReference");
+            assertInstanceOf(Map.class, nested);
+            assertEquals(
+                    secondAttemptReference.key(),
+                    ((Map<?, ?>) nested).get("key")
             );
         }
     }
@@ -2931,6 +3029,24 @@ class DatabaseManagerTest {
                 .filter(task -> task.taskId().equals(taskId))
                 .findFirst()
                 .orElseThrow();
+    }
+
+    private static ObjectReference outputReference(String jobId,
+                                                   String taskId,
+                                                   int attemptNumber,
+                                                   String assignmentId,
+                                                   String digestCharacter) {
+        return new ObjectReference(
+                TaskFlowObjectKeys.attemptOutputKey(
+                        jobId,
+                        taskId,
+                        attemptNumber,
+                        assignmentId
+                ),
+                12L,
+                digestCharacter.repeat(64),
+                "application/octet-stream"
+        );
     }
 
     private static int schemaVersion(Path dbPath) throws Exception {

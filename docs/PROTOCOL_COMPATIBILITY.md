@@ -218,8 +218,12 @@ treat task payload JSON as plugin-owned semantic data and no framework envelope
 field or assignment/result identity changed. TF-0504 separately adds the
 optional framework-owned `TASK_RESULT.failureClassification` described above;
 that additive field preserves wire parsing but requires a coordinated upgrade
-for its no-retry semantics. This does not claim mixed-version compatibility for
-the changed plugin payload shape.
+for its no-retry semantics. TF-0505 uses the existing plugin-owned
+`resultPayload` object for output `ObjectReference` metadata and the existing
+protocol-v2 attempt/assignment fields for ownership; it adds no envelope field
+or version. Executors and coordinators must still be upgraded together because
+older validators do not enforce the attempt-output key. This does not claim
+mixed-version compatibility for the changed plugin payload shape.
 
 ## Field and Size Validation
 
@@ -241,12 +245,17 @@ to version-2 assignment identity and version-3 capacity fields, it enforces:
   recursively discovered `base64Data` in submissions, assignments, task
   results, and final job results;
 - valid portable object-reference metadata, valid Base64, and explicit
-  rejection of the removed local-filesystem reference shape.
+  rejection of the removed local-filesystem reference shape; and
+- exact output-reference ownership: each reference in a successful
+  `TASK_RESULT` must use the key derived from that message's `jobId`, `taskId`,
+  `attemptNumber`, and `assignmentId`.
 
 The inline-media boundary returns `max_inline_payload_bytes`; malformed Base64
 returns `invalid_inline_payload`; malformed, unsafe, or legacy references
 return `invalid_payload_reference`; and a declared object length above the
-applicable input/result bound returns `max_referenced_payload_bytes`.
+applicable input/result bound returns `max_referenced_payload_bytes`. A valid
+reference owned by another assignment returns
+`invalid_task_output_reference`.
 
 Invalid `JOB_SUBMIT` and `JOB_RESULT_REQUEST` messages that reach the scheduler
 are converted to failed `JOB_RESULT` responses when the requester can be

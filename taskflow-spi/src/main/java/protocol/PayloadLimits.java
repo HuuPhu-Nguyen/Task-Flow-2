@@ -4,9 +4,11 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import objectstore.ObjectReference;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,19 +98,33 @@ public final class PayloadLimits {
      * depending on any plugin payload type.
      */
     public static long maximumReferencedPayloadBytes(Object value) {
-        return maximumReferencedPayloadBytes(GSON.toJsonTree(value));
+        long maximum = 0L;
+        for (ObjectReference reference : objectReferences(value)) {
+            maximum = Math.max(maximum, reference.contentLength());
+        }
+        return maximum;
     }
 
-    private static long maximumReferencedPayloadBytes(JsonElement value) {
+    /**
+     * Finds every portable object reference recursively without depending on
+     * any plugin payload type.
+     */
+    public static List<ObjectReference> objectReferences(Object value) {
+        List<ObjectReference> references = new ArrayList<>();
+        collectObjectReferences(GSON.toJsonTree(value), references);
+        return List.copyOf(references);
+    }
+
+    private static void collectObjectReferences(JsonElement value,
+                                                List<ObjectReference> references) {
         if (value == null || value.isJsonNull() || value.isJsonPrimitive()) {
-            return 0L;
+            return;
         }
         if (value.isJsonArray()) {
-            long maximum = 0L;
             for (JsonElement element : value.getAsJsonArray()) {
-                maximum = Math.max(maximum, maximumReferencedPayloadBytes(element));
+                collectObjectReferences(element, references);
             }
-            return maximum;
+            return;
         }
 
         JsonObject object = value.getAsJsonObject();
@@ -118,13 +134,12 @@ public final class PayloadLimits {
             );
         }
         if (looksLikeObjectReference(object)) {
-            return objectReferenceSize(object);
+            references.add(parseObjectReference(object));
+            return;
         }
-        long maximum = 0L;
         for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
-            maximum = Math.max(maximum, maximumReferencedPayloadBytes(entry.getValue()));
+            collectObjectReferences(entry.getValue(), references);
         }
-        return maximum;
     }
 
     /**
@@ -184,7 +199,7 @@ public final class PayloadLimits {
                 && object.has("contentType");
     }
 
-    private static long objectReferenceSize(JsonObject object) {
+    private static ObjectReference parseObjectReference(JsonObject object) {
         JsonElement key = object.get("key");
         JsonElement contentLength = object.get("contentLength");
         JsonElement sha256 = object.get("sha256");
@@ -204,13 +219,12 @@ public final class PayloadLimits {
                     e
             );
         }
-        new objectstore.ObjectReference(
+        return new ObjectReference(
                 key.getAsString(),
                 size,
                 sha256.getAsString(),
                 contentType.getAsString()
         );
-        return size;
     }
 
     private static boolean isString(JsonElement value) {

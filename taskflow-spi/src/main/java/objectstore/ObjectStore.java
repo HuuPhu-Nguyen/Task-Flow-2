@@ -14,6 +14,16 @@ public interface ObjectStore extends AutoCloseable {
 
     ObjectReference put(ObjectReference reference, InputStream content) throws ObjectStoreException;
 
+    /**
+     * Atomically creates an object only when its key does not already exist.
+     *
+     * <p>Implementations must report an existing key as {@link
+     * ObjectStoreException.Reason#ALREADY_EXISTS} and must never replace its
+     * bytes or metadata.</p>
+     */
+    ObjectReference putIfAbsent(ObjectReference reference, InputStream content)
+            throws ObjectStoreException;
+
     InputStream get(String key) throws ObjectStoreException;
 
     ObjectReference stat(String key) throws ObjectStoreException;
