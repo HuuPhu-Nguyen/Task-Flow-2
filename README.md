@@ -153,10 +153,12 @@ SQLite state store and, when requested, RabbitMQ broker state:
 task retry/lease counts, last-known participants (reported by the compatibility `peers` view), pending coordinator outbox rows,
 RabbitMQ queue depths, and DLQ summaries without adding a dashboard. The
 coordinator also exports 22 bounded-label Prometheus metric families at
-`GET http://127.0.0.1:9464/metrics` by default. Configure the listener with
-`TASKFLOW_METRICS_ENABLED`, `TASKFLOW_METRICS_HOST`, and
-`TASKFLOW_METRICS_PORT`; see `docs/OBSERVABILITY_SCOPE.md` for the exact names,
-units, lifecycle semantics, and cardinality contract.
+`GET http://127.0.0.1:9464/metrics` by default. The same listener serves
+process-loop liveness at `GET /health/live` and readiness for new jobs at
+`GET /health/ready`. Configure it with `TASKFLOW_METRICS_ENABLED`,
+`TASKFLOW_METRICS_HOST`, and `TASKFLOW_METRICS_PORT`; see
+`docs/OBSERVABILITY_SCOPE.md` for metric names, units, lifecycle semantics, and
+cardinality, and `docs/HEALTH.md` for exact health status/reason semantics.
 
 The participant registry retains the existing `PeerRegistry` and peer-ID
 compatibility names. RabbitMQ command-line and JavaFX participants use explicit
@@ -215,7 +217,7 @@ durable acceptance.
 
 For every correctness-relevant runtime transition, the scheduler decides first, attempts a conditional durable write, and changes its `TaskUnit`, active-job, participant-capacity, and metric projections only after `COMMITTED` or an exact `ALREADY_APPLIED` replay. `STALE_STATE` preserves memory and is classified; `UNKNOWN_ENTITY` or `STORAGE_FAILURE` never produces the requested projection or outbound message. Non-outbox and outbox assignment creation, failed-attempt retry/terminal release, successful result commitment, job completion/failure, and final-result outbox creation all use this order. Failed-attempt writes are fenced by task ID, attempt number, assignment ID, and assigned participant just like successful-result writes.
 
-With SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. The last successful task-result transaction also moves its parent job from `RUNNING` to durable `FINALIZING` after verifying that the complete expected task set and every result snapshot are present. Final aggregation runs deterministically from those committed snapshots; terminal job state, semantic final payload, and one outbound `JOB_RESULT` outbox row then commit together before immediate publish or replay. When persistence/outbox storage is unavailable, the same RabbitMQ output follows the non-outbox durable-first boundary that is applicable to the configured state store, but it cannot claim transactional outbound intent.
+With SQLite persistence, the scheduler supplies an assignment UUID candidate, then SQLite conditionally reads a `PENDING` task, advances its persisted generation, validates that UUID, and commits task state, attempt audit, and the exact serialized `TASK_ASSIGN` outbox envelope in one transaction before the scheduler installs that committed identity in memory and publishes it. Publication retry reuses the stored envelope and cannot create another generation. The last successful task-result transaction also moves its parent job from `RUNNING` to durable `FINALIZING` after verifying that the complete expected task set and every result snapshot are present. Final aggregation runs deterministically from those committed snapshots; terminal job state, semantic final payload, and one outbound `JOB_RESULT` outbox row then commit together before immediate publish or replay. The production RabbitMQ coordinator requires writable SQLite and rejects genuinely new submissions while that authority is unavailable. Core-only or explicitly non-persistent compositions retain a non-outbox path for tests and embedding, but that path cannot claim durable acceptance or transactional outbound intent.
 
 The SQLite schema is versioned, validates the runtime-supported schema version at startup, enforces `tasks.job_id` references to existing `jobs.job_id` rows, and stores task payload/result snapshots for schema-v2 restart recovery, requester token hashes for result ownership, requester public keys for signed ownership when present, schema-v5 peer registry metadata for last-known peer state, schema-v6 final result payloads for completed jobs, schema-v7 task-attempt audit rows for assignment and terminal outcomes, schema-v8 task leases, schema-v9 broker outbox rows for coordinator RabbitMQ publication replay, schema-v10 current attempt/assignment IDs plus assignment IDs and lease deadlines in the attempt audit, schema-v11 durable `FINALIZING` intent, schema-v12 canonical submission request hashes, and schema-v13 orphan-output deletion failures. On startup, resumable `RUNNING` jobs and replayable `FINALIZING` jobs are rebuilt from SQLite, including task status, retry count, assignment generation/identity, leases, and committed result payloads. Expired or incomplete assignments are conditionally released before hydration, fully result-bearing version-10 jobs left `RUNNING` are migrated to `FINALIZING`, pending coordinator outbox rows are replayed, failed orphan deletes remain retryable, and otherwise non-resumable legacy running jobs are marked failed. Requesters can send `JOB_RESULT_REQUEST` where a runtime route exists; identity-bound jobs must also include the matching requester public key and a valid signature. An exact duplicate `JOB_SUBMIT` is an authorized status/result replay request when its owner tuple and canonical request hash match. Scheduler ingress is bounded by `inboundQueueCapacity` / `TASKFLOW_SCHEDULER_INBOUND_QUEUE_CAPACITY`. Each scheduler cycle also has separate message, deadline, dispatch, and terminal/outbox budgets, all defaulting to `100`, in that order. Broker deliveries receive bounded delayed retry when the scheduler mailbox is full and are acknowledged only after scheduler/store classification. Coordinator shutdown closes ingress and cancels consumers before draining admitted envelopes; its interruptible idle wait wakes for shutdown, and channel close returns any delivery that was not durably handled and acknowledged to RabbitMQ.
 
@@ -562,6 +564,11 @@ Environment overrides:
 - `TASKFLOW_SCHEDULER_MAX_ASSIGNMENTS_PER_JOB_PER_ROUND`
 - `TASKFLOW_SCHEDULER_OUTBOX_BATCH_SIZE`
 - `TASKFLOW_METRICS_LOG_INTERVAL_MS`
+- `TASKFLOW_METRICS_ENABLED` - compatibility switch for the shared metrics and
+  health listener; `false` disables all three routes
+- `TASKFLOW_METRICS_HOST` - operational listener bind host, default
+  `127.0.0.1`
+- `TASKFLOW_METRICS_PORT` - operational listener port, default `9464`
 - `TASKFLOW_SCORE_LOAD_WEIGHT`
 - `TASKFLOW_SCORE_LATENCY_WEIGHT`
 - `TASKFLOW_SCORE_DURATION_WEIGHT`
@@ -659,18 +666,27 @@ Configuration can be supplied through environment variables:
 
 Default local configuration is `localhost:5672`, user `guest`, password `guest`, vhost `/`, exchange `taskflow.exchange`, queue prefix `taskflow`, durable shared queues enabled, prefetch `3`, publisher confirm timeout `5000` ms, and dead-lettering enabled with exchange `taskflow.dead-letter.exchange`, queue `taskflow.dead-letter`, quarantine queue `taskflow.dead-letter.quarantine`, and routing key `dead-letter`. Application envelopes always carry RabbitMQ persistent delivery mode (`deliveryMode=2`); `TASKFLOW_RABBITMQ_DURABLE` controls durability of applicable shared, retry, dead-letter, and quarantine exchanges/queues. Peer-specific endpoints remain exclusive, auto-delete, and non-durable, so the persistent property does not make those endpoint queues survive participant disconnect or broker restart. `TASKFLOW_RABBITMQ_RETRY_DELAYS_MS` is a comma-separated list of positive millisecond delays and defaults to `1000,5000,30000`: the initial processing delivery is attempt 1, failures after attempts 1, 2, and 3 enter those respective TTL queues, and a failure on attempt 4 enters quarantine. The executor assignment-result cache defaults to `4096` entries and a `900000` ms (15 minute) TTL; both values must be positive. Consumers settle every delivery as `ACK_SUCCESS`, `ACK_DUPLICATE_OR_STALE`, `RETRY_TRANSIENT`, `REJECT_INVALID`, or `QUARANTINE_POISON`. Invalid deliveries reject without requeue into the ordinary DLQ when enabled. Explicitly transient failures, bounded-mailbox pressure, and deterministic poison use the bounded delay schedule; exhaustion publishes once to quarantine with the original routing key, current/first failure reason, disposition, and delivery-attempt header preserved. The source delivery is acknowledged only after the retry or quarantine publish is broker-confirmed; an unconfirmed handoff rejects without immediate requeue. If ordinary dead-lettering is explicitly disabled, rejected invalid deliveries and failed handoffs are discarded even though the retry topology still provides its separate final quarantine queue. This finite return/quarantine guarantee assumes the original routing binding remains present: if a peer-specific auto-delete queue disappears during a delay, RabbitMQ's non-mandatory dead-letter return can be unroutable, so that participant-offline window remains outside the finite return guarantee. The old generic handler-failure requeue toggle has been removed. TaskFlow DLQ commands inspect dead-letter metadata, redrive valid TaskFlow envelopes to their original routing key, quarantine entries, or discard entries. Quarantine commands separately inspect and manually redrive automatically exhausted messages with a fresh bounded budget. Redrive refuses malformed or non-TaskFlow poison messages. `TASKFLOW_PEER_ID` configures the participant identity used by command-line and JavaFX runtimes; if it is unset, the runtime generates a safe unique process-scoped peer ID. Generated fallback IDs are not stable across restarts, so set `TASKFLOW_PEER_ID` for stable logs, routes, and peer-scoped job IDs.
 
-Coordinator and command-line participant startup remains alive but unready when
-RabbitMQ is temporarily unavailable. One connection owner performs one bounded
-attempt at a time, using a `5000` ms connection/handshake timeout and capped
-exponential delays of `1000` ms through `30000` ms with multiplier `2.0` by
-default. Invalid credentials or protocol/configuration errors fail instead of
-retrying forever. Shutdown interrupts startup backoff. After a connection is
-established, RabbitMQ client connection and topology recovery use the same
-delay bounds; the logs expose initial retries, interruption, topology recovery,
-and recovery completion. The coordinator becomes ready only after connection,
-topology declaration, consumer creation, and scheduler startup. The JavaFX
-application remains open and reports an initial connection failure so the user
-can retry from its connection screen.
+Coordinator and command-line participant processes keep retrying when RabbitMQ
+is temporarily unavailable. Until the coordinator scheduler loop starts, its
+operational endpoints report `503/STARTING` rather than claiming liveness or
+readiness. One connection owner performs one bounded attempt at a time, using
+a `5000` ms connection/handshake timeout and capped exponential delays of
+`1000` ms through `30000` ms with multiplier `2.0` by default. Invalid
+credentials or protocol/configuration errors fail instead of retrying forever.
+Shutdown interrupts startup backoff. After a connection is established,
+RabbitMQ client connection and topology recovery use the same delay bounds;
+the logs expose initial retries, interruption, topology recovery, and recovery
+completion. The coordinator becomes ready only after connection,
+topology declaration, consumer creation, scheduler startup, a successful
+rollback-only SQLite write, observable outbox pressure below its configured
+threshold, and a valid/non-blocked scheduler admission projection. Broker or
+SQLite loss leaves the process live but changes readiness to `DEGRADED`;
+recovery is observed without restarting or latching the failure. New jobs are
+rejected before durable acceptance while degraded, while exact accepted-job
+replay and accepted-work recovery remain available. See
+[Coordinator health contract](docs/HEALTH.md). The JavaFX application remains
+open and reports an initial connection failure so the user can retry from its
+connection screen.
 
 For anything beyond the local Docker/demo broker, do not use the default `guest` / `guest` credentials. Create a dedicated RabbitMQ vhost and least-privilege user for TaskFlow, store the password outside source control, restrict the management API, and keep AMQP traffic on a trusted network. TaskFlow does not currently expose native RabbitMQ TLS/certificate configuration; if broker traffic crosses an untrusted network, put it behind a verified TLS-terminating tunnel/proxy or add and test RabbitMQ Java client TLS wiring before making deployment-security claims.
 
@@ -942,7 +958,7 @@ The Docker Compose path does not require Java or Maven on the host machine. The 
   collection, preserves active/authoritative keys through SQLite, and retains
   schema-v13 deletion failures for idempotent retry. Automatic input-object
   retention/deletion remains deliberately out of scope.
-- Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs. The coordinator exports aggregate Prometheus metrics without job/task/assignment/worker labels, but does not ship a dashboard, alert rules, metric retention, authentication, or TLS. Coordinator scheduler events use a required UTC timestamp, process-lifetime coordinator instance ID, outcome, and stable failure-reason code. Assignment generations and committed, stale, duplicate, retry, timeout, lease-expiry, dispatch-failure, or participant-loss task transitions carry the complete job/task/attempt/assignment/executor correlation tuple. `docs/OBSERVABILITY.md` defines the event schema; `docs/OBSERVABILITY_SCOPE.md` defines the event inventory and metrics endpoint contract.
+- Main Java runtime paths use SLF4J/Logback and the Docker demo emits structured event logs. The coordinator exports aggregate Prometheus metrics without job/task/assignment/worker labels plus bounded-reason liveness/readiness, but does not ship a dashboard, alert rules, metric retention, authentication, or TLS. Coordinator scheduler events use a required UTC timestamp, process-lifetime coordinator instance ID, outcome, and stable failure-reason code. Assignment generations and committed, stale, duplicate, retry, timeout, lease-expiry, dispatch-failure, or participant-loss task transitions carry the complete job/task/attempt/assignment/executor correlation tuple. `docs/OBSERVABILITY.md` defines the event schema; `docs/OBSERVABILITY_SCOPE.md` defines the event inventory and operational endpoint contract; `docs/HEALTH.md` defines health/readiness and degraded admission.
 - SQLite is the current `JobStateStore`, peer registry store, coordinator broker outbox store, and orphan-output retry-state implementation. Its schema is versioned, task rows enforce job referential integrity, initial job persistence failures reject job startup, retry/task-failure persistence failures fail jobs terminally, and successful-result storage failures remain retryable without an in-memory completion. Non-outbox terminal writes precede direct result delivery; a write failure retains the pending active projection and suppresses delivery until a later commit succeeds. Schema-v2 task payload/result snapshots allow coordinator startup to resume rebuildable `RUNNING` jobs and reconstruct completed persisted job results on request when all task result snapshots exist. Schema-v3 requester token hashes authorize result requests across reconnects, schema-v4 requester identity keys require signed result requests for identity-bound jobs, schema-v5 peer registry rows retain durable peer metadata across coordinator restart, schema-v6 stores completed final result payloads, schema-v7 stores task-attempt audit rows for assignment and terminal outcomes, schema-v8 stores lease metadata, schema-v9 stores coordinator broker outbox rows, schema-v10 stores the current attempt/assignment ID on task rows and assignment ID/lease deadline on attempt rows, schema-v11 uses `FINALIZING` as the replayable boundary between the last committed task result and terminal aggregation, schema-v12 stores the canonical job-submission request hash, and schema-v13 stores bounded orphan-output deletion failure metadata. Startup recovery preserves only complete assignment identities with unexpired leases, releases expired or incomplete legacy assignments to pending without resetting the last known generation, resumes `FINALIZING` jobs from ordered durable task results, replays pending coordinator outbox rows and orphan-delete failures for RabbitMQ coordinator runs, and marks otherwise non-resumable jobs failed. Aggregation replay requires plugins to produce the same semantic result from the same ordered committed task results; exactly-once broker delivery is not claimed.
 - PostgreSQL/Flyway is not implemented; `docs/RECOVERY_SCOPE.md` records the lease behavior and PostgreSQL/Flyway deferral.
 - Result ownership and submission idempotency use per-job bearer requester tokens plus signed requester identity when a job was submitted with a requester public key. The coordinator persists only token hashes and public keys, not raw tokens or private keys, and this is not a full user/account authentication model. The JavaFX submitter stores raw requester tokens and its local signing key in a user-profile file, returns the same token when the same job ID is submitted again, and retains it after uncertain send/confirm failure. An exact duplicate submission can replay status or a terminal result through normal broker ingress, while a separate JavaFX `JOB_RESULT_REQUEST` route remains unimplemented. POSIX owner-only permission hardening is attempted when supported, but this is not a credential vault or role-based authorization system.
@@ -1047,9 +1063,18 @@ On Windows PowerShell:
 .\mvnw.cmd -pl taskflow-coordinator exec:java
 ```
 
-The local metrics endpoint is then available at
-`http://127.0.0.1:9464/metrics`. It is a metrics-only listener; health and
-readiness endpoints are not part of this phase.
+The local operational endpoint is then available at:
+
+```text
+http://127.0.0.1:9464/metrics
+http://127.0.0.1:9464/health/live
+http://127.0.0.1:9464/health/ready
+```
+
+During bounded broker-startup retry, liveness and readiness return
+`503/STARTING` because the scheduler loop does not yet exist. After activation,
+a broker outage leaves liveness `200/UP` while readiness becomes
+`503/DEGRADED`; see [Coordinator health contract](docs/HEALTH.md).
 
 ---
 

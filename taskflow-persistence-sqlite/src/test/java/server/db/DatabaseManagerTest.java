@@ -47,6 +47,44 @@ class DatabaseManagerTest {
     Path tempDir;
 
     @Test
+    void writabilityProbeRollsBackAndRecoversAfterInjectedWriteFailure() throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-writability-health.db");
+        DatabaseManager db = new DatabaseManager(dbPath.toString());
+        long appliedAtBefore = schemaAppliedAt(dbPath);
+        try {
+            assertTrue(db.isWritable());
+            assertEquals(appliedAtBefore, schemaAppliedAt(dbPath));
+
+            try (Connection faultConnection =
+                         DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = faultConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TRIGGER fail_health_writability_probe
+                        BEFORE UPDATE OF applied_at ON schema_version
+                        BEGIN
+                            SELECT RAISE(ABORT, 'injected health write failure');
+                        END
+                        """);
+            }
+
+            assertFalse(db.isWritable());
+            assertEquals(appliedAtBefore, schemaAppliedAt(dbPath));
+
+            try (Connection recoveryConnection =
+                         DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+                 Statement statement = recoveryConnection.createStatement()) {
+                statement.execute("DROP TRIGGER fail_health_writability_probe");
+            }
+
+            assertTrue(db.isWritable());
+            assertEquals(appliedAtBefore, schemaAppliedAt(dbPath));
+        } finally {
+            db.close();
+        }
+        assertFalse(db.isWritable());
+    }
+
+    @Test
     void persistsJobAndTaskLifecycleToConfiguredDatabasePath() throws Exception {
         Path dbPath = tempDir.resolve("taskflow-test.db");
         DatabaseManager db = new DatabaseManager(dbPath.toString());
@@ -3277,6 +3315,16 @@ class DatabaseManagerTest {
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT version FROM schema_version WHERE id=1")) {
             return rs.next() ? rs.getInt(1) : -1;
+        }
+    }
+
+    private static long schemaAppliedAt(Path dbPath) throws Exception {
+        try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(
+                     "SELECT applied_at FROM schema_version WHERE id=1"
+             )) {
+            return rs.next() ? rs.getLong(1) : -1L;
         }
     }
 

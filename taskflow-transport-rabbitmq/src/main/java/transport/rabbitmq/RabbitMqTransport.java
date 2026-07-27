@@ -29,6 +29,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -46,6 +47,7 @@ public class RabbitMqTransport implements BrokerTransport {
     private final RabbitMqTransportMetrics metrics = new RabbitMqTransportMetrics();
     private final Map<String, CompletableFuture<Return>> mandatoryReturns = new ConcurrentHashMap<>();
     private final Map<String, Channel> consumerChannels = new ConcurrentHashMap<>();
+    private final AtomicBoolean connectionUsable = new AtomicBoolean();
 
     public RabbitMqTransport(RabbitMqTransportConfig config) throws Exception {
         this(config, RabbitMqRecoveryPolicy.defaults());
@@ -104,6 +106,7 @@ public class RabbitMqTransport implements BrokerTransport {
                 this.channel.addReturnListener(this::handleReturnedMessage);
             }
             registerRecoveryObservers();
+            connectionUsable.set(true);
         } catch (Exception e) {
             closeAfterStartupFailure(connection, channel, e);
             throw e;
@@ -168,6 +171,7 @@ public class RabbitMqTransport implements BrokerTransport {
         AtomicInteger recoveryCycle = new AtomicInteger();
         AtomicLong recoveryStartedNanos = new AtomicLong();
         connection.addShutdownListener(cause -> {
+            connectionUsable.set(false);
             if (cause.isInitiatedByApplication()) {
                 LOGGER.info(
                         "event=rabbitmq_connection_closed host={} port={} hard_error={} reason={}",
@@ -190,6 +194,7 @@ public class RabbitMqTransport implements BrokerTransport {
             recoverable.addRecoveryListener(new RecoveryListener() {
                 @Override
                 public void handleRecoveryStarted(Recoverable ignored) {
+                    connectionUsable.set(false);
                     recoveryStartedNanos.set(System.nanoTime());
                     LOGGER.warn(
                             "event=rabbitmq_connection_recovery_started cycle={} host={} port={} "
@@ -205,6 +210,7 @@ public class RabbitMqTransport implements BrokerTransport {
 
                 @Override
                 public void handleTopologyRecoveryStarted(Recoverable ignored) {
+                    connectionUsable.set(false);
                     LOGGER.info(
                             "event=rabbitmq_topology_recovery_started cycle={} host={} port={}",
                             recoveryCycle.get(),
@@ -215,6 +221,7 @@ public class RabbitMqTransport implements BrokerTransport {
 
                 @Override
                 public void handleRecovery(Recoverable ignored) {
+                    connectionUsable.set(true);
                     long startedNanos = recoveryStartedNanos.getAndSet(0L);
                     long elapsedMillis = startedNanos == 0L
                             ? 0L
@@ -621,6 +628,7 @@ public class RabbitMqTransport implements BrokerTransport {
 
     @Override
     public void close() throws Exception {
+        connectionUsable.set(false);
         try {
             channel.close();
         } finally {
@@ -631,6 +639,17 @@ public class RabbitMqTransport implements BrokerTransport {
 
     public RabbitMqTransportMetrics.Snapshot metricsSnapshot() {
         return metrics.snapshot();
+    }
+
+    /**
+     * Returns whether the recovered connection, publisher channel, and all
+     * currently owned consumer channels are usable now.
+     */
+    public boolean connectionUsable() {
+        if (!connectionUsable.get() || !connection.isOpen() || !channel.isOpen()) {
+            return false;
+        }
+        return consumerChannels.values().stream().allMatch(Channel::isOpen);
     }
 
     private static String stableConsumerTag(TransportRoute route) {

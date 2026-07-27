@@ -2,6 +2,7 @@ package server.metrics;
 
 import org.junit.jupiter.api.Test;
 import server.db.BrokerOutboxStore;
+import server.health.CoordinatorHealth;
 import server.runtime.TaskFlowClock;
 import server.scheduler.SchedulerMetrics;
 import transport.rabbitmq.RabbitMqTransportMetrics;
@@ -19,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-class PrometheusMetricsEndpointTest {
+class CoordinatorOperationsEndpointTest {
     private static final Set<String> MANDATORY_METRICS = Set.of(
             "taskflow_jobs_accepted_total",
             "taskflow_jobs_completed_total",
@@ -104,9 +105,9 @@ class PrometheusMetricsEndpointTest {
 
     @Test
     void disabledEndpointCreatesNoListener() throws Exception {
-        PrometheusMetricsEndpoint endpoint = new PrometheusMetricsEndpoint(
+        CoordinatorOperationsEndpoint endpoint = new CoordinatorOperationsEndpoint(
                 new MetricsEndpointConfig(false, "127.0.0.1", 0),
-                collector(true)
+                new CoordinatorHealth()
         );
 
         endpoint.start();
@@ -116,11 +117,54 @@ class PrometheusMetricsEndpointTest {
     }
 
     @Test
-    void httpEndpointServesPrometheusTextAndStopsCleanly() throws Exception {
-        PrometheusMetricsEndpoint endpoint = new PrometheusMetricsEndpoint(
+    void startupReportsLoopNotYetLiveAndUnreadyBeforeMetricsAreInstalled()
+            throws Exception {
+        CoordinatorOperationsEndpoint endpoint = new CoordinatorOperationsEndpoint(
                 new MetricsEndpointConfig(true, "127.0.0.1", 0),
-                collector(true)
+                new CoordinatorHealth()
         );
+        endpoint.start();
+        int port = endpoint.boundPort();
+        try {
+            HttpClient client = HttpClient.newBuilder()
+                    .connectTimeout(Duration.ofSeconds(2))
+                    .build();
+            HttpResponse<String> liveness = get(client, port, "/health/live");
+            HttpResponse<String> readiness = get(client, port, "/health/ready");
+            HttpResponse<String> metrics = get(client, port, "/metrics");
+
+            assertEquals(503, liveness.statusCode());
+            assertTrue(liveness.body().contains("\"state\":\"STARTING\""));
+            assertTrue(liveness.body().contains("\"live\":false"));
+            assertEquals(503, readiness.statusCode());
+            assertTrue(readiness.body().contains("\"ready\":false"));
+            assertTrue(readiness.body().contains("\"STARTING\""));
+            assertEquals(503, metrics.statusCode());
+        } finally {
+            endpoint.close();
+        }
+    }
+
+    @Test
+    void httpEndpointServesPrometheusAndHealthContractsThenStopsCleanly() throws Exception {
+        CoordinatorHealth health = new CoordinatorHealth();
+        health.activate(
+                () -> true,
+                () -> new CoordinatorHealth.ReadinessInputs(
+                        true,
+                        true,
+                        true,
+                        0L,
+                        100L,
+                        false,
+                        false
+                )
+        );
+        CoordinatorOperationsEndpoint endpoint = new CoordinatorOperationsEndpoint(
+                new MetricsEndpointConfig(true, "127.0.0.1", 0),
+                health
+        );
+        endpoint.installMetricsCollector(collector(true));
         endpoint.start();
         int port = endpoint.boundPort();
         try {
@@ -147,10 +191,34 @@ class PrometheusMetricsEndpointTest {
             assertTrue(response.body().contains("taskflow_jobs_accepted_total 1"));
             assertEquals(405, post.statusCode());
             assertEquals("GET", post.headers().firstValue("Allow").orElseThrow());
+            HttpResponse<String> liveness = get(client, port, "/health/live");
+            HttpResponse<String> readiness = get(client, port, "/health/ready");
+            HttpResponse<String> nested = get(client, port, "/health/ready/nested");
+
+            assertEquals(200, liveness.statusCode());
+            assertEquals(CoordinatorOperationsEndpoint.JSON_CONTENT_TYPE,
+                    liveness.headers().firstValue("Content-Type").orElseThrow());
+            assertEquals(200, readiness.statusCode());
+            assertTrue(readiness.body().contains("\"state\":\"READY\""));
+            assertTrue(readiness.body().contains("\"ready\":true"));
+            assertEquals(404, nested.statusCode());
         } finally {
             endpoint.close();
         }
         assertEquals(-1, endpoint.boundPort());
+    }
+
+    private static HttpResponse<String> get(
+            HttpClient client,
+            int port,
+            String path
+    ) throws Exception {
+        return client.send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                        .GET()
+                        .build(),
+                HttpResponse.BodyHandlers.ofString()
+        );
     }
 
     private static CoordinatorMetricsCollector collector(boolean outboxAvailable) {

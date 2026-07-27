@@ -20,6 +20,8 @@ import java.util.Base64;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -263,6 +265,62 @@ class SchedulerAdmissionTest {
         }
     }
 
+    @Test
+    void degradedCoordinatorRejectsNewJobBeforeInMemoryAcceptance() throws Exception {
+        try (Fixture fixture = new Fixture(
+                SchedulerConfig.defaults(),
+                true,
+                () -> false
+        )) {
+            fixture.submit(testSubmission("job-degraded", List.of("payload")));
+
+            JobResultMessage rejected = fixture.awaitResult();
+
+            assertNotNull(rejected);
+            assertFalse(rejected.isSuccessful());
+            assertEquals(
+                    "Coordinator is degraded and not ready for new jobs.",
+                    rejected.getErrorMessage()
+            );
+            assertNull(rejected.getAdmissionRejection());
+            assertEquals(0L, fixture.scheduler.getMetricsSnapshot().jobsAcceptedTotal());
+            assertEquals(0L, fixture.scheduler.getMetricsSnapshot().activeJobs());
+            assertEquals(0L, fixture.scheduler.getMetricsSnapshot().activeTasks());
+        }
+    }
+
+    @Test
+    void degradedCoordinatorStillServesExactAcceptedSubmissionReplay() throws Exception {
+        AtomicBoolean accepting = new AtomicBoolean(true);
+        JobSubmitMessage original = testSubmission("job-degraded-replay", List.of("payload"));
+        try (Fixture fixture = new Fixture(
+                SchedulerConfig.defaults(),
+                true,
+                accepting::get
+        )) {
+            fixture.submit(original);
+            fixture.awaitAcceptedJobs(1L);
+            accepting.set(false);
+            fixture.submit(new JobSubmitMessage(
+                    original.getNodeId(),
+                    original.getTime(),
+                    original.getJobId(),
+                    original.getTaskType(),
+                    original.getTaskPayloads(),
+                    original.getParameter(),
+                    original.getRequesterToken()
+            ));
+
+            JobResultMessage replay = fixture.awaitResult();
+
+            assertNotNull(replay);
+            assertFalse(replay.isSuccessful());
+            assertEquals("Job is still running.", replay.getErrorMessage());
+            assertEquals(1L, fixture.scheduler.getMetricsSnapshot().jobsAcceptedTotal());
+            assertEquals(1L, fixture.scheduler.getMetricsSnapshot().activeJobs());
+        }
+    }
+
     private static void assertRejection(JobResultMessage result,
                                         AdmissionRejection.Limit limit,
                                         long configuredMaximum,
@@ -308,12 +366,24 @@ class SchedulerAdmissionTest {
         }
 
         private Fixture(SchedulerConfig config, boolean start) {
+            this(config, start, () -> true);
+        }
+
+        private Fixture(
+                SchedulerConfig config,
+                boolean start,
+                BooleanSupplier newJobAcceptanceAllowed
+        ) {
             scheduler = new TaskScheduler(
                     mailbox,
                     new InMemoryPeerRegistry(),
                     null,
                     output,
-                    config
+                    config,
+                    server.runtime.SystemTaskFlowClock.INSTANCE,
+                    server.runtime.UuidAssignmentIdGenerator.INSTANCE,
+                    "scheduler-admission-test",
+                    newJobAcceptanceAllowed
             );
             schedulerThread = new Thread(scheduler, "scheduler-admission-test");
             if (start) {
@@ -332,6 +402,15 @@ class SchedulerAdmissionTest {
 
         private JobResultMessage awaitResult() throws InterruptedException {
             return output.results.poll(2L, TimeUnit.SECONDS);
+        }
+
+        private void awaitAcceptedJobs(long expected) throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2L);
+            while (scheduler.getMetricsSnapshot().jobsAcceptedTotal() != expected
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(5L);
+            }
+            assertEquals(expected, scheduler.getMetricsSnapshot().jobsAcceptedTotal());
         }
 
         @Override

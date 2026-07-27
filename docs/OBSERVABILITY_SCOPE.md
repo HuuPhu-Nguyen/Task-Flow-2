@@ -10,15 +10,17 @@ scheduler state transitions are defined in
 
 TaskFlow exposes structured SLF4J/Logback event logs, scheduler metrics
 snapshots, coordinator operator status commands, and a coordinator-local
-Prometheus text endpoint. These outputs are suitable for local runs, CI output,
-Docker demo inspection, scraping, and focused troubleshooting.
+operational HTTP endpoint for Prometheus metrics, liveness, and readiness.
+These outputs are suitable for local runs, CI output, Docker demo inspection,
+scraping, and focused troubleshooting.
 
 TaskFlow does not provide built-in dashboards, alerting rules, distributed
 tracing, a log retention policy, or a DLQ dashboard.
 
-## Prometheus Metrics Endpoint
+## Coordinator Operational Endpoint
 
-The RabbitMQ coordinator serves Prometheus text format at `GET /metrics`.
+The RabbitMQ coordinator serves Prometheus text at `GET /metrics`, liveness at
+`GET /health/live`, and readiness for new jobs at `GET /health/ready`.
 The listener is enabled by default on `127.0.0.1:9464`; loopback is the safe
 default for direct local runs. Configure it with the environment variables
 below or the corresponding Java system properties. A nonblank system property
@@ -26,20 +28,23 @@ takes precedence over its environment variable.
 
 | Setting | System property | Default | Meaning |
 |---|---|---:|---|
-| `TASKFLOW_METRICS_ENABLED` | `taskflow.metricsEnabled` | `true` | Set to `false` to create no metrics listener. |
+| `TASKFLOW_METRICS_ENABLED` | `taskflow.metricsEnabled` | `true` | Compatibility name for the shared listener switch. `false` disables metrics and both health routes. |
 | `TASKFLOW_METRICS_HOST` | `taskflow.metricsHost` | `127.0.0.1` | Bind address or host. Use `0.0.0.0` only when the surrounding network boundary is intentional. |
 | `TASKFLOW_METRICS_PORT` | `taskflow.metricsPort` | `9464` | TCP port. Port `0` is supported for test-managed ephemeral binding. |
 
-For a local coordinator, scrape with:
+For a local coordinator:
 
 ```text
 curl http://127.0.0.1:9464/metrics
+curl http://127.0.0.1:9464/health/live
+curl http://127.0.0.1:9464/health/ready
 ```
 
 The Docker Compose coordinator binds the listener to `0.0.0.0` inside the
 container and publishes host port `9464`, so the same host URL works for the
-demo. The endpoint provides metrics only; health and readiness endpoints are a
-separate scope.
+demo. Exact status codes, readiness inputs, bounded reasons, automatic
+recovery, degraded admission behavior, and probe limits are defined in the
+[coordinator health contract](HEALTH.md).
 
 ### Exported metric contract
 
@@ -85,6 +90,13 @@ durable state.
 
 Queue pressure and scheduler health:
 
+- `coordinator_operations_endpoint_started` records the shared listener bind
+  and all three fixed routes; `coordinator_operations_endpoint_stopped`
+  records lifecycle closure.
+- `coordinator_health_changed` emits only when the readiness state or bounded
+  reason set changes. It includes `status`, `live`, `ready`, `degraded`, and
+  the identity-free reasons defined in [`HEALTH.md`](HEALTH.md). Repeated
+  identical scrapes do not emit repeated transitions.
 - `scheduler_metrics` includes `queue_depth`, `active_jobs`, `active_tasks`,
   `overloaded`, `overload_primary_reason`, `overload_configured_maximum`,
   `overload_observed_value`, `overload_reasons`, `job_submit_prefetch`, and
@@ -295,8 +307,9 @@ RabbitMQ publish, acknowledgement, and DLQ routing:
   schedule, maximum delivery attempts, connection timeout, and recovery
   backoff bounds.
 - `coordinator_broker_startup_waiting` and `peer_broker_startup_waiting`
-  identify a process that is alive but not yet ready because its initial broker
-  connection has not completed.
+  identify a process whose initial broker connection has not completed. The
+  coordinator listener reports `503/STARTING` for both health routes until its
+  scheduler loop is activated.
 - `rabbitmq_initial_connection_retry_scheduled` records each failed initial
   attempt, elapsed time, next delay, endpoint, and exception type.
   `rabbitmq_initial_connection_ready` records the attempt count and elapsed
@@ -408,13 +421,14 @@ DLQ analytics store. The status command is a terminal inspection surface, not a
 dashboard contract. Those remaining behaviors are deferred in the recovery and
 RabbitMQ scope documents.
 
-## Metrics Backend Limits
+## Operational Endpoint Limits
 
-The coordinator endpoint is a scrape surface, not an embedded time-series
-database. It does not persist counter or histogram state across restarts,
-retain samples, evaluate alerts, authenticate clients, terminate TLS, or ship a
-dashboard. Deployments that expose it beyond loopback must supply their own
-network boundary and monitoring backend.
+The coordinator endpoint is an operational surface, not an embedded
+time-series database or authenticated management API. It does not persist
+counter or histogram state across restarts, retain samples, evaluate alerts,
+authenticate clients, terminate TLS, or ship a dashboard. Deployments that
+expose it beyond loopback must supply their own network boundary, TLS, and
+monitoring backend.
 
 The endpoint deliberately exposes aggregates only. Exact job, task,
 assignment, and worker investigations use the structured event schema,

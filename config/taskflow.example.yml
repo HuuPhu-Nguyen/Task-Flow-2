@@ -7,6 +7,9 @@
 # TASKFLOW_ORPHAN_OUTPUT_GC_INTERVAL_MS, and
 # TASKFLOW_ORPHAN_OUTPUT_GC_BATCH_SIZE
 # (defaults: true, 86400000, 300000, and 100).
+# The coordinator operational listener serves /metrics, /health/live, and
+# /health/ready. TASKFLOW_METRICS_ENABLED, TASKFLOW_METRICS_HOST, and
+# TASKFLOW_METRICS_PORT configure it (defaults: true, 127.0.0.1, and 9464).
 
 scheduler:
   taskTimeoutMs: 60000

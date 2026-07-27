@@ -11,6 +11,12 @@ deferred.
   per-reference-byte, or pending SQLite-outbox bounds activate. Active limits
   use resulting count `<=`; pending outbox rejects at the configured
   threshold. Exact idempotent replay bypasses capacity admission.
+- Production coordinator readiness also gates genuinely new J0/T0 work when
+  SQLite is not writable, RabbitMQ is unusable, outbox observation is unknown,
+  or the worker-capacity projection is terminally invalid. Exact accepted-job
+  replay is classified before this gate, and already accepted results,
+  deadlines, outbox recovery, and scheduler drain remain live. See
+  [`HEALTH.md`](HEALTH.md).
 - Limit rejection returns failed protocol-v2 `JOB_RESULT` with a typed
   `admissionRejection`; pending-outbox count failure is reported as storage
   failure. Neither path mutates accepted state.
@@ -47,6 +53,10 @@ deferred.
   outbox, active jobs, and active tasks. Each reason contains its configured
   maximum, observed value, and activation time. Pending-outbox count failure
   retains the last known pressure and marks observation unhealthy.
+- Health treats active-job and active-task hard-limit reasons as blocking new
+  admission and observes the outbox limit directly. Transient submission-lane
+  and task-result-reserve saturation remain broker backpressure rather than a
+  terminal scheduler-health condition.
 - Initial broker connection retry has one process-owned attempt in flight at a
   time. Each attempt has a configured timeout and failures use capped
   exponential delay, preventing startup or recovery from creating an

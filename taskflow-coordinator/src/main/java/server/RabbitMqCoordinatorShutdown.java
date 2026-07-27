@@ -22,7 +22,7 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
     private final BrokerTransport transport;
     private final List<String> consumerTags;
     private final Runnable stopMonitor;
-    private final AutoCloseable metricsEndpoint;
+    private final AutoCloseable operationsEndpoint;
     private final AutoCloseable orphanOutputGc;
     private final AutoCloseable outboxReplayer;
     private final Runnable requestSchedulerDrain;
@@ -106,7 +106,7 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
                                 BrokerTransport transport,
                                 List<String> consumerTags,
                                 Runnable stopMonitor,
-                                AutoCloseable metricsEndpoint,
+                                AutoCloseable operationsEndpoint,
                                 AutoCloseable orphanOutputGc,
                                 AutoCloseable outboxReplayer,
                                 Runnable requestSchedulerDrain,
@@ -117,7 +117,7 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
                 transport,
                 consumerTags,
                 stopMonitor,
-                metricsEndpoint,
+                operationsEndpoint,
                 orphanOutputGc,
                 outboxReplayer,
                 requestSchedulerDrain,
@@ -131,7 +131,7 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
                                 BrokerTransport transport,
                                 List<String> consumerTags,
                                 Runnable stopMonitor,
-                                AutoCloseable metricsEndpoint,
+                                AutoCloseable operationsEndpoint,
                                 AutoCloseable orphanOutputGc,
                                 AutoCloseable outboxReplayer,
                                 Runnable requestSchedulerDrain,
@@ -142,7 +142,7 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
         this.transport = Objects.requireNonNull(transport, "transport");
         this.consumerTags = List.copyOf(Objects.requireNonNull(consumerTags, "consumerTags"));
         this.stopMonitor = Objects.requireNonNull(stopMonitor, "stopMonitor");
-        this.metricsEndpoint = metricsEndpoint;
+        this.operationsEndpoint = operationsEndpoint;
         this.orphanOutputGc = orphanOutputGc;
         this.outboxReplayer = outboxReplayer;
         this.requestSchedulerDrain = Objects.requireNonNull(
@@ -171,8 +171,8 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
                 consumerTags.size(),
                 drainTimeoutMillis);
         runAction("stop_intake", stopIntake);
-        boolean metricsEndpointStopped =
-                closeResource("metrics_endpoint", metricsEndpoint);
+        boolean operationsEndpointStopped =
+                closeResource("operations_endpoint", operationsEndpoint);
         cancelConsumers();
         boolean monitorStopped = runAction("stop_peer_monitor", stopMonitor);
         boolean orphanOutputGcStopped =
@@ -193,24 +193,24 @@ final class RabbitMqCoordinatorShutdown implements Runnable {
         }
 
         if (drained
-                && metricsEndpointStopped
+                && operationsEndpointStopped
                 && monitorStopped
                 && orphanOutputGcStopped
                 && outboxReplayerStopped
                 && transportStopped) {
             closeResource("database", database);
         } else if (database != null) {
-            LOGGER.error("event=rabbitmq_coordinator_shutdown_database_close_deferred scheduler_stopped={} metrics_endpoint_stopped={} peer_monitor_stopped={} orphan_output_gc_stopped={} outbox_replayer_stopped={} transport_stopped={}",
+            LOGGER.error("event=rabbitmq_coordinator_shutdown_database_close_deferred scheduler_stopped={} operations_endpoint_stopped={} peer_monitor_stopped={} orphan_output_gc_stopped={} outbox_replayer_stopped={} transport_stopped={}",
                     drained,
-                    metricsEndpointStopped,
+                    operationsEndpointStopped,
                     monitorStopped,
                     orphanOutputGcStopped,
                     outboxReplayerStopped,
                     transportStopped);
         }
-        LOGGER.info("event=rabbitmq_coordinator_shutdown_completed scheduler_drained={} metrics_endpoint_stopped={} peer_monitor_stopped={} orphan_output_gc_stopped={} outbox_replayer_stopped={} transport_stopped={}",
+        LOGGER.info("event=rabbitmq_coordinator_shutdown_completed scheduler_drained={} operations_endpoint_stopped={} peer_monitor_stopped={} orphan_output_gc_stopped={} outbox_replayer_stopped={} transport_stopped={}",
                 drained,
-                metricsEndpointStopped,
+                operationsEndpointStopped,
                 monitorStopped,
                 orphanOutputGcStopped,
                 outboxReplayerStopped,

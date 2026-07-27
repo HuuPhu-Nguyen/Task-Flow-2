@@ -14,6 +14,7 @@ import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
+import java.util.function.BooleanSupplier;
 
 /**
  * Compatibility facade and composition root for the focused scheduler runtime.
@@ -77,7 +78,50 @@ public class TaskScheduler implements Runnable {
                          SchedulerConfig config,
                          TaskFlowClock clock,
                          AssignmentIdGenerator assignmentIdGenerator,
+                         BooleanSupplier newJobAcceptanceAllowed) {
+        this(
+                mailbox,
+                registry,
+                db,
+                output,
+                config,
+                clock,
+                assignmentIdGenerator,
+                newLeaseOwnerId(),
+                newJobAcceptanceAllowed
+        );
+    }
+
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
+                         PeerRegistry registry,
+                         JobStateStore db,
+                         SchedulerOutput output,
+                         SchedulerConfig config,
+                         TaskFlowClock clock,
+                         AssignmentIdGenerator assignmentIdGenerator,
                          String leaseOwnerId) {
+        this(
+                mailbox,
+                registry,
+                db,
+                output,
+                config,
+                clock,
+                assignmentIdGenerator,
+                leaseOwnerId,
+                () -> true
+        );
+    }
+
+    public TaskScheduler(BlockingQueue<MessageEnvelope> mailbox,
+                         PeerRegistry registry,
+                         JobStateStore db,
+                         SchedulerOutput output,
+                         SchedulerConfig config,
+                         TaskFlowClock clock,
+                         AssignmentIdGenerator assignmentIdGenerator,
+                         String leaseOwnerId,
+                         BooleanSupplier newJobAcceptanceAllowed) {
         BlockingQueue<MessageEnvelope> checkedMailbox = Objects.requireNonNull(mailbox, "mailbox");
         PeerRegistry checkedRegistry = Objects.requireNonNull(registry, "registry");
         SchedulerOutput checkedOutput = Objects.requireNonNull(output, "output");
@@ -157,7 +201,8 @@ public class TaskScheduler implements Runnable {
                 leases,
                 jobCompletions,
                 overloadStatus,
-                events
+                events,
+                newJobAcceptanceAllowed
         );
         AssignmentService assignments = new AssignmentService(
                 state,

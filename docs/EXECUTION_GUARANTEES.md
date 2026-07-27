@@ -237,7 +237,8 @@ nodes may enable the requester role, executor role, or both.
   `TASKFLOW_RABBITMQ_RECOVERY_BACKOFF_MULTIPLIER` (defaults `1000`, `30000`,
   and `2.0`). Invalid credentials, incompatible protocol, and invalid
   configuration fail; shutdown interrupts backoff.
-- A coordinator is alive but unready during initial retry. Its
+- A coordinator process continues initial retry, but its liveness and readiness
+  routes report `503/STARTING` until the scheduler loop exists. Its
   `coordinator_started` event occurs only after broker connection, topology
   declaration, consumer construction, and scheduler startup. Connection
   attempts and state changes emit

@@ -440,6 +440,38 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         return readSchemaVersion();
     }
 
+    /**
+     * Probes SQLite write capability without committing a durable change.
+     * The singleton schema-version row is touched inside a transaction that is
+     * always rolled back.
+     */
+    public synchronized boolean isWritable() {
+        boolean originalAutoCommit;
+        try {
+            originalAutoCommit = conn.getAutoCommit();
+            if (!originalAutoCommit) {
+                return false;
+            }
+            conn.setAutoCommit(false);
+            try (PreparedStatement ps = conn.prepareStatement("""
+                    UPDATE schema_version
+                    SET applied_at = applied_at
+                    WHERE id = 1
+                    """)) {
+                boolean writable = ps.executeUpdate() == 1;
+                conn.rollback();
+                return writable;
+            } catch (SQLException e) {
+                conn.rollback();
+                return false;
+            } finally {
+                conn.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
     private int readSchemaVersion() throws SQLException {
         String sql = "SELECT version FROM schema_version WHERE id=1";
         try (Statement stmt = conn.createStatement(); ResultSet rs = stmt.executeQuery(sql)) {

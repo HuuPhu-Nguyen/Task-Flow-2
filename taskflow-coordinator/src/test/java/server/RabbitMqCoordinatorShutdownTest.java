@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RabbitMqCoordinatorShutdownTest {
     @Test
-    void metricsEndpointAndOrphanCollectorStopBeforeSharedDatabaseCloses() {
+    void operationsEndpointAndOrphanCollectorStopBeforeSharedDatabaseCloses() {
         List<String> events = new CopyOnWriteArrayList<>();
         RecordingTransport transport = new RecordingTransport(events, false);
         Thread schedulerThread = new Thread(() -> {
@@ -27,7 +27,7 @@ class RabbitMqCoordinatorShutdownTest {
                 transport,
                 List.of(),
                 () -> events.add("stop-monitor"),
-                () -> events.add("close-metrics-endpoint"),
+                () -> events.add("close-operations-endpoint"),
                 () -> events.add("close-orphan-gc"),
                 () -> events.add("close-outbox"),
                 () -> events.add("request-drain"),
@@ -37,8 +37,8 @@ class RabbitMqCoordinatorShutdownTest {
 
         shutdown.shutdown();
 
-        assertTrue(events.indexOf("close-metrics-endpoint") >= 0);
-        assertTrue(events.indexOf("close-metrics-endpoint") < events.indexOf("close-database"));
+        assertTrue(events.indexOf("close-operations-endpoint") >= 0);
+        assertTrue(events.indexOf("close-operations-endpoint") < events.indexOf("close-database"));
         assertTrue(events.indexOf("close-orphan-gc") >= 0);
         assertTrue(events.indexOf("close-orphan-gc") < events.indexOf("close-database"));
     }

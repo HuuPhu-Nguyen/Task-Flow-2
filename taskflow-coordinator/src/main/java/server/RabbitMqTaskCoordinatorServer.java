@@ -12,12 +12,14 @@ import protocol.PeerDisconnectedMessage;
 import protocol.PongMessage;
 import server.db.DatabaseManager;
 import server.db.BrokerOutboxStore;
+import server.health.CoordinatorHealth;
+import server.health.CoordinatorReadinessProbe;
 import server.job.EmbarrassinglyParallelJob;
 import server.model.MessageEnvelope;
 import server.monitor.PeerLivenessMonitor;
+import server.metrics.CoordinatorOperationsEndpoint;
 import server.metrics.CoordinatorMetricsCollector;
 import server.metrics.MetricsEndpointConfig;
-import server.metrics.PrometheusMetricsEndpoint;
 import server.objectstore.OrphanOutputGc;
 import server.objectstore.OrphanOutputGcConfig;
 import server.rabbitmq.RabbitMqOutboxReplayer;
@@ -58,11 +60,18 @@ public class RabbitMqTaskCoordinatorServer {
         RabbitMqRecoveryPolicy recoveryPolicy = RabbitMqRecoveryPolicy.fromEnvironment();
         RabbitMqTransportConnector startupConnector =
                 new RabbitMqTransportConnector(transportConfig, recoveryPolicy);
+        CoordinatorHealth coordinatorHealth = new CoordinatorHealth();
+        CoordinatorOperationsEndpoint operationsEndpoint =
+                new CoordinatorOperationsEndpoint(metricsConfig, coordinatorHealth);
         AtomicReference<Runnable> shutdownAction =
-                new AtomicReference<>(startupConnector::close);
+                new AtomicReference<>(() -> {
+                    operationsEndpoint.close();
+                    startupConnector.close();
+                });
         Runtime.getRuntime().addShutdownHook(
                 new Thread(() -> shutdownAction.get().run(), "rabbitmq-coordinator-shutdown")
         );
+        operationsEndpoint.start();
 
         LOGGER.info(
                 "event=coordinator_broker_startup_waiting host={} port={} "
@@ -130,7 +139,8 @@ public class RabbitMqTaskCoordinatorServer {
                 schedulerOutput,
                 schedulerConfig,
                 clock,
-                assignmentIdGenerator
+                assignmentIdGenerator,
+                coordinatorHealth::readyForNewJobs
         );
         if (recoveryObserved) {
             schedulerLogic.recordRecoveryDuration(recoveryDurationMillis);
@@ -149,16 +159,13 @@ public class RabbitMqTaskCoordinatorServer {
                         () -> refreshPendingOutboxPressure(schedulerLogic, finalDb)
                 );
         OrphanOutputGc orphanOutputGc = createOrphanOutputGc(finalDb, clock);
-        PrometheusMetricsEndpoint metricsEndpoint = new PrometheusMetricsEndpoint(
-                metricsConfig,
-                new CoordinatorMetricsCollector(
-                        schedulerLogic,
-                        transport,
-                        finalDb,
-                        orphanOutputGc,
-                        clock
-                )
-        );
+        operationsEndpoint.installMetricsCollector(new CoordinatorMetricsCollector(
+                schedulerLogic,
+                transport,
+                finalDb,
+                orphanOutputGc,
+                clock
+        ));
         Thread schedulerThread = new Thread(schedulerLogic, "rabbitmq-task-scheduler");
         PeerLivenessMonitor monitor = new PeerLivenessMonitor(
                 registry,
@@ -192,7 +199,7 @@ public class RabbitMqTaskCoordinatorServer {
                 transport,
                 List.of(jobSubmitConsumerTag, taskResultConsumerTag, heartbeatConsumerTag),
                 monitor::shutdown,
-                metricsEndpoint,
+                operationsEndpoint,
                 orphanOutputGc,
                 finalOutboxReplayer,
                 schedulerLogic::requestShutdownAfterDrain,
@@ -205,8 +212,17 @@ public class RabbitMqTaskCoordinatorServer {
             throw new IllegalStateException("startup connector released an unexpected transport");
         }
 
-        metricsEndpoint.start();
         monitor.start();
+        coordinatorHealth.activate(
+                schedulerThread::isAlive,
+                new CoordinatorReadinessProbe(
+                        finalDb,
+                        transport,
+                        schedulerLogic,
+                        registry,
+                        schedulerConfig
+                )
+        );
         schedulerThread.start();
         if (orphanOutputGc != null) {
             orphanOutputGc.start();

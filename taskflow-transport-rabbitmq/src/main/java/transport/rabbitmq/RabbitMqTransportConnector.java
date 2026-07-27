@@ -12,8 +12,8 @@ import java.util.concurrent.TimeoutException;
 /**
  * Owns one interruptible initial-connection loop. RabbitMQ's Java client only
  * performs automatic recovery after a connection has succeeded, so runtime
- * entry points use this owner to remain alive but unready during broker
- * startup outages.
+ * entry points use this owner to keep bounded startup retry running during
+ * broker outages.
  */
 public final class RabbitMqTransportConnector implements AutoCloseable {
     private static final Logger LOGGER = LoggerFactory.getLogger(RabbitMqTransportConnector.class);

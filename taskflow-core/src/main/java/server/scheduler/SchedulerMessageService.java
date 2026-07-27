@@ -33,6 +33,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.BooleanSupplier;
 
 /** Owns envelope disposition, J0 submission, result requests, and event routing. */
 final class SchedulerMessageService {
@@ -49,6 +50,7 @@ final class SchedulerMessageService {
     private final JobCompletionService jobCompletions;
     private final SchedulerOverloadStatus overloadStatus;
     private final SchedulerEventLog events;
+    private final BooleanSupplier newJobAcceptanceAllowed;
 
     SchedulerMessageService(SchedulerState state,
                             SchedulerPersistence persistence,
@@ -62,7 +64,8 @@ final class SchedulerMessageService {
                             LeaseService leases,
                             JobCompletionService jobCompletions,
                             SchedulerOverloadStatus overloadStatus,
-                            SchedulerEventLog events) {
+                            SchedulerEventLog events,
+                            BooleanSupplier newJobAcceptanceAllowed) {
         this.state = state;
         this.persistence = persistence;
         this.output = output;
@@ -76,6 +79,10 @@ final class SchedulerMessageService {
         this.jobCompletions = jobCompletions;
         this.overloadStatus = overloadStatus;
         this.events = events;
+        this.newJobAcceptanceAllowed = Objects.requireNonNull(
+                newJobAcceptanceAllowed,
+                "newJobAcceptanceAllowed"
+        );
     }
 
     void processEnvelope(MessageEnvelope envelope) {
@@ -175,6 +182,16 @@ final class SchedulerMessageService {
                     requestHash
             );
             if (handleExistingSubmission(envelope.fromNodeId(), submit, preflight)) {
+                return;
+            }
+            if (!newJobAcceptanceAllowed.getAsBoolean()) {
+                failureResponseAttempted = true;
+                sendJobStartFailure(
+                        envelope.fromNodeId(),
+                        submit,
+                        "Coordinator is degraded and not ready for new jobs.",
+                        null
+                );
                 return;
             }
 

@@ -18,6 +18,8 @@ import protocol.TaskResultMessage;
 import server.db.BrokerOutboxStore;
 import server.db.DatabaseManager;
 import server.db.JobStateStore;
+import server.health.CoordinatorHealth;
+import server.health.CoordinatorReadinessProbe;
 import server.model.MessageEnvelope;
 import server.registry.InMemoryPeerRegistry;
 import server.registry.PeerInfo;
@@ -208,8 +210,25 @@ class RabbitMqBrokerRecoveryIntegrationTest {
             );
 
             outboxReplayer = new RabbitMqOutboxReplayer(db, schedulerOutput, 10, 1_000L);
+            CoordinatorHealth coordinatorHealth = new CoordinatorHealth();
+            Thread runningSchedulerThread = schedulerThread;
+            coordinatorHealth.activate(
+                    runningSchedulerThread::isAlive,
+                    new CoordinatorReadinessProbe(
+                            db,
+                            coordinatorTransport,
+                            scheduler,
+                            registry,
+                            schedulerConfig
+                    )
+            );
             schedulerThread.start();
             outboxReplayer.start();
+            awaitCondition(
+                    () -> coordinatorHealth.readiness().ready(),
+                    5_000L,
+                    "initial coordinator readiness"
+            );
 
             assertTrue(peerTransport.publish(new OutboundTransportMessage(
                     TransportRoute.JOB_SUBMIT,
@@ -238,6 +257,15 @@ class RabbitMqBrokerRecoveryIntegrationTest {
             assertEquals(1, first.getAttemptNumber());
 
             stopBroker(broker);
+            awaitCondition(
+                    () -> coordinatorHealth.liveness().live()
+                            && !coordinatorHealth.readiness().ready()
+                            && coordinatorHealth.readiness().reasons().contains(
+                                    CoordinatorHealth.Reason.BROKER_NOT_USABLE
+                            ),
+                    10_000L,
+                    "live-but-unready coordinator during broker outage"
+            );
             schedulerMailbox.put(new MessageEnvelope(
                     new PeerDisconnectedMessage(
                             peerId,
@@ -305,6 +333,11 @@ class RabbitMqBrokerRecoveryIntegrationTest {
                     () -> database.loadPendingBrokerOutbox(10).isEmpty(),
                     10_000L,
                     "recovered outbox drain"
+            );
+            awaitCondition(
+                    () -> coordinatorHealth.readiness().ready(),
+                    10_000L,
+                    "automatic coordinator readiness recovery"
             );
 
             long successesBeforeStale = scheduler.getMetricsSnapshot().successCount();

@@ -33,11 +33,12 @@ The current RabbitMQ path includes:
 
 - Coordinator, command-line participant, and JavaFX entry points start RabbitMQ
   directly; there is no runtime transport selector.
-- Coordinator and command-line participant startup remains alive but unready
-  during a transient broker outage. One interruptible owner makes one
-  timeout-bounded connection attempt at a time with capped exponential
-  backoff. Permanent authentication/protocol/configuration failures terminate
-  startup instead of looping.
+- Coordinator and command-line participant processes keep retrying during a
+  transient startup broker outage. Until the coordinator scheduler loop
+  starts, its operational endpoints report `503/STARTING`. One interruptible
+  owner makes one timeout-bounded connection attempt at a time with capped
+  exponential backoff. Permanent authentication/protocol/configuration
+  failures terminate startup instead of looping.
 - Established transports enable automatic connection and topology recovery.
   The configured per-attempt timeout and capped delay bounds apply to both
   initial connection ownership and client recovery; structured events expose

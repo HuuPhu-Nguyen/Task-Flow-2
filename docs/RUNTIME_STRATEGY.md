@@ -41,8 +41,10 @@ All supported runtime delivery behavior is defined against RabbitMQ:
 - deterministic processing failures use the same bounded schedule and enter
   final quarantine after exhaustion, while validation failures reject
   immediately into the ordinary dead-letter workflow;
-- coordinator `TASK_ASSIGN` and final `JOB_RESULT` publication intent is stored
-  in SQLite outbox rows before publication when persistence is available;
+- the production coordinator stores `TASK_ASSIGN` and final `JOB_RESULT`
+  publication intent in SQLite outbox rows before publication; if SQLite is not
+  writable, readiness rejects genuinely new submissions instead of falling
+  back to non-durable acceptance;
 - application messages use persistent RabbitMQ delivery mode, while configured
   topology durability applies to shared/retry/dead-letter resources and not the
   exclusive auto-delete peer endpoints;
@@ -61,6 +63,11 @@ All supported runtime delivery behavior is defined against RabbitMQ:
 - broker-offline coordinator publications stay in the SQLite outbox and replay
   their exact identity after recovery rather than creating an extra assignment
   generation.
+- the coordinator operational listener starts before initial broker
+  connection, reports process-loop liveness separately from new-job readiness,
+  and recomputes readiness from SQLite writability, broker/channel usability,
+  outbox pressure, and scheduler admission state. The exact contract is in
+  [`HEALTH.md`](HEALTH.md).
 
 At-least-once delivery and execution remain explicit. Publisher confirmation is
 not consumer completion, and exactly-once delivery is not claimed.
@@ -93,7 +100,8 @@ authoritative.
   include pre-ack redelivery, post-commit/pre-ack duplicate classification,
   pre-stop/post-stop shutdown delivery ownership, unavailable startup, and a
   managed single-broker stop/restart with active work, recovered participant
-  routes, outbox replay, stale fencing, and completion.
+  routes, outbox replay, stale fencing, liveness/readiness transition, and
+  completion.
 
 ## Legacy Data
 

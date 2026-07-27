@@ -149,6 +149,7 @@ still obey the no-secret/no-full-payload rule, but a
 The coordinator's aggregate, bounded-label metrics are exported at
 `GET /metrics`; names, units, lifecycle semantics, configuration, and
 cardinality constraints are defined in
-[Observability scope](OBSERVABILITY_SCOPE.md). Health/readiness is TF-0603
-scope, and the one-command stale-result demonstration is TF-0604 scope. This
-document does not claim those later Phase 6 items.
+[Observability scope](OBSERVABILITY_SCOPE.md). Health/readiness is defined in
+the [coordinator health contract](HEALTH.md). The one-command stale-result
+demonstration remains TF-0604 scope; this document does not claim that later
+Phase 6 item.
