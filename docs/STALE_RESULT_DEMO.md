@@ -66,6 +66,7 @@ Their normative field schema remains in
 
 This is deterministic mechanism and presentation evidence, not a live-broker,
 process-kill, or chaos experiment. RabbitMQ redelivery/recovery evidence remains
-in the live suites, while generated event sequences and process crash windows
-remain Phase 7 scope. The demo adds no schema, protocol, retry, settlement, or
+in the live suites. Bounded generated scheduler sequences are covered by the
+[model-based proof](MODEL_BASED_TESTING.md), while process crash windows remain
+later Phase 7 scope. The demo adds no schema, protocol, retry, settlement, or
 runtime configuration behavior.

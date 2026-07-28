@@ -304,6 +304,24 @@ The binding owns infrastructure lifecycle and bounded broker inspection only.
 It does not replace coordinator/SQLite crash-window tests, prove clustered
 failover, or make ephemeral offline-peer routes durable.
 
+<a id="tf-0704--add-model-based-property-tests"></a>
+### TF-0704 — Bounded model-based scheduler proof
+
+- [`TaskFlowModelPropertyTest#generatedSequencesPreserveDurableSchedulerProperties`](../taskflow-coordinator/src/test/java/server/TaskFlowModelPropertyTest.java)
+  applies assignment, duplicate assignment, success, duplicate result, stale
+  result, retryable failure, lease expiry, executor disconnect, restart, and
+  outbox replay events to an independent reference model and the real
+  scheduler/SQLite runtime.
+- After every event it compares durable job, task, attempt, assignment, retry,
+  terminal, capacity, and outbox state; restart hydration must equal the same
+  durable model.
+- [`TaskFlowModelPropertyTest#duplicateEventsDoNotDuplicateAuthoritativeTransitions`](../taskflow-coordinator/src/test/java/server/TaskFlowModelPropertyTest.java)
+  gives the duplicate/stale families a stable focused test ID.
+- Push-fast CI runs the exact bounded seed set. Failures include the decimal
+  and hexadecimal seed plus the full event trace. See
+  [`MODEL_BASED_TESTING.md`](MODEL_BASED_TESTING.md) for seeds, bounds, the
+  reproduction command, and non-goals.
+
 <a id="tf-0705--automate-the-crash-window-matrix"></a>
 ### TF-0705 — Process/failpoint crash-window proof
 
@@ -358,6 +376,11 @@ can be judged against a stable failure contract. On the current baseline:
   tuple, and the complete same-participant ABA sequence is proved at the
   store boundary, through deterministic scheduler/SQLite integration, and
   through live RabbitMQ delivery;
+- bounded generated sequences now compare an independent reference model with
+  the real scheduler, SQLite, capacity ledger, recovery path, and outbox
+  replayer after every event. The fixed CI seeds cover duplicates, stale
+  results, retryable failures, lease expiry, executor disconnect, restart, and
+  replay without wall-clock sleeps;
 - coordinator delivery ownership is proved across healthy connection-close
   failpoints before acknowledgement and after durable result commitment.
   Graceful shutdown closes intake before draining admitted envelopes and

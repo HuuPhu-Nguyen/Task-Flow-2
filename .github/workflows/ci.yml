@@ -36,6 +36,15 @@ jobs:
         env:
           TASKFLOW_RABBITMQ_LIVE_TEST: "false"
 
+      - name: Run bounded scheduler model seed set
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -pl taskflow-coordinator
+          -am
+          -Dtest=TaskFlowModelPropertyTest
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
+
       - name: Check whitespace
         run: git diff-tree --check --no-commit-id --root -r HEAD
 
