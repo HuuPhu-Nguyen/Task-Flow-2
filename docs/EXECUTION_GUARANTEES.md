@@ -615,6 +615,9 @@ edges, stale/duplicate/ignored distinctions, retry exhaustion, and exact event
   bounded last error until idempotent deletion succeeds or SQLite later
   classifies the key as active/authoritative. Migration from v12 creates an
   empty retry set without changing task/result authority.
+- Schema version 14 adds indexes for job-scoped task and attempt reads and for
+  pending broker-outbox replay. Migration from v13 creates only indexes; it
+  neither rewrites durable rows nor changes transition or recovery semantics.
 - Coordinator startup rebuilds resumable `RUNNING` and `FINALIZING` jobs from persisted snapshots, restores completed task results when result payloads were persisted, preserves assigned tasks only when their complete persisted identity has an unexpired lease, releases expired assignments with a `lease_expired` attempt reason, and releases incomplete legacy assignments with an inspectable restart reason. Recovered task results are supplied to plugins in canonical task order for deterministic aggregation.
 - Legacy or otherwise non-resumable `RUNNING` or `FINALIZING` jobs are marked `FAILED` on startup.
 - If startup recovery cannot safely reconcile persisted state, the coordinator closes that state store, disables persistence for the run, and logs `database_disabled` instead of writing against unreconciled history.

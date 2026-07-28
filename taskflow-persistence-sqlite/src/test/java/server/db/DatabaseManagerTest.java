@@ -97,6 +97,9 @@ class DatabaseManagerTest {
             db.markJobCompleted("job-1");
 
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
+            assertTrue(indexExists(dbPath, "idx_tasks_job_id"));
+            assertTrue(indexExists(dbPath, "idx_task_attempts_job_id"));
+            assertTrue(indexExists(dbPath, "idx_broker_outbox_pending"));
             assertTrue(db.hasJob("job-1"));
             assertFalse(db.hasJob("missing-job"));
 
@@ -857,12 +860,52 @@ class DatabaseManagerTest {
         }
 
         try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
-            assertEquals(13, migrated.getSchemaVersion());
+            assertEquals(14, migrated.getSchemaVersion());
             assertTrue(tableExists(dbPath, "orphan_output_gc_failures"));
             assertEquals(
                     List.of(),
                     migrated.loadOrphanOutputDeletionFailures(10).failures()
             );
+        }
+    }
+
+    @Test
+    void migratesSchemaVersion13QueryIndexesWithoutChangingAcceptedWork()
+            throws Exception {
+        Path dbPath = tempDir.resolve("taskflow-v13-query-index-migration.db");
+        try (DatabaseManager database =
+                     new DatabaseManager(dbPath.toString())) {
+            assertTrue(database.insertJobWithTasks(
+                    "job-v13-query-index",
+                    "TEST_TASK",
+                    "requester-1",
+                    1,
+                    List.of("task-v13-query-index")
+            ));
+        }
+        try (Connection connection =
+                     DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             Statement statement = connection.createStatement()) {
+            statement.execute("DROP INDEX idx_tasks_job_id");
+            statement.execute("DROP INDEX idx_task_attempts_job_id");
+            statement.execute("DROP INDEX idx_broker_outbox_pending");
+            statement.execute(
+                    "UPDATE schema_version SET version=13 WHERE id=1"
+            );
+        }
+
+        try (DatabaseManager migrated =
+                     new DatabaseManager(dbPath.toString())) {
+            assertEquals(14, migrated.getSchemaVersion());
+            assertEquals(
+                    List.of("task-v13-query-index"),
+                    migrated.getTasksForJob("job-v13-query-index").stream()
+                            .map(DatabaseManager.TaskRecord::taskId)
+                            .toList()
+            );
+            assertTrue(indexExists(dbPath, "idx_tasks_job_id"));
+            assertTrue(indexExists(dbPath, "idx_task_attempts_job_id"));
+            assertTrue(indexExists(dbPath, "idx_broker_outbox_pending"));
         }
     }
 
@@ -2867,7 +2910,7 @@ class DatabaseManagerTest {
         createVersion9AssignmentDatabase(dbPath);
 
         try (DatabaseManager db = new DatabaseManager(dbPath.toString())) {
-            assertEquals(13, DatabaseManager.CURRENT_SCHEMA_VERSION);
+            assertEquals(14, DatabaseManager.CURRENT_SCHEMA_VERSION);
             assertEquals(DatabaseManager.CURRENT_SCHEMA_VERSION, db.getSchemaVersion());
             assertTrue(columnExists(dbPath, "tasks", "attempt_number"));
             assertTrue(columnExists(dbPath, "tasks", "assignment_id"));
@@ -2961,7 +3004,7 @@ class DatabaseManagerTest {
         }
 
         try (DatabaseManager migrated = new DatabaseManager(dbPath.toString())) {
-            assertEquals(13, migrated.getSchemaVersion());
+            assertEquals(14, migrated.getSchemaVersion());
             assertEquals("FINALIZING", migrated.getJobHistory().getFirst().status());
             assertTrue(columnExists(dbPath, "jobs", "request_hash"));
             assertEquals(
@@ -2996,7 +3039,7 @@ class DatabaseManagerTest {
         }
 
         assertThrows(SQLException.class, () -> new DatabaseManager(dbPath.toString()));
-        assertEquals(13, schemaVersion(dbPath));
+        assertEquals(14, schemaVersion(dbPath));
     }
 
     @Test
@@ -3374,6 +3417,21 @@ class DatabaseManagerTest {
         try (Connection conn = DriverManager.getConnection("jdbc:sqlite:" + dbPath);
              var ps = conn.prepareStatement("SELECT name FROM sqlite_master WHERE type='table' AND name=?")) {
             ps.setString(1, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
+    private static boolean indexExists(Path dbPath, String indexName)
+            throws Exception {
+        try (Connection conn =
+                     DriverManager.getConnection("jdbc:sqlite:" + dbPath);
+             var ps = conn.prepareStatement(
+                     "SELECT name FROM sqlite_master "
+                             + "WHERE type='index' AND name=?"
+             )) {
+            ps.setString(1, indexName);
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next();
             }

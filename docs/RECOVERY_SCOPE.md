@@ -28,6 +28,9 @@ an empty hash and remain non-replayable as original submissions because task
 snapshots may be plugin-transformed rather than the original submitted values.
 Schema version 13 adds durable orphan-output deletion failures; the coordinator
 loads and reclassifies them in bounded scheduled batches after restart.
+Schema version 14 adds query-only indexes for job-scoped task/attempt recovery
+and pending broker-outbox replay; migration from v13 does not reinterpret or
+rewrite accepted work.
 PostgreSQL/Flyway is not implemented.
 
 Coordinator shutdown now stops RabbitMQ intake before draining the bounded

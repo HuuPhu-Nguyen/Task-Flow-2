@@ -31,8 +31,8 @@ class SqlitePersistenceContractTest extends PersistenceContractTest {
     @Override
     protected MigrationSeed preparePreviousSchema(Path location)
             throws Exception {
-        String jobId = "job-contract-v12-migration";
-        String taskId = "task-job-contract-v12-migration-0";
+        String jobId = "job-contract-v13-migration";
+        String taskId = "task-job-contract-v13-migration-0";
         String payload = "migration-payload";
         String tokenHash = RequesterTokens.hashToken("migration-owner-token");
         String ownerKey = "migration-owner-key";
@@ -65,14 +65,16 @@ class SqlitePersistenceContractTest extends PersistenceContractTest {
         try (Connection connection = DriverManager.getConnection(
                 "jdbc:sqlite:" + location
         ); Statement statement = connection.createStatement()) {
-            statement.execute("DROP TABLE orphan_output_gc_failures");
+            statement.execute("DROP INDEX idx_tasks_job_id");
+            statement.execute("DROP INDEX idx_task_attempts_job_id");
+            statement.execute("DROP INDEX idx_broker_outbox_pending");
             statement.execute(
-                    "UPDATE schema_version SET version=12 WHERE id=1"
+                    "UPDATE schema_version SET version=13 WHERE id=1"
             );
         }
 
         return new MigrationSeed(
-                12,
+                13,
                 jobId,
                 taskId,
                 payload,

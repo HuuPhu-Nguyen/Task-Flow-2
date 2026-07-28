@@ -90,6 +90,8 @@ public class CorrectnessChaosExperiment {
     private static final int TOXIPROXY_AMQP_PORT = 8_666;
     private static final int WORKER_CAPACITY = 8;
     private static final long POLL_NANOS = TimeUnit.MILLISECONDS.toNanos(25L);
+    private static final long PROGRESS_POLL_NANOS =
+            TimeUnit.SECONDS.toNanos(1L);
     private static final String DELIVERY_ATTEMPT_HEADER =
             "x-taskflow-delivery-attempt";
     private static final String ORIGINAL_ROUTING_KEY_HEADER =
@@ -387,7 +389,7 @@ public class CorrectnessChaosExperiment {
                         == config.delayedResultCount()) {
                     return;
                 }
-                LockSupport.parkNanos(POLL_NANOS);
+                LockSupport.parkNanos(PROGRESS_POLL_NANOS);
             }
             fail("Timed out after "
                     + config.completionTimeoutSeconds()

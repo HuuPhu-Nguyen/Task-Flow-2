@@ -42,7 +42,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
     private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseManager.class);
 
     public static final String DB_PATH = "taskflow.db";
-    public static final int CURRENT_SCHEMA_VERSION = 13;
+    public static final int CURRENT_SCHEMA_VERSION = 14;
     private static final int ASSIGNMENT_IDENTITY_SCHEMA_VERSION = 10;
     private static final int FINALIZATION_INTENT_SCHEMA_VERSION = 11;
     private static final int MAX_GC_ERROR_LENGTH = 1_024;
@@ -109,6 +109,7 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             createPeerRegistryTable();
             createBrokerOutboxTable();
             createOrphanOutputGcFailuresTable();
+            createQueryIndexes();
             if (version < FINALIZATION_INTENT_SCHEMA_VERSION) {
                 migrateFinalizationIntentSchema();
             }
@@ -260,6 +261,24 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
             stmt.execute("""
                 CREATE INDEX IF NOT EXISTS idx_orphan_output_gc_retry
                 ON orphan_output_gc_failures(last_attempt_at, object_key)
+            """);
+        }
+    }
+
+    private void createQueryIndexes() throws SQLException {
+        try (Statement stmt = conn.createStatement()) {
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tasks_job_id
+                ON tasks(job_id)
+            """);
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_task_attempts_job_id
+                ON task_attempts(job_id)
+            """);
+            stmt.execute("""
+                CREATE INDEX IF NOT EXISTS idx_broker_outbox_pending
+                ON broker_outbox(created_at, outbox_id)
+                WHERE published_at IS NULL
             """);
         }
     }
@@ -507,6 +526,16 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
         }
     }
 
+    private boolean indexExists(String indexName) throws SQLException {
+        String sql = "SELECT name FROM sqlite_master WHERE type='index' AND name=?";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, indexName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next();
+            }
+        }
+    }
+
     private boolean columnExists(String tableName, String columnName) throws SQLException {
         try (Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("PRAGMA table_info(" + tableName + ")")) {
@@ -632,6 +661,13 @@ public class DatabaseManager implements JobStateStore, PeerRegistryStore, Broker
                 || !columnExists("orphan_output_gc_failures", "last_error")) {
             throw new SQLException(
                     "Database schema is missing orphan-output GC failure columns."
+            );
+        }
+        if (!indexExists("idx_tasks_job_id")
+                || !indexExists("idx_task_attempts_job_id")
+                || !indexExists("idx_broker_outbox_pending")) {
+            throw new SQLException(
+                    "Database schema is missing required query indexes."
             );
         }
         if (countInvalidFinalizingJobs() > 0) {
