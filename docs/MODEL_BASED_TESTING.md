@@ -79,5 +79,6 @@ executor projection, in-process coordinator restarts, SQLite reopen, and
 outbox publication/replay decisions. It does not kill an operating-system
 process, run RabbitMQ or MinIO, inject network partitions, execute native
 plugins, prove retry exhaustion, or shrink a failing sequence automatically.
-Those process-level crash windows remain with TF-0705, and large multi-process
-chaos remains with TF-0706.
+The separate [process crash-window matrix](CRASH_WINDOW_MATRIX.md) supplies
+the OS-process/RabbitMQ/MinIO evidence; large multi-process chaos remains with
+TF-0706.

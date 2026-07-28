@@ -62,9 +62,10 @@ the large binary data plane.
 - Healthy-broker acknowledgement crash windows now have live pre-ack,
   post-commit/pre-ack, and shutdown-ownership evidence. A managed
   Testcontainers/Toxiproxy test also proves bounded unavailable startup and
-  single-broker restart recovery during active work. The broader Phase 7
-  process-kill/chaos matrix and remaining operational gates must pass before
-  production-strength RabbitMQ claims are made.
+  single-broker restart recovery during active work. The named Phase 7
+  process-kill matrix is automated; the broader chaos workload and remaining
+  operational gates must pass before production-strength RabbitMQ claims are
+  made.
 - Coordinator submission intake uses one dedicated RabbitMQ channel with
   route-local prefetch `1`; task-result and heartbeat intake retain configured
   credit. This is transport-owned flow control, while admission and durable
