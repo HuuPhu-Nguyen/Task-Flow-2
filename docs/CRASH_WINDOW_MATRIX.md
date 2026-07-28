@@ -52,5 +52,8 @@ This proves abrupt single-child JVM death at the named single-coordinator
 windows. It does not prove power-loss disk semantics beyond SQLite/MinIO/
 RabbitMQ durability contracts, multi-coordinator fencing, clustered broker or
 object-store failover, arbitrary external plugin side effects, or large
-randomized workloads. The 100,000-task multi-process chaos workload remains
-TF-0706.
+randomized workloads. The separate
+[100,000-task correctness-chaos experiment](reports/correctness-chaos.md)
+adds seeded mixed-failure coverage, but its coordinator and executor failures
+are component restarts inside one test JVM rather than additional process-kill
+windows.

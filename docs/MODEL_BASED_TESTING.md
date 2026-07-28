@@ -80,5 +80,7 @@ outbox publication/replay decisions. It does not kill an operating-system
 process, run RabbitMQ or MinIO, inject network partitions, execute native
 plugins, prove retry exhaustion, or shrink a failing sequence automatically.
 The separate [process crash-window matrix](CRASH_WINDOW_MATRIX.md) supplies
-the OS-process/RabbitMQ/MinIO evidence; large multi-process chaos remains with
-TF-0706.
+the OS-process/RabbitMQ/MinIO evidence. The separate
+[100,000-task correctness-chaos experiment](reports/correctness-chaos.md)
+supplies seeded mixed-failure evidence with a real restarted RabbitMQ container
+and in-JVM coordinator/executor component restarts.
