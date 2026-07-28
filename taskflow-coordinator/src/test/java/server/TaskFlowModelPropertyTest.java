@@ -303,10 +303,10 @@ class TaskFlowModelPropertyTest {
             DeliveryDisposition disposition = sendAndAwait(result, current.workerId());
             assertEquals(DeliveryDisposition.ACK_SUCCESS, disposition);
             lastSuccessfulResult = result;
-            drainPublications();
             if (!model.terminal()) {
                 awaitNewAssignment();
             }
+            drainPublications();
             trace(
                     Event.SUCCESS_RESULT.name(),
                     "committed task_id=" + current.taskId()
@@ -501,6 +501,10 @@ class TaskFlowModelPropertyTest {
         }
 
         private void awaitNewAssignment() throws Exception {
+            assertTrue(
+                    model.currentAssignment() == null,
+                    "Cannot await a new assignment while the model already owns one"
+            );
             for (int observed = 0; observed < MAX_PUBLICATIONS_PER_EVENT; observed++) {
                 RecordingOutboxPublisher.Publication publication =
                         output.awaitPublication(AWAIT_SECONDS, TimeUnit.SECONDS);
