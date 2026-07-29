@@ -136,7 +136,7 @@ nodes may enable the requester role, executor role, or both.
 ## Runtime Direction
 
 - RabbitMQ is the sole supported runtime transport for the coordinator, command-line participants, and JavaFX GUI participants. Entry points start it directly and do not read a transport selector.
-- RabbitMQ live broker tests remain opt-in for local runs, and RabbitMQ is still transitional until its remaining documented support-promotion gates are implemented and tested. GitHub Actions runs a dedicated RabbitMQ integration job for the focused live broker gates.
+- RabbitMQ live broker tests remain opt-in for local runs, and RabbitMQ is still transitional until its remaining documented support-promotion gates are implemented and tested. GitHub Actions runs focused live broker contracts in push-integration and managed broker/process faults in scheduled chaos; [`CI_EVIDENCE_TIERS.md`](CI_EVIDENCE_TIERS.md) records the exact split.
 - `docs/RUNTIME_STRATEGY.md` records the sole-transport decision, migration boundary, and remaining production-readiness gates.
 
 ## RabbitMQ Publication

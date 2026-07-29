@@ -1,0 +1,65 @@
+name: Manual Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      benchmark:
+        description: Report-grade verifier to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - correctness
+          - scaling
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: manual-benchmarks
+  cancel-in-progress: false
+
+jobs:
+  report-grade-benchmarks:
+    name: Report-grade ${{ inputs.benchmark }}
+    runs-on: [self-hosted, windows, x64, taskflow-benchmark]
+    timeout-minutes: 360
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Run 100,000-task correctness report
+        if: ${{ inputs.benchmark == 'correctness' || inputs.benchmark == 'all' }}
+        shell: pwsh
+        run: >
+          .\scripts\verify-correctness-chaos.ps1
+          -Overwrite
+          -OutputDirectory target/correctness-chaos
+
+      - name: Run scaling report
+        if: ${{ inputs.benchmark == 'scaling' || inputs.benchmark == 'all' }}
+        shell: pwsh
+        run: >
+          .\scripts\verify-scaling.ps1
+          -OutputDirectory target/scaling
+
+      - name: Retain report-grade raw evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: manual-benchmarks-${{ inputs.benchmark }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/correctness-chaos/**
+            target/scaling/**
+            **/target/surefire-reports/**
+          if-no-files-found: error
+          retention-days: 90

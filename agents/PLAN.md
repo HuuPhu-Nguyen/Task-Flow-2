@@ -2,141 +2,131 @@
 
 ## Active task
 
-- Queue ID: TF-0709
-- Status: Complete
-- Goal: add one clean-tree, opt-in overload experiment that submits new work
-  faster than the coordinator can process until configured limits activate,
-  then publish exact heap, admission, progress, recovery, mailbox, broker
-  queue, and durable outbox evidence in `docs/reports/overload.md`.
-- Invariants protected: durable preservation of accepted work (I1),
-  generation-fenced single authoritative completion (I2/I3), monotonic
-  terminal state (I4), durable replayable outbound intent (I5), duplicate and
-  redelivery tolerance (I6), bounded coordinator memory and work queues (I7),
-  and result/expiry/admission progress after pressure falls under I10's stated
-  assumptions.
-- Failure mode: sustained `JOB_SUBMIT` pressure can otherwise hide unbounded
-  heap retention, silently lose accepted work, omit typed overload responses,
-  exclude accepted `TASK_RESULT` or lease-expiry processing, obscure mailbox
-  and durable-outbox pressure, or require a coordinator restart before new
-  admission resumes.
-- Expected files/modules: bounded experiment configuration and metric
-  calculations plus an opt-in coordinator experiment in
-  `taskflow-coordinator` test sources; a clean-tree PowerShell verifier;
-  ignored raw evidence under `target/overload/`;
-  `docs/reports/overload.md`; and the active handoff/evidence files.
-- Durable-state changes: none. The harness uses a disposable schema-v14
-  SQLite database through production `DatabaseManager`, and independently
-  audits accepted jobs/tasks, attempt generations, terminal states, and
-  broker-outbox rows before treating the run as evidence.
-- Protocol changes: none. The experiment uses current protocol-v2
-  `JOB_SUBMIT`, `TASK_ASSIGN`, `TASK_RESULT`, and typed
-  `JOB_RESULT.admissionRejection` messages through the supported RabbitMQ
-  transport.
-- Tests required: configuration bounds and fixed report-grade constants;
-  submission/mailbox saturation; exact typed limit responses; no unexplained
-  accepted, rejected, or broker-owned submission; accepted result commitment
-  and lease expiry while submission pressure remains; retained-heap plateau;
-  observable configured mailbox and outbox thresholds; confirmed outbox
-  replay; durable completion of every accepted job; fresh admission after
-  pressure clears without restart; raw-property completeness/checksums;
-  focused/live tests; full Maven and diff gates.
-- Documentation required: `docs/reports/overload.md` with tested commit,
-  command, hardware/JVM/container versions, fixed workload and thresholds,
-  metric boundaries, exact results, raw links/checksums, durable audits,
-  bottlenecks, and honest limitations. Update guarantees/failure-model
-  evidence only where this experiment adds direct proof.
-- Known non-goals: new limits or adaptive throttling, changing public defaults,
-  a target RPS or production sizing claim, multi-host or multi-coordinator
-  overload, clustered RabbitMQ, native-plugin or object-store load, arbitrary
-  payload distributions, GC-latency guarantees, and exactly-once plugin side
-  effects.
+- Queue ID: TF-0710
+- Status: Local verification complete; awaiting commit, push, and remote CI
+- Goal: split repository automation into explicit push-fast,
+  push-integration, scheduled-chaos, and manual-benchmark evidence tiers
+  without moving long nondeterministic report runs into the push gate.
+- Invariants protected: all I1-I10 evidence remains reachable in an
+  appropriate tier; in particular, push-fast retains the deterministic state
+  machine/model and architecture guards, push-integration retains adapter
+  durability/delivery contracts, and scheduled failures retain exact seeds
+  and raw logs for replay.
+- Failure mode: the current two-job workflow runs a broad default reactor and
+  a mixed RabbitMQ selector only on `main` pushes. It does not make the
+  compilation/unit/architecture boundary explicit, does not separately gate
+  SQLite and MinIO contracts, mixes broker fault recovery into ordinary
+  integration, provides no scheduled larger-seed/fault tier, and provides no
+  deliberate manual entry point for report-grade correctness/scaling runs.
+- Expected files/modules: `.github/workflows/ci.yml`; new scheduled-chaos and
+  manual-benchmark workflow files; bounded model-test run configuration under
+  `taskflow-coordinator` test sources; `docs/CI_EVIDENCE_TIERS.md`;
+  model/RabbitMQ/README evidence links; and active handoff files.
+- Durable-state changes: none. SQLite remains schema v14 and the task changes
+  only test-harness configuration and automation.
+- Protocol/runtime changes: none. No wire message, routing topology, runtime
+  dependency, admission default, scheduler behavior, or supported guarantee
+  changes.
+- Tests required: default and expanded model-run configuration bounds;
+  unchanged push-fast seed behavior; a locally executable push-fast selector;
+  SQLite migration/persistence contract; real MinIO contract; managed and
+  live RabbitMQ integration selectors; reduced scheduled correctness-chaos
+  calibration with explicit seed plus broker/coordinator/executor faults;
+  workflow YAML parsing/structural audit; full Maven and diff gates.
+- Documentation required: one tier matrix naming trigger, runner,
+  selectors/workload, expected duration class, artifacts/retention,
+  reproduction command, and limitations. Update existing model/RabbitMQ/README
+  claims so broker recovery is not still described as an ordinary push job.
+- Known non-goals: changing production behavior, running 100,000-task or
+  scaling reports on every push, claiming GitHub-hosted performance numbers
+  are comparable to the report host, adding JavaFX window-driving CI, adding
+  an external CI service, or silently requiring a self-hosted benchmark
+  runner that is not documented.
 
-## Smallest design and abstraction questions
+## Smallest design and tier decisions
 
-1. Keep the experiment opt-in and outside Surefire's default naming patterns,
-   matching the Phase 7 correctness, scaling, and recovery harnesses. Normal
-   CI gets deterministic configuration/metric tests; the report command owns
-   Docker and the sustained workload.
-2. Run the production scheduler, priority mailbox, admission policy,
-   schema-v14 SQLite store, RabbitMQ transport, protocol-v2 envelopes, and
-   outbox replayer. A test-only gated `BrokerOutboxPublisher` controls one
-   existing publication boundary; it does not introduce a production
-   abstraction.
-3. Hold the first flood assignment publication long enough to fill the
-   configured ordinary lane and leave submissions broker-owned. Publish one
-   already accepted result into the fixed result reserve and allow one
-   already accepted lease to become due before releasing the scheduler.
-4. While the scheduler is held, seed exactly the configured pending-outbox
-   threshold through `DatabaseManager`; the already accepted gated assignment
-   is the documented one-row overshoot because the threshold stops new
-   admission rather than already accepted durable intent. Release publication,
-   defer replay, and require every flood submission to receive the existing
-   typed outbox-limit response.
-5. Define retained-heap plateau before measurement as the span of the final
-   three post-GC wave samples under unchanged fixed pressure. Report both the
-   configured fixed heap and observed sample range; do not interpret the
-   result as production GC guidance.
-6. Observe scheduler mailbox depth/capacity directly, broker queue depth from
-   the real container, and pending outbox from SQLite. The outbox admission
-   threshold is not misrepresented as a universal hard row cap: already
-   accepted retries/finalization may add durable intent after new admission
-   stops.
-7. Keep current assignment/result publication live while the seeded backlog
-   holds new admission closed. After the fixed waves, replay every pending row
-   through the production replayer, audit all accepted jobs terminal and all
-   outbox rows published, then submit and complete one fresh job without
-   restarting the scheduler.
+1. Keep `.github/workflows/ci.yml` as the required push workflow, but remove
+   its `main`-only filter so every branch push and pull request receives both
+   named push tiers.
+2. Push-fast compiles all production/test sources, runs every default test
+   except explicitly infrastructure/fault/report classes, then runs the exact
+   architecture classes and bounded `TaskFlowModelPropertyTest` seed set as
+   separate visible steps. Experiments remain outside Surefire defaults.
+3. Push-integration runs the SQLite schema/migration and reusable persistence
+   contracts, the real Testcontainers MinIO contract, all focused non-chaos
+   integration/live tests, the reusable RabbitMQ/Testcontainers contract, and
+   retained command-line/GUI broker-adapter tests. The existing service
+   RabbitMQ stays pinned and health checked.
+4. Move `RabbitMqBrokerRecoveryIntegrationTest` and
+   `CrashWindowMatrixTest` to scheduled chaos. Add one reduced, non-report
+   `CorrectnessChaosExperiment` run so the scheduled tier actually includes
+   broker, coordinator-component, and executor-component failure injection
+   without rerunning the manual 100,000-task report.
+5. Make the model harness accept bounded explicit seed-start/count/step
+   properties. Defaults remain the checked-in eight seeds × 32 generated
+   steps; scheduled chaos uses more seeds and steps. Every failure continues
+   to print decimal/hex seed and trace.
+6. Scheduled chaos derives a reproducible decimal seed, records commit,
+   seed, bounds, and event source before execution, and uploads that file,
+   experiment raw evidence, and all Surefire reports with `if: always()`.
+7. Manual benchmarks use `workflow_dispatch` choices on an explicitly
+   documented `[self-hosted, windows, x64, taskflow-benchmark]` runner because
+   the clean-tree report verifiers and machine-profile evidence are
+   Windows/PowerShell oriented. They invoke the unchanged report-grade
+   correctness and scaling verifiers and retain raw bundles. An absent runner
+   means the requested manual job queues; it does not weaken push CI.
+8. Use only `contents: read`, official checkout/setup-java/upload-artifact
+   actions, bounded timeouts, unique artifact names, and explicit retention.
+   Do not use path filters that could leave a required check pending.
 
 ## Ordered implementation and verification
 
-1. Add bounded overload experiment configuration and metric calculations with
-   deterministic normal tests.
-2. Add the opt-in real-RabbitMQ/SQLite experiment and its narrow test-only
-   publication gate, raw metrics, database, broker-depth, response, and
-   assignment evidence.
-3. Add the clean-tree PowerShell wrapper to invoke the fixed-heap report run,
-   validate exact counts/bounds/integrity, and generate a checksum manifest.
-4. Run focused small calibrations and correct harness-only defects without
-   publishing calibration values.
-5. Run focused tests, affected live RabbitMQ suites, full Maven, and diff
-   audits; commit and push the coherent harness and verify the remote hash.
-6. Run the clean report-grade command against that exact pushed harness
-   revision and independently audit the raw properties, SQLite state, line
-   counts, broker drain, and checksums.
-7. Write `docs/reports/overload.md` from measured evidence without inventing a
-   target RPS or broader guarantee.
-8. Run report-link/reference checks, required live selectors,
-   `git diff --check`, and the full Maven reactor; commit/push the report,
-   verify remote hash and CI, then update queue/status/log completion evidence.
+1. Add bounded model-run configuration with tests, preserving the exact
+   existing push-fast defaults and seed diagnostics.
+2. Rewrite `ci.yml` into visible push-fast and push-integration jobs and
+   retain the RabbitMQ service health boundary and participant adapter tests.
+3. Add weekly/manual scheduled-chaos automation with derived/explicit seed,
+   reduced failure workload, expanded model sequences, and always-uploaded
+   logs/raw evidence.
+4. Add the manual report-grade correctness/scaling dispatcher for the labeled
+   benchmark runner, without triggering it during ordinary validation.
+5. Document the four tiers and update stale README, model, RabbitMQ, failure
+   model, and execution-guarantee references.
+6. Parse and structurally audit every workflow; run configuration tests,
+   push-fast locally, the complete push-integration selectors against the
+   required broker/Docker prerequisites, and a reduced scheduled-chaos
+   calibration.
+7. Run the full Maven reactor, documentation/link checks, dependency/diff
+   audits, and workflow selector/cardinality checks.
+8. Commit and push the coherent tier split, verify the exact remote hash and
+   new GitHub push-fast/push-integration jobs, then update queue/status/log
+   completion evidence. Scheduled and manual triggers are verified
+   structurally and by local equivalent commands; do not claim a scheduled or
+   self-hosted run that was not actually dispatched.
 
-## Report-grade evidence captured
+## Local verification evidence
 
-- Harness revision `85d431e96cbfd2f7b05ad1f49bc7dd1df6e1a6cd`
-  was clean, pushed, and matched `task-flow-2/main` before measurement.
-- `.\scripts\verify-overload.ps1` passed in 282.143 seconds with a real
-  `rabbitmq:3.13-management` container and schema-v14 SQLite.
-- Exact accounting was 1,004 submissions: 4 accepted/completed and 1,000
-  unique typed `MAX_PENDING_OUTBOX_ROWS` rejections.
-- Ordinary/result mailbox high water was 1/1 at capacities 1/1, broker-ready
-  submission high water was 32, pending-outbox high water was the documented
-  17 rows at the 16-row new-admission threshold, and final broker/outbox
-  depths were zero.
-- Four current results committed while four expired generations were
-  retry-scheduled; all four jobs/tasks became durable `COMPLETED`, all 28
-  outbox rows were published, and a fresh post-pressure job completed with
-  restart count zero.
-- The final-three retained-heap samples spanned 46,048 bytes with a maximum
-  of 17,803,432 bytes under the fixed 256 MiB SerialGC experiment JVM.
-- Independent response/assignment cardinality, read-only SQLite integrity and
-  attempt audit, and all nine manifest checksums matched. The checksum
-  manifest SHA-256 is
-  `334848021235561242c2163bdb354489a29f3623122bd07a896f8ca5b929740e`.
-- Report links and diff checks passed; the prescribed transport and
-  coordinator RabbitMQ live selectors passed 8/8 and 10/10, and the complete
-  25-module Maven reactor passed after report authoring.
-- Report commit `6c6d18bc4c07478cb3c0eb5b6d3f29f5b20a3154`
-  was pushed to `task-flow-2/main`, and `git ls-remote` matched the local hash.
-- GitHub Actions run `30433722421` completed successfully for that exact
-  report hash: both `Maven Tests` and `RabbitMQ Integration Tests` passed.
-- TF-0709 completion is ready for its final pushed completion record and
-  local queue/status/log handoff update.
+- Official Docker `actionlint` passed all three workflows with the declared
+  custom self-hosted label; both PowerShell verifier files parse, and their
+  workflow parameter contracts match.
+- The exact push-fast compilation, unit/component, architecture, and default
+  model commands passed.
+- The exact push-integration selector passed SQLite 81/81, MinIO 16/16,
+  RabbitMQ contract/live 17/17, coordinator live/integration 14/14,
+  command-line participant 14/14, and GUI adapter 16/16 tests. The repository
+  broker was returned to stopped.
+- The expanded 32-seed x 128-step model run passed. The scheduled managed
+  broker/process selector passed 10/10. The exact 10,000-task seeded
+  mixed-failure workload passed with 10,000 completions, one broker restart,
+  one coordinator-component restart, two executor terminations, 100 delayed
+  results, and no pending outbox row at completion.
+- A separate 100-task calibration proved the scheduled workflow's absolute
+  output path writes its retained evidence under the repository-root artifact
+  tree.
+- The focused model/configuration suite passed 5/5; the final complete
+  25-module `.\mvnw.cmd test` reactor passed; 169 touched-document local links,
+  workflow lint, PowerShell parsing, `git diff --check`, and container cleanup
+  passed.
+- The manual benchmark workflow was not dispatched because no matching
+  self-hosted runner is assumed. Its triggers, labels, scripts, parameters,
+  timeouts, and artifact paths were verified structurally.

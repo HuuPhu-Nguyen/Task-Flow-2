@@ -63,41 +63,50 @@ class TaskFlowModelPropertyTest {
     private static final String TASK_TYPE = "RABBITMQ_TEST_TASK";
     private static final String REQUESTER_ID = "model-requester";
     private static final int TASK_COUNT = 3;
-    private static final int GENERATED_STEPS_PER_SEED = 32;
-    private static final long[] CI_SEEDS = {
-            3_520_704_001L,
-            3_520_704_017L,
-            3_520_704_033L,
-            3_520_704_049L,
-            3_520_704_065L,
-            3_520_704_081L,
-            3_520_704_097L,
-            3_520_704_113L
-    };
 
     @TempDir
     Path tempDir;
 
     @Test
     void generatedSequencesPreserveDurableSchedulerProperties() throws Exception {
-        for (int index = 0; index < CI_SEEDS.length; index++) {
-            long seed = CI_SEEDS[index];
-            runWithSeed(seed, index, true);
+        TaskFlowModelRunConfig config =
+                TaskFlowModelRunConfig.fromSystemProperties();
+        for (int index = 0; index < config.generatedSeeds().size(); index++) {
+            long seed = config.generatedSeeds().get(index);
+            runWithSeed(
+                    seed,
+                    index,
+                    true,
+                    config.generatedStepsPerSeed()
+            );
         }
     }
 
     @Test
     void duplicateEventsDoNotDuplicateAuthoritativeTransitions() throws Exception {
-        runWithSeed(3_520_704_129L, CI_SEEDS.length, false);
+        TaskFlowModelRunConfig config =
+                TaskFlowModelRunConfig.fromSystemProperties();
+        runWithSeed(
+                config.duplicateScenarioSeed(),
+                config.generatedSeeds().size(),
+                false,
+                config.generatedStepsPerSeed()
+        );
     }
 
-    private void runWithSeed(long seed, int index, boolean generated) throws Exception {
+    private void runWithSeed(
+            long seed,
+            int index,
+            boolean generated,
+            int generatedSteps
+    ) throws Exception {
         ModelHarness harness = null;
         try {
             harness = new ModelHarness(
                     tempDir.resolve("model-" + index + ".db"),
                     "model-job-" + index,
-                    seed
+                    seed,
+                    generatedSteps
             );
             try (ModelHarness closeable = harness) {
                 if (generated) {
@@ -146,6 +155,7 @@ class TaskFlowModelPropertyTest {
         private final RecordingOutboxPublisher output =
                 new RecordingOutboxPublisher(PUBLICATION_CAPACITY);
         private final ReferenceModel model;
+        private final int generatedSteps;
         private final List<String> trace = new ArrayList<>();
         private final Map<String, Integer> previousActualAttempts =
                 new LinkedHashMap<>();
@@ -162,12 +172,18 @@ class TaskFlowModelPropertyTest {
         private Thread schedulerThread;
         private TaskResultMessage lastSuccessfulResult;
 
-        private ModelHarness(Path databasePath, String jobId, long seed)
+        private ModelHarness(
+                Path databasePath,
+                String jobId,
+                long seed,
+                int generatedSteps
+        )
                 throws Exception {
             this.databasePath = databasePath;
             this.jobId = jobId;
             this.random = new SplittableRandom(seed);
             this.model = new ReferenceModel(jobId, TASK_COUNT);
+            this.generatedSteps = generatedSteps;
             this.database = new DatabaseManager(databasePath.toString());
             try {
                 startScheduler(null);
@@ -184,7 +200,7 @@ class TaskFlowModelPropertyTest {
         private void runGeneratedSequence() throws Exception {
             runRequiredPrefix();
             Event[] events = Event.values();
-            for (int step = 0; step < GENERATED_STEPS_PER_SEED; step++) {
+            for (int step = 0; step < generatedSteps; step++) {
                 apply(events[random.nextInt(events.length)]);
             }
             finishAfterFailuresStop();

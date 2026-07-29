@@ -1,0 +1,126 @@
+name: Scheduled Chaos
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Decimal seed start for every scheduled-chaos family
+        required: true
+        default: "55707398"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-chaos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scheduled-chaos:
+    name: Scheduled chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Record bounded run identity and seed
+        shell: bash
+        env:
+          DISPATCH_SEED: ${{ inputs.seed }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            seed="$DISPATCH_SEED"
+          else
+            seed=$((55707398 + GITHUB_RUN_NUMBER))
+          fi
+          if [[ ! "$seed" =~ ^[0-9]+$ ]]; then
+            echo "Scheduled-chaos seed must be a decimal integer: $seed" >&2
+            exit 1
+          fi
+          mkdir -p target/scheduled-chaos
+          {
+            echo "commit=$GITHUB_SHA"
+            echo "event=$EVENT_NAME"
+            echo "seed=$seed"
+            echo "modelSeedCount=32"
+            echo "modelStepsPerSeed=128"
+            echo "correctnessTaskCount=10000"
+            echo "correctnessTasksPerJob=250"
+            echo "correctnessWorkerCount=4"
+            echo "correctnessDelayedResults=100"
+            echo "correctnessWorkerTerminations=2"
+            echo "correctnessBrokerRestartAfter=3333"
+            echo "correctnessCoordinatorRestartAfter=6666"
+          } | tee target/scheduled-chaos/run.properties
+          echo "TASKFLOW_CHAOS_SEED=$seed" >> "$GITHUB_ENV"
+
+      - name: Run expanded generated state-machine sequences
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -pl taskflow-coordinator
+          -am
+          -Dtest=TaskFlowModelPropertyTest
+          -Dtaskflow.model.seedStart="${TASKFLOW_CHAOS_SEED}"
+          -Dtaskflow.model.seedCount=32
+          -Dtaskflow.model.stepsPerSeed=128
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
+
+      - name: Run managed broker and process fault suites
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -pl taskflow-coordinator
+          -am
+          -Dtaskflow.rabbitmq.live=true
+          -Dtest=RabbitMqBrokerRecoveryIntegrationTest,CrashWindowMatrixTest
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
+        env:
+          TASKFLOW_RABBITMQ_LIVE_TEST: "true"
+
+      - name: Run reduced seeded mixed-failure chaos
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -pl taskflow-coordinator
+          -am
+          -Dtest=CorrectnessChaosExperiment
+          -Dtaskflow.chaos.reportGrade=false
+          -Dtaskflow.chaos.seed="${TASKFLOW_CHAOS_SEED}"
+          -Dtaskflow.chaos.tasks=10000
+          -Dtaskflow.chaos.tasksPerJob=250
+          -Dtaskflow.chaos.workers=4
+          -Dtaskflow.chaos.duplicateBasisPoints=500
+          -Dtaskflow.chaos.delayedResults=100
+          -Dtaskflow.chaos.workerTerminations=2
+          -Dtaskflow.chaos.brokerRestartAfter=3333
+          -Dtaskflow.chaos.coordinatorRestartAfter=6666
+          -Dtaskflow.chaos.leaseMillis=2000
+          -Dtaskflow.chaos.delayedResultMillis=2500
+          -Dtaskflow.chaos.timeoutSeconds=900
+          -Dtaskflow.chaos.output="${GITHUB_WORKSPACE}/target/scheduled-chaos/correctness"
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
+
+      - name: Retain seed, raw evidence, and failure logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduled-chaos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/scheduled-chaos/**
+            **/target/surefire-reports/**
+          if-no-files-found: error
+          retention-days: 30

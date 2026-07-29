@@ -195,11 +195,13 @@ The current RabbitMQ path includes:
   after a broker-process restart; and persistence of durable shared topology
   plus a queued persistent message across a second restart. It also inspects
   peer endpoints as exclusive, auto-delete, and non-durable.
-- A dedicated GitHub Actions RabbitMQ integration job starts a
+- GitHub Actions `Push-integration` starts a
   `rabbitmq:3.13-management` service container and runs the focused live
-  transport/coordinator gates, including the reusable managed contract and
-  the coordinator managed stop/restart scenario, plus command-line participant
-  and JavaFX GUI RabbitMQ service-adapter tests.
+  transport/coordinator gates, including the reusable managed contract, plus
+  command-line participant and JavaFX GUI RabbitMQ service-adapter tests.
+  Scheduled chaos owns the coordinator managed stop/restart and process-kill
+  suites. The exact boundary is in
+  [`CI_EVIDENCE_TIERS.md`](CI_EVIDENCE_TIERS.md).
 - Focused service-adapter failure-path tests cover command-line requester
   publish exceptions, JavaFX RabbitMQ startup heartbeat publish failure,
   transient task-result publish failure, deterministic task-execution poison
@@ -283,10 +285,10 @@ Then close remaining durable outbox/replay decisions:
 
 Then promote evidence:
 
-- Keep the RabbitMQ-backed CI profile passing for focused live integration
-  gates, including delayed retry/final-quarantine, DLQ and quarantine redrive,
-  the managed broker stop/restart test, and the focused broker-failure
-  service-adapter tests.
+- Keep the RabbitMQ-backed push-integration profile passing for delayed
+  retry/final-quarantine, DLQ and quarantine redrive, and focused
+  broker-failure service-adapter tests. Keep the managed coordinator broker
+  stop/restart and process-fault suites passing in scheduled chaos.
 - Keep Docker Compose and manual or automated GUI evidence aligned with the
   README path.
 - Update public docs so quick-start, demos, limitations, execution guarantees,

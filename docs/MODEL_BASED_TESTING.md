@@ -45,9 +45,9 @@ by the complete event trace.
 
 ## Bounded CI set
 
-The push-fast CI job runs the focused class explicitly in addition to the full
-reactor. The generated method uses exactly 32 random steps for each of these
-eight checked-in seeds:
+The push-fast CI job runs the focused class explicitly after its
+non-infrastructure unit/component selector. The generated method defaults to
+exactly 32 random steps for each of these eight checked-in seeds:
 
 ```text
 3520704001
@@ -70,6 +70,30 @@ Run the same CI evidence locally:
 ```powershell
 .\mvnw.cmd --batch-mode --no-transfer-progress -pl taskflow-coordinator -am "-Dtest=TaskFlowModelPropertyTest" "-Dsurefire.failIfNoSpecifiedTests=false" test
 ```
+
+Scheduled chaos expands this same harness to 32 seeds × 128 generated steps.
+The bounded overrides are:
+
+- `taskflow.model.seedStart`;
+- `taskflow.model.seedCount` in `[1, 256]`; and
+- `taskflow.model.stepsPerSeed` in `[1, 1024]`.
+
+Generated seeds advance by 16, and the duplicate-focused scenario receives
+the next seed after that range. Reproduce the scheduled model boundary with:
+
+```powershell
+.\mvnw.cmd --batch-mode --no-transfer-progress `
+  -pl taskflow-coordinator -am `
+  "-Dtest=TaskFlowModelPropertyTest" `
+  "-Dtaskflow.model.seedStart=55707398" `
+  "-Dtaskflow.model.seedCount=32" `
+  "-Dtaskflow.model.stepsPerSeed=128" `
+  "-Dsurefire.failIfNoSpecifiedTests=false" test
+```
+
+The scheduled workflow records the actual derived or dispatched seed before
+execution and uploads that identity plus all Surefire reports even when a test
+fails. See [`CI_EVIDENCE_TIERS.md`](CI_EVIDENCE_TIERS.md).
 
 ## Limits
 

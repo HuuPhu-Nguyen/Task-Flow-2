@@ -2,8 +2,6 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
   pull_request:
   workflow_dispatch:
 
@@ -11,12 +9,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: push-evidence-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Maven Tests
+  push-fast:
+    name: Push-fast
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -31,10 +29,27 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Run full test suite
-        run: bash ./mvnw --batch-mode --no-transfer-progress test
+      - name: Compile production and test sources
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -DskipTests
+          test-compile
+
+      - name: Run unit and component tests
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -Dtest='!*IntegrationTest,!*LiveTest,!DatabaseManagerTest,!SqlitePersistenceContractTest,!MinioObjectStoreContractTest,!RabbitMqBrokerContractTest,!CrashWindowMatrixTest,!TaskFlowModelPropertyTest,!*ArchitectureTest,!*Experiment'
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
         env:
           TASKFLOW_RABBITMQ_LIVE_TEST: "false"
+
+      - name: Run architecture tests
+        run: >
+          bash ./mvnw --batch-mode --no-transfer-progress
+          -Dtest=ObjectStoreArchitectureTest,SchedulerArchitectureTest,RabbitMqOnlyRuntimeArchitectureTest
+          -Dsurefire.failIfNoSpecifiedTests=false
+          test
 
       - name: Run bounded scheduler model seed set
         run: >
@@ -48,10 +63,19 @@ jobs:
       - name: Check whitespace
         run: git diff-tree --check --no-commit-id --root -r HEAD
 
-  rabbitmq-integration:
-    name: RabbitMQ Integration Tests
+      - name: Retain push-fast failure reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: push-fast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: "**/target/surefire-reports/**"
+          if-no-files-found: ignore
+          retention-days: 14
+
+  push-integration:
+    name: Push-integration
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     services:
       rabbitmq:
@@ -79,13 +103,13 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Run RabbitMQ broker integration tests
+      - name: Run SQLite, MinIO, RabbitMQ, and participant contracts
         run: >
           bash ./mvnw --batch-mode --no-transfer-progress
-          -pl taskflow-transport-rabbitmq,taskflow-coordinator,taskflow-peer,taskflow-gui
+          -pl taskflow-persistence-sqlite,taskflow-objectstore-minio,taskflow-transport-rabbitmq,taskflow-coordinator,taskflow-peer,taskflow-gui
           -am
           -Dtaskflow.rabbitmq.live=true
-          -Dtest=RabbitMqBrokerContractTest,RabbitMqTransportLiveTest,RabbitMqCoordinatorLiveIntegrationTest,RabbitMqCoordinatorShutdownLiveIntegrationTest,RabbitMqBrokerRecoveryIntegrationTest,CrashWindowMatrixTest,PeerNodeTest,RabbitMqJobSubmissionClientTest,RabbitMqCoordinatorConnectionTest
+          -Dtest='*IntegrationTest,*LiveTest,DatabaseManagerTest,SqlitePersistenceContractTest,MinioObjectStoreContractTest,RabbitMqBrokerContractTest,PeerNodeTest,RabbitMqJobSubmissionClientTest,RabbitMqCoordinatorConnectionTest,!RabbitMqBrokerRecoveryIntegrationTest'
           -Dsurefire.failIfNoSpecifiedTests=false
           test
         env:
@@ -97,3 +121,12 @@ jobs:
           TASKFLOW_RABBITMQ_MANAGEMENT_USERNAME: guest
           TASKFLOW_RABBITMQ_MANAGEMENT_PASSWORD: guest
           TASKFLOW_RABBITMQ_LIVE_TEST: "true"
+
+      - name: Retain push-integration reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: push-integration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: "**/target/surefire-reports/**"
+          if-no-files-found: error
+          retention-days: 14

@@ -323,6 +323,10 @@ failover, or make ephemeral offline-peer routes durable.
   and hexadecimal seed plus the full event trace. See
   [`MODEL_BASED_TESTING.md`](MODEL_BASED_TESTING.md) for seeds, bounds, the
   reproduction command, and non-goals.
+- Scheduled chaos runs the same model with an explicit larger bounded
+  seed/step range, records the exact seed before execution, and retains
+  Surefire traces even on failure. See
+  [`CI_EVIDENCE_TIERS.md`](CI_EVIDENCE_TIERS.md).
 
 <a id="tf-0705--automate-the-crash-window-matrix"></a>
 ### TF-0705 — Process/failpoint crash-window proof
