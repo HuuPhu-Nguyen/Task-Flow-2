@@ -12,6 +12,10 @@ state, RabbitMQ transport, and optional MinIO/S3-compatible storage for large
 conversion payloads. The normative contract and its I1-I10 evidence ledger are
 in [Guarantees and non-goals](docs/GUARANTEES.md).
 
+A compact reviewer index maps the major claims to mechanisms, focused tests,
+reproducible reports/experiments, and explicit limits in the
+[claim-to-evidence matrix](docs/CLAIM_EVIDENCE.md).
+
 - **Durable acceptance and recovery.** An accepted job and its task set commit
   atomically; restart rebuilds accepted work from SQLite. The reusable
   [persistence contract](taskflow-core/src/test/java/server/db/PersistenceContractTest.java)
