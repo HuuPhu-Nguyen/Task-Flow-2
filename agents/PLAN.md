@@ -3,7 +3,7 @@
 ## Active task
 
 - Queue ID: TF-0709
-- Status: Active
+- Status: Complete
 - Goal: add one clean-tree, opt-in overload experiment that submits new work
   faster than the coordinator can process until configured limits activate,
   then publish exact heap, admission, progress, recovery, mailbox, broker
@@ -134,5 +134,9 @@
 - Report links and diff checks passed; the prescribed transport and
   coordinator RabbitMQ live selectors passed 8/8 and 10/10, and the complete
   25-module Maven reactor passed after report authoring.
-- Completion remains pending the report verification, pushed documentation
-  commit, remote hash/CI confirmation, and handoff-file updates in step 8.
+- Report commit `6c6d18bc4c07478cb3c0eb5b6d3f29f5b20a3154`
+  was pushed to `task-flow-2/main`, and `git ls-remote` matched the local hash.
+- GitHub Actions run `30433722421` completed successfully for that exact
+  report hash: both `Maven Tests` and `RabbitMQ Integration Tests` passed.
+- TF-0709 completion is ready for its final pushed completion record and
+  local queue/status/log handoff update.
