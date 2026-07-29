@@ -131,6 +131,10 @@ management.
   and
   `RabbitMqCoordinatorLiveIntegrationTest#submissionFloodPreservesAcceptedResultsAndRecoversAdmissionAgainstLiveBroker`
   prove independent result intake and end-to-end flood recovery.
+- The opt-in `OverloadExperiment` repeats those boundaries through production
+  RabbitMQ, scheduler, mailbox, admission, SQLite, and outbox-replay paths. Its
+  exact queue depths, typed responses, retained heap, accepted-work audit, and
+  no-restart recovery evidence are recorded in `reports/overload.md`.
 
 ## Remaining Deferred Adaptive Behavior
 

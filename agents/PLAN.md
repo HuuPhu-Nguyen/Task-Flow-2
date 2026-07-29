@@ -108,3 +108,31 @@
 8. Run report-link/reference checks, required live selectors,
    `git diff --check`, and the full Maven reactor; commit/push the report,
    verify remote hash and CI, then update queue/status/log completion evidence.
+
+## Report-grade evidence captured
+
+- Harness revision `85d431e96cbfd2f7b05ad1f49bc7dd1df6e1a6cd`
+  was clean, pushed, and matched `task-flow-2/main` before measurement.
+- `.\scripts\verify-overload.ps1` passed in 282.143 seconds with a real
+  `rabbitmq:3.13-management` container and schema-v14 SQLite.
+- Exact accounting was 1,004 submissions: 4 accepted/completed and 1,000
+  unique typed `MAX_PENDING_OUTBOX_ROWS` rejections.
+- Ordinary/result mailbox high water was 1/1 at capacities 1/1, broker-ready
+  submission high water was 32, pending-outbox high water was the documented
+  17 rows at the 16-row new-admission threshold, and final broker/outbox
+  depths were zero.
+- Four current results committed while four expired generations were
+  retry-scheduled; all four jobs/tasks became durable `COMPLETED`, all 28
+  outbox rows were published, and a fresh post-pressure job completed with
+  restart count zero.
+- The final-three retained-heap samples spanned 46,048 bytes with a maximum
+  of 17,803,432 bytes under the fixed 256 MiB SerialGC experiment JVM.
+- Independent response/assignment cardinality, read-only SQLite integrity and
+  attempt audit, and all nine manifest checksums matched. The checksum
+  manifest SHA-256 is
+  `334848021235561242c2163bdb354489a29f3623122bd07a896f8ca5b929740e`.
+- Report links and diff checks passed; the prescribed transport and
+  coordinator RabbitMQ live selectors passed 8/8 and 10/10, and the complete
+  25-module Maven reactor passed after report authoring.
+- Completion remains pending the report verification, pushed documentation
+  commit, remote hash/CI confirmation, and handoff-file updates in step 8.
