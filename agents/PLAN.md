@@ -3,7 +3,7 @@
 ## Active task
 
 - Queue ID: TF-0708
-- Status: In progress
+- Status: Complete
 - Goal: add one clean-tree, opt-in recovery experiment that measures worker
   failure detection, lease-expiry-to-reassignment, coordinator restart
   recovery, RabbitMQ restart recovery, reconstruction of 10,000 and 100,000
@@ -115,3 +115,20 @@
    `git diff --check`, and the full Maven reactor; commit/push the report,
    verify the remote hash and CI, then update queue/status/log completion
    evidence with TF-0709 still unstarted.
+
+## Completion evidence
+
+- Reproducible harness commit:
+  `9b313fd2794039a23cf2623d21d1c67a4a058908`.
+- Measured report commit:
+  `c30b85fb068dfe6f2b9240bc935517c6b1d03669`.
+- Both commits were pushed to `task-flow-2/main` and independently matched by
+  `git ls-remote`.
+- The clean `.\scripts\verify-recovery.ps1` report-grade run passed all fixed
+  workloads, property/count/bound checks, seven SQLite integrity audits, and
+  21 raw checksums. Independent `sqlite3` and checksum recalculation agreed.
+- Focused configuration tests, both prescribed RabbitMQ live suites,
+  the exact combined GitHub RabbitMQ selector, PowerShell parsing, local-link
+  validation, `git diff --check`, and two final full Maven reactors passed.
+- TF-0709 remains unstarted until this completion record is committed and
+  pushed.
