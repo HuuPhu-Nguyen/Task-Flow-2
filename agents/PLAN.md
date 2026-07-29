@@ -2,131 +2,100 @@
 
 ## Active task
 
-- Queue ID: TF-0710
-- Status: Local verification complete; awaiting commit, push, and remote CI
-- Goal: split repository automation into explicit push-fast,
-  push-integration, scheduled-chaos, and manual-benchmark evidence tiers
-  without moving long nondeterministic report runs into the push gate.
-- Invariants protected: all I1-I10 evidence remains reachable in an
-  appropriate tier; in particular, push-fast retains the deterministic state
-  machine/model and architecture guards, push-integration retains adapter
-  durability/delivery contracts, and scheduled failures retain exact seeds
-  and raw logs for replay.
-- Failure mode: the current two-job workflow runs a broad default reactor and
-  a mixed RabbitMQ selector only on `main` pushes. It does not make the
-  compilation/unit/architecture boundary explicit, does not separately gate
-  SQLite and MinIO contracts, mixes broker fault recovery into ordinary
-  integration, provides no scheduled larger-seed/fault tier, and provides no
-  deliberate manual entry point for report-grade correctness/scaling runs.
-- Expected files/modules: `.github/workflows/ci.yml`; new scheduled-chaos and
-  manual-benchmark workflow files; bounded model-test run configuration under
-  `taskflow-coordinator` test sources; `docs/CI_EVIDENCE_TIERS.md`;
-  model/RabbitMQ/README evidence links; and active handoff files.
-- Durable-state changes: none. SQLite remains schema v14 and the task changes
-  only test-harness configuration and automation.
-- Protocol/runtime changes: none. No wire message, routing topology, runtime
-  dependency, admission default, scheduler behavior, or supported guarantee
-  changes.
-- Tests required: default and expanded model-run configuration bounds;
-  unchanged push-fast seed behavior; a locally executable push-fast selector;
-  SQLite migration/persistence contract; real MinIO contract; managed and
-  live RabbitMQ integration selectors; reduced scheduled correctness-chaos
-  calibration with explicit seed plus broker/coordinator/executor faults;
-  workflow YAML parsing/structural audit; full Maven and diff gates.
-- Documentation required: one tier matrix naming trigger, runner,
-  selectors/workload, expected duration class, artifacts/retention,
-  reproduction command, and limitations. Update existing model/RabbitMQ/README
-  claims so broker recovery is not still described as an ordinary push job.
-- Known non-goals: changing production behavior, running 100,000-task or
-  scaling reports on every push, claiming GitHub-hosted performance numbers
-  are comparable to the report host, adding JavaFX window-driving CI, adding
-  an external CI service, or silently requiring a self-hosted benchmark
-  runner that is not documented.
+- Queue ID: TF-0801
+- Status: Verified; commit and remote gates pending
+- Goal: rewrite the root README into the required evidence-first order so a
+  technical reviewer sees the system definition, current guarantees,
+  non-goals, architecture, protocol, failure behavior, runnable proof, and
+  measured evidence before module or configuration detail.
+- Invariants protected: README claims must remain within the implemented and
+  tested I1-I10 boundaries; every reliability or quantitative statement must
+  point directly to a current test or report; limitations must remain explicit
+  enough that no at-least-once, durability, recovery, overload, or benchmark
+  statement becomes a production-readiness or exactly-once claim.
+- Failure mode: the current 1,184-line README opens with overview/module
+  vocabulary, repeats mechanism detail across many sections, delays the
+  runnable proof and reports, and contains reliability statements far from
+  their evidence. A reviewer can miss the authoritative architecture or read a
+  narrow test result as a broader production claim.
+- Expected files/modules: `README.md`, this active plan, and local-only
+  queue/status/log handoff files after completion.
+- Durable-state changes: none.
+- Protocol changes: none.
+- Tests required: audit the exact top-level section order; audit every
+  quantitative/reliability claim for a direct report or test link; validate all
+  local Markdown links and linked test/report files; reject unqualified
+  `production-ready` wording; run `git diff --check` and the complete Maven
+  reactor required by the working rules.
+- Documentation required: replace the root README while preserving the current
+  supported commands, explicit limits, and links to deeper authoritative docs.
+- Known non-goals: adding or changing runtime behavior, guarantees, defaults,
+  protocols, schemas, dependencies, benchmark results, report artifacts, or
+  configuration files; creating the additional invariant diagrams reserved
+  for TF-0802; creating the claim/evidence matrix reserved for TF-0803; or
+  changing the stale-result/demo workflow reserved for later tasks.
 
-## Smallest design and tier decisions
+## Smallest design and claim decisions
 
-1. Keep `.github/workflows/ci.yml` as the required push workflow, but remove
-   its `main`-only filter so every branch push and pull request receives both
-   named push tiers.
-2. Push-fast compiles all production/test sources, runs every default test
-   except explicitly infrastructure/fault/report classes, then runs the exact
-   architecture classes and bounded `TaskFlowModelPropertyTest` seed set as
-   separate visible steps. Experiments remain outside Surefire defaults.
-3. Push-integration runs the SQLite schema/migration and reusable persistence
-   contracts, the real Testcontainers MinIO contract, all focused non-chaos
-   integration/live tests, the reusable RabbitMQ/Testcontainers contract, and
-   retained command-line/GUI broker-adapter tests. The existing service
-   RabbitMQ stays pinned and health checked.
-4. Move `RabbitMqBrokerRecoveryIntegrationTest` and
-   `CrashWindowMatrixTest` to scheduled chaos. Add one reduced, non-report
-   `CorrectnessChaosExperiment` run so the scheduled tier actually includes
-   broker, coordinator-component, and executor-component failure injection
-   without rerunning the manual 100,000-task report.
-5. Make the model harness accept bounded explicit seed-start/count/step
-   properties. Defaults remain the checked-in eight seeds × 32 generated
-   steps; scheduled chaos uses more seeds and steps. Every failure continues
-   to print decimal/hex seed and trace.
-6. Scheduled chaos derives a reproducible decimal seed, records commit,
-   seed, bounds, and event source before execution, and uploads that file,
-   experiment raw evidence, and all Surefire reports with `if: always()`.
-7. Manual benchmarks use `workflow_dispatch` choices on an explicitly
-   documented `[self-hosted, windows, x64, taskflow-benchmark]` runner because
-   the clean-tree report verifiers and machine-profile evidence are
-   Windows/PowerShell oriented. They invoke the unchanged report-grade
-   correctness and scaling verifiers and retain raw bundles. An absent runner
-   means the requested manual job queues; it does not weaken push CI.
-8. Use only `contents: read`, official checkout/setup-java/upload-artifact
-   actions, bounded timeouts, unique artifact names, and explicit retention.
-   Do not use path filters that could leave a required check pending.
+1. Use the required opening wording and exactly twelve ordered top-level
+   sections after it: Guarantees; Non-goals; Architecture; Assignment/result
+   protocol; Failure/recovery; Quick start; stale-result demo; benchmark
+   evidence; module map; extension/plugin guide; operational commands; and
+   limitations/future work.
+2. Keep the existing component diagram because TF-0801 requires an
+   architecture diagram. Describe the assignment/result sequence as concise
+   ordered text so TF-0802 remains the owner of additional invariant-tied
+   diagrams.
+3. Link reliability claims directly to focused source tests or report
+   artifacts in the same bullet/table row. Link detailed contract wording to
+   `docs/GUARANTEES.md`, `docs/FAILURE_MODEL.md`, and related scope docs, but do
+   not treat a future-plan document as evidence.
+4. Keep exact report values only in one benchmark table, with the report link
+   in the same row and the report's one-host/synthetic-workload limitation
+   adjacent.
+5. Preserve the one-command Docker quick start and deterministic stale-result
+   proof near the top. Move detailed Maven/runtime/status/DLQ/MinIO/config/CI
+   commands into one compact operational section and link authoritative
+   documents instead of reproducing every environment variable.
+6. Keep the module map after measured evidence, as required. Summarize each
+   role/module in one line and retain compatibility terminology without
+   leading the README with it.
+7. State that RabbitMQ is the sole supported transport but remains
+   transitional and is not broadly production-ready. Keep exactly-once,
+   multi-coordinator, security, participant durability, GUI replay, object
+   retention, and performance-generalization non-goals explicit.
 
 ## Ordered implementation and verification
 
-1. Add bounded model-run configuration with tests, preserving the exact
-   existing push-fast defaults and seed diagnostics.
-2. Rewrite `ci.yml` into visible push-fast and push-integration jobs and
-   retain the RabbitMQ service health boundary and participant adapter tests.
-3. Add weekly/manual scheduled-chaos automation with derived/explicit seed,
-   reduced failure workload, expanded model sequences, and always-uploaded
-   logs/raw evidence.
-4. Add the manual report-grade correctness/scaling dispatcher for the labeled
-   benchmark runner, without triggering it during ordinary validation.
-5. Document the four tiers and update stale README, model, RabbitMQ, failure
-   model, and execution-guarantee references.
-6. Parse and structurally audit every workflow; run configuration tests,
-   push-fast locally, the complete push-integration selectors against the
-   required broker/Docker prerequisites, and a reduced scheduled-chaos
-   calibration.
-7. Run the full Maven reactor, documentation/link checks, dependency/diff
-   audits, and workflow selector/cardinality checks.
-8. Commit and push the coherent tier split, verify the exact remote hash and
-   new GitHub push-fast/push-integration jobs, then update queue/status/log
-   completion evidence. Scheduled and manual triggers are verified
-   structurally and by local equivalent commands; do not claim a scheduled or
-   self-hosted run that was not actually dispatched.
+1. Inventory current README commands, roles, supported workloads, reports,
+   guarantees, and limitations against their authoritative local sources.
+2. Rewrite `README.md` in the mandated order, deduplicating detailed
+   implementation prose into links while preserving verified commands.
+3. Run a structural audit for the twelve exact H2 headings and required
+   opening paragraph.
+4. Audit quantitative values and reliability phrases against direct
+   test/report links; audit `production-ready`, exactly-once, transport, and
+   authority wording.
+5. Validate every local README link and linked evidence target, then run
+   whitespace/diff checks.
+6. Run the complete `.\mvnw.cmd test` reactor, inspect the final diff/status,
+   commit one cohesive TF-0801 documentation change, push it, verify the exact
+   remote hash and both push-tier CI jobs, and update local handoff evidence.
 
-## Local verification evidence
+## Verification evidence so far
 
-- Official Docker `actionlint` passed all three workflows with the declared
-  custom self-hosted label; both PowerShell verifier files parse, and their
-  workflow parameter contracts match.
-- The exact push-fast compilation, unit/component, architecture, and default
-  model commands passed.
-- The exact push-integration selector passed SQLite 81/81, MinIO 16/16,
-  RabbitMQ contract/live 17/17, coordinator live/integration 14/14,
-  command-line participant 14/14, and GUI adapter 16/16 tests. The repository
-  broker was returned to stopped.
-- The expanded 32-seed x 128-step model run passed. The scheduled managed
-  broker/process selector passed 10/10. The exact 10,000-task seeded
-  mixed-failure workload passed with 10,000 completions, one broker restart,
-  one coordinator-component restart, two executor terminations, 100 delayed
-  results, and no pending outbox row at completion.
-- A separate 100-task calibration proved the scheduled workflow's absolute
-  output path writes its retained evidence under the repository-root artifact
-  tree.
-- The focused model/configuration suite passed 5/5; the final complete
-  25-module `.\mvnw.cmd test` reactor passed; 169 touched-document local links,
-  workflow lint, PowerShell parsing, `git diff --check`, and container cleanup
-  passed.
-- The manual benchmark workflow was not dispatched because no matching
-  self-hosted runner is assumed. Its triggers, labels, scripts, parameters,
-  timeouts, and artifact paths were verified structurally.
+- The README has the required opening definition followed by exactly twelve
+  ordered H2 sections matching the queue sequence.
+- All 82 Markdown links resolve locally or use an external URL; every linked
+  test and report target exists.
+- Exact correctness, scaling, recovery, and overload values match their
+  report artifacts.
+- Reliability and quantitative statements point to focused Java tests or
+  measured reports; the only `production-ready` occurrence is an explicit
+  narrow limitation.
+- `docker compose config --services` resolves the documented broker-backed
+  topology: `rabbitmq`, `coordinator`, `peer-a`, `peer-b`, and `submitter`.
+- The complete 25-module `.\mvnw.cmd test` reactor passed in 41.236 seconds,
+  including the real MinIO and RabbitMQ contract suites.
+- `git diff --check` passes. Staged-diff, commit, push, and remote CI gates
+  remain pending.
