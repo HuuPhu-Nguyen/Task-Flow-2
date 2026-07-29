@@ -90,6 +90,7 @@ flowchart LR
     Coordinator[Coordinator<br/>single authority]
     Mailbox[Bounded scheduler mailbox]
     Services[Assignment / result / lease<br/>completion / recovery]
+    Registry[Participant capacity registry]
     SQLite[(SQLite<br/>authoritative state)]
     Outbox[(SQLite outbox)]
     MinIO[(MinIO / S3-compatible<br/>large payloads)]
@@ -98,12 +99,15 @@ flowchart LR
     Requester -->|JOB_SUBMIT| RabbitMQ
     ExecutorA -->|PONG / TASK_RESULT| RabbitMQ
     ExecutorB -->|JOB_SUBMIT / PONG / TASK_RESULT| RabbitMQ
-    RabbitMQ -->|shared ingress routes| Coordinator
+    RabbitMQ -->|JOB_SUBMIT / TASK_RESULT| Coordinator
+    RabbitMQ -->|HEARTBEAT| Registry
     Coordinator --> Mailbox --> Services
+    Services <--> Registry
     Services --> SQLite
     Services --> Outbox
     Outbox -->|confirmed publish / replay| RabbitMQ
-    RabbitMQ -->|TASK_ASSIGN / JOB_RESULT| ExecutorA
+    RabbitMQ -->|JOB_RESULT| Requester
+    RabbitMQ -->|TASK_ASSIGN| ExecutorA
     RabbitMQ -->|TASK_ASSIGN / JOB_RESULT| ExecutorB
     Requester --> Plugins
     ExecutorA --> Plugins
@@ -118,6 +122,11 @@ Participants may have symmetric requester/executor capabilities but never
 share scheduling authority. This boundary is enforced by
 [RabbitMqOnlyRuntimeArchitectureTest](taskflow-coordinator/src/test/java/server/RabbitMqOnlyRuntimeArchitectureTest.java)
 and [SchedulerArchitectureTest](taskflow-core/src/test/java/server/scheduler/SchedulerArchitectureTest.java).
+
+Detailed implementation-matched views trace the component boundary, assignment
+outbox, result fence, restart recovery, staged-output lifecycle, and bounded
+scheduler/deadline flow to their protected I1-I10 invariants in
+[Architecture diagrams tied to invariants](docs/ARCHITECTURE_DIAGRAMS.md).
 
 RabbitMQ is the sole supported runtime transport. `taskflow-peer`, `PeerNode`,
 `peerId`, and related names remain compatibility vocabulary for participant

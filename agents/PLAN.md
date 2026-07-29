@@ -2,100 +2,102 @@
 
 ## Active task
 
-- Queue ID: TF-0801
+- Queue ID: TF-0802
 - Status: Verified; commit and remote gates pending
-- Goal: rewrite the root README into the required evidence-first order so a
-  technical reviewer sees the system definition, current guarantees,
-  non-goals, architecture, protocol, failure behavior, runnable proof, and
-  measured evidence before module or configuration detail.
-- Invariants protected: README claims must remain within the implemented and
-  tested I1-I10 boundaries; every reliability or quantitative statement must
-  point directly to a current test or report; limitations must remain explicit
-  enough that no at-least-once, durability, recovery, overload, or benchmark
-  statement becomes a production-readiness or exactly-once claim.
-- Failure mode: the current 1,184-line README opens with overview/module
-  vocabulary, repeats mechanism detail across many sections, delays the
-  runnable proof and reports, and contains reliability statements far from
-  their evidence. A reviewer can miss the authoritative architecture or read a
-  narrow test result as a broader production claim.
-- Expected files/modules: `README.md`, this active plan, and local-only
-  queue/status/log handoff files after completion.
+- Goal: add six reviewer-facing architecture diagrams that show the current
+  component boundary, assignment/outbox transaction, result fence, restart
+  recovery, staged object lifecycle, and bounded scheduler/deadline flow while
+  naming the exact invariants each flow protects.
+- Invariants protected: the diagrams must accurately trace I1 durable
+  acceptance, I2 single result authority, I3 assignment fencing, I4 monotonic
+  terminal state, I5 transactional outbound intent, I6 duplicate tolerance,
+  I7 bounded coordinator memory, I8 poison termination, I9 payload integrity,
+  and I10 conditional eventual terminality to their implemented owners.
+- Failure mode: architecture intent currently depends on prose spread across
+  guarantees, the state machine, failure model, payload storage, and scheduler
+  documentation. The root README has only a component view, so a reviewer
+  cannot quickly see the transaction/commit points, conditional fence,
+  restart replay, object authority boundary, or bounded deadline path.
+- Expected files/modules: `docs/ARCHITECTURE_DIAGRAMS.md`, `README.md`, this
+  active plan, and local-only queue/status/log handoff files after completion.
 - Durable-state changes: none.
 - Protocol changes: none.
-- Tests required: audit the exact top-level section order; audit every
-  quantitative/reliability claim for a direct report or test link; validate all
-  local Markdown links and linked test/report files; reject unqualified
-  `production-ready` wording; run `git diff --check` and the complete Maven
-  reactor required by the working rules.
-- Documentation required: replace the root README while preserving the current
-  supported commands, explicit limits, and links to deeper authoritative docs.
-- Known non-goals: adding or changing runtime behavior, guarantees, defaults,
-  protocols, schemas, dependencies, benchmark results, report artifacts, or
-  configuration files; creating the additional invariant diagrams reserved
-  for TF-0802; creating the claim/evidence matrix reserved for TF-0803; or
-  changing the stale-result/demo workflow reserved for later tasks.
+- Tests required: assert exactly six Mermaid diagrams and all required
+  diagram titles; assert every diagram has an adjacent invariant declaration;
+  validate every local Markdown link and every named implementation/test
+  target; inspect Mermaid syntax and reject planned components; run
+  `git diff --check` and the complete Maven reactor required by the working
+  rules.
+- Documentation required: add the diagram artifact and link it from the
+  README architecture section without disturbing TF-0801's required order.
+- Known non-goals: changing runtime behavior, topology, schemas,
+  transactions, protocol fields, scheduler bounds, recovery policy, object
+  ownership, or evidence; introducing PostgreSQL, multi-coordinator
+  consensus, clustered broker failover, Kubernetes, or other planned
+  architecture; building TF-0803's claim/evidence matrix.
 
-## Smallest design and claim decisions
+## Diagram-to-invariant plan
 
-1. Use the required opening wording and exactly twelve ordered top-level
-   sections after it: Guarantees; Non-goals; Architecture; Assignment/result
-   protocol; Failure/recovery; Quick start; stale-result demo; benchmark
-   evidence; module map; extension/plugin guide; operational commands; and
-   limitations/future work.
-2. Keep the existing component diagram because TF-0801 requires an
-   architecture diagram. Describe the assignment/result sequence as concise
-   ordered text so TF-0802 remains the owner of additional invariant-tied
-   diagrams.
-3. Link reliability claims directly to focused source tests or report
-   artifacts in the same bullet/table row. Link detailed contract wording to
-   `docs/GUARANTEES.md`, `docs/FAILURE_MODEL.md`, and related scope docs, but do
-   not treat a future-plan document as evidence.
-4. Keep exact report values only in one benchmark table, with the report link
-   in the same row and the report's one-host/synthetic-workload limitation
-   adjacent.
-5. Preserve the one-command Docker quick start and deterministic stale-result
-   proof near the top. Move detailed Maven/runtime/status/DLQ/MinIO/config/CI
-   commands into one compact operational section and link authoritative
-   documents instead of reproducing every environment variable.
-6. Keep the module map after measured evidence, as required. Summarize each
-   role/module in one line and retain compatibility terminology without
-   leading the README with it.
-7. State that RabbitMQ is the sole supported transport but remains
-   transitional and is not broadly production-ready. Keep exactly-once,
-   multi-coordinator, security, participant durability, GUI replay, object
-   retention, and performance-generalization non-goals explicit.
+1. **Component/context:** show requester/executor roles, RabbitMQ, the sole
+   authoritative coordinator, bounded mailbox/services, SQLite/outbox,
+   plugins, and optional MinIO. Name I1-I10 only where that component boundary
+   participates in enforcement or progress.
+2. **Assignment transaction and outbox:** show the scheduler proposal,
+   conditional SQLite generation/assignment/attempt/outbox transaction,
+   post-commit in-memory projection, confirmed RabbitMQ publication, durable
+   sent marking, and identical replay. Protect I3, I5, and I6.
+3. **Result fencing and conditional commit:** show tuple validation for task,
+   state, attempt, assignment UUID, and executor; typed stale/duplicate/current
+   outcomes; `FINALIZING`; and the separate terminal-result/outbox
+   transaction. Protect I2, I3, I4, I5, and I6.
+4. **Coordinator restart/recovery:** show SQLite reopen, resumable job/task
+   hydration, unexpired lease preservation, expired/incomplete assignment
+   release, `FINALIZING` re-aggregation, pending outbox replay, and restored
+   service prerequisites. Protect I1, I3, I4, I5, and I10.
+5. **Object-storage staged-output lifecycle:** show deterministic
+   attempt-scoped upload, length/SHA-256 verification, result reference,
+   conditional authority, requester verification, and bounded orphan
+   classification/deletion that preserves active and authoritative objects.
+   Protect I2, I3, and I9.
+6. **Scheduler queues/deadline flow:** show bounded RabbitMQ prefetch,
+   ordinary/result-reserve lanes, result-first dequeue, bounded cycle stages,
+   active/pending indexes, fake-clock deadline handling, capacity release,
+   retry/failure/assignment decisions, and admission recovery. Protect I4, I7,
+   and I10.
 
 ## Ordered implementation and verification
 
-1. Inventory current README commands, roles, supported workloads, reports,
-   guarantees, and limitations against their authoritative local sources.
-2. Rewrite `README.md` in the mandated order, deduplicating detailed
-   implementation prose into links while preserving verified commands.
-3. Run a structural audit for the twelve exact H2 headings and required
-   opening paragraph.
-4. Audit quantitative values and reliability phrases against direct
-   test/report links; audit `production-ready`, exactly-once, transport, and
-   authority wording.
-5. Validate every local README link and linked evidence target, then run
-   whitespace/diff checks.
-6. Run the complete `.\mvnw.cmd test` reactor, inspect the final diff/status,
-   commit one cohesive TF-0801 documentation change, push it, verify the exact
-   remote hash and both push-tier CI jobs, and update local handoff evidence.
+1. Reconcile each diagram with `docs/GUARANTEES.md`,
+   `docs/STATE_MACHINE.md`, `docs/FAILURE_MODEL.md`,
+   `docs/PAYLOAD_STORAGE.md`, `docs/SCHEDULER.md`, relevant ADRs, current
+   production classes, and focused tests.
+2. Add one concise Mermaid diagram per required flow with an adjacent
+   `Protected invariants` line and focused implementation/evidence links.
+3. Link the artifact from the existing README Architecture section without
+   duplicating the six detailed diagrams there.
+4. Run diagram-count/title/invariant/current-component audits, validate every
+   link, and render-check Mermaid syntax if a repository-compatible renderer
+   is available.
+5. Run the full `.\mvnw.cmd test` reactor, inspect final and staged diffs,
+   commit one cohesive TF-0802 documentation change, push it, verify the exact
+   remote hash and both push-tier CI jobs, then update local handoff evidence.
 
 ## Verification evidence so far
 
-- The README has the required opening definition followed by exactly twelve
-  ordered H2 sections matching the queue sequence.
-- All 82 Markdown links resolve locally or use an external URL; every linked
-  test and report target exists.
-- Exact correctness, scaling, recovery, and overload values match their
-  report artifacts.
-- Reliability and quantitative statements point to focused Java tests or
-  measured reports; the only `production-ready` occurrence is an explicit
-  narrow limitation.
-- `docker compose config --services` resolves the documented broker-backed
-  topology: `rabbitmq`, `coordinator`, `peer-a`, `peer-b`, and `submitter`.
-- The complete 25-module `.\mvnw.cmd test` reactor passed in 41.236 seconds,
-  including the real MinIO and RabbitMQ contract suites.
-- `git diff --check` passes. Staged-diff, commit, push, and remote CI gates
-  remain pending.
+- `docs/ARCHITECTURE_DIAGRAMS.md` contains exactly the six required ordered
+  Mermaid diagrams, and every diagram has an adjacent `Protected invariants`
+  declaration. I1-I10 are all named.
+- Current production classes, state-machine transitions, payload ownership,
+  scheduler stages, recovery behavior, and ADR boundaries were reconciled
+  before finalizing the flows. Planned HA, database, broker, orchestration, and
+  deletion components are absent from the Mermaid blocks.
+- All seven Mermaid blocks across the README and new artifact rendered
+  successfully to SVG through an in-memory syntax check.
+- All 109 links across the README and diagram artifact resolve. TF-0801's
+  twelve-section README order and narrowly qualified production boundary are
+  unchanged.
+- Documentation whitespace and `git diff --check` pass. The complete
+  25-module `.\mvnw.cmd test` reactor passed in 46.636 seconds, including the
+  real MinIO and RabbitMQ contract suites.
+- Staged-diff, commit, push, exact-remote-hash, and remote CI gates remain
+  pending.
