@@ -55,4 +55,5 @@ java/out_PEER_*/
 agents/
 .agents/
 .codex/
+AGENTS.md
 WORKING_RULES.md
