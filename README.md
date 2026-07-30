@@ -232,6 +232,19 @@ It requires host Java and Docker. Runtime logs are written under
 `target\demo-logs`; use `-KeepRabbitMq` only when the local broker should
 remain running.
 
+For a correlated reviewer narrative covering two executors, lease-based
+reassignment, stale-result rejection, terminal completion, coordinator
+restart, persisted-result retrieval, metrics, and outbox state, run:
+
+```powershell
+.\scripts\demo-reviewer.ps1
+```
+
+The command starts disposable RabbitMQ and MinIO containers and asserts a
+fixed, approximately five-minute-or-less post-start trace. Its real and
+controlled boundaries, expected output, and evidence links are documented in
+the [five-minute reviewer demo](docs/REVIEWER_DEMO.md).
+
 ## One-command stale-result demo
 
 Run the deterministic lease-expiry and same-executor ABA proof without Docker
